@@ -162,14 +162,36 @@ def prompt_user_for_ask_user(payload: dict) -> str:
     return json.dumps({"answer": line})
 
 
+# OpenRouter: unified API for 400+ models (https://openrouter.ai/docs)
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
+
+
+def _make_llm_client() -> tuple[OpenAI, str]:
+    """Build LLM client and model name. Prefer OpenRouter if OPENROUTER_API_KEY is set."""
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if openrouter_key:
+        model = os.environ.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
+        client = OpenAI(
+            api_key=openrouter_key,
+            base_url=OPENROUTER_BASE_URL,
+        )
+        return client, model
+    if openai_key:
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        client = OpenAI(api_key=openai_key)
+        return client, model
+    print(
+        "Set OPENROUTER_API_KEY (recommended, see https://openrouter.ai) or OPENAI_API_KEY to run the client.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def run_agent_loop() -> None:
     """Run the chat loop: user message -> LLM -> tool calls -> resolve ask_user in CLI -> loop until reply."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    if not api_key:
-        print("Set OPENAI_API_KEY to run the client.", file=sys.stderr)
-        sys.exit(1)
-    client = OpenAI(api_key=api_key)
+    client, model = _make_llm_client()
     messages: list[dict] = [
         {"role": "system", "content": flow_instructions()},
     ]

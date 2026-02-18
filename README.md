@@ -2,6 +2,8 @@
 
 Chat-based rental search assistant: natural-language search, shortlist, and simulated viewing requests. Uses REALTOR.CA via **pyRealtor** only; the Apify backend is **not** used in this MVP.
 
+**LLM:** The client uses [OpenRouter](https://openrouter.ai) by default (one API key, 400+ models). You can still use direct OpenAI via `OPENAI_API_KEY`.
+
 ## Setup
 
 ### Conda environment
@@ -24,8 +26,10 @@ pip install -e .
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | **Required** for the client. API key for the LLM (OpenAI or compatible). |
-| `OPENAI_MODEL` | Optional. Model name (default: `gpt-4o-mini`). |
+| `OPENROUTER_API_KEY` | **Recommended** for the client. [OpenRouter](https://openrouter.ai) API key — one key for 400+ models (OpenAI, Anthropic, etc.). |
+| `OPENROUTER_MODEL` | Optional. OpenRouter model ID (default: `openai/gpt-4o-mini`). Examples: `anthropic/claude-3.5-sonnet`, `google/gemini-pro`. |
+| `OPENAI_API_KEY` | Alternative to OpenRouter. Direct OpenAI API key (used if `OPENROUTER_API_KEY` is not set). |
+| `OPENAI_MODEL` | Optional when using OpenAI. Model name (default: `gpt-4o-mini`). |
 | `USE_PROXY` | Optional. Set to `1`, `true`, or `yes` to enable proxy for pyRealtor (e.g. if REALTOR.CA rate-limits). |
 
 ## Running
@@ -51,9 +55,11 @@ The server exposes three tools: `ask_user`, `rental_search`, `simulate_viewing_r
 Runs the agent loop with a CLI: you type your search, the LLM calls tools; when it calls `ask_user`, you are prompted for answers or multi-select in the terminal.
 
 ```bash
-set OPENAI_API_KEY=your-key
+set OPENROUTER_API_KEY=your-openrouter-key
 rental-search-client
 ```
+
+Or with OpenAI directly: `set OPENAI_API_KEY=your-key` (then `OPENROUTER_API_KEY` is ignored).
 
 Or:
 
@@ -61,7 +67,7 @@ Or:
 python -m rental_search_agent.client
 ```
 
-You can set `OPENAI_MODEL` to use a different model (e.g. `gpt-4o`).
+Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or `OPENAI_MODEL` when using OpenAI directly.
 
 ## Backend
 

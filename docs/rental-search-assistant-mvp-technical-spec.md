@@ -64,6 +64,10 @@ flowchart TB
 
 **Data flow (summary):** User ↔ Client ↔ Agent ↔ MCP. For search: `rental_search` → Adapter → pyRealtor ↔ REALTOR.CA; Adapter returns mapped listings to `rental_search` → Agent. `ask_user` and `simulate_viewing_request` do not call external services in this diagram (user input for `ask_user` is gathered via the Client/UI).
 
+### 2.1 LLM provider (OpenRouter)
+
+The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backend: a single API (`https://openrouter.ai/api/v1`) and one API key provide access to 400+ models (OpenAI, Anthropic, Google, etc.) with a normalized chat-completions interface. The implementation uses the OpenAI-compatible Python client with `base_url` and `OPENROUTER_API_KEY`; model is selected via `OPENROUTER_MODEL` (e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet`). If `OPENROUTER_API_KEY` is not set, the client falls back to direct OpenAI (`OPENAI_API_KEY`, `OPENAI_MODEL`).
+
 ---
 
 ## 3. Conventions

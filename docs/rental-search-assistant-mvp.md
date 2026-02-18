@@ -151,6 +151,7 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 
 ## 7. Design Notes (MVP)
 
+- **LLM:** The client uses [OpenRouter](https://openrouter.ai) by default for LLM calls (unified API for many models); direct OpenAI remains supported via environment variables.
 - **Single engine:** Choose one rental API or one site to scrape; document it.
 - **No calendar:** Preferred times are free text from the user only.
 - **No double-booking guarantee:** Optional in-memory “log” is fine for learning; not required.
