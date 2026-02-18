@@ -1,0 +1,10 @@
+# Build and cache
+*.egg-info/
+__pycache__/
+*.pyc
+.eggs/
+
+# Env
+.env
+.venv/
+venv/
