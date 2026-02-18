@@ -1,0 +1,14 @@
+# Rental Search Assistant MVP — dependencies
+# Use conda env realtor_agent; install with: pip install -r requirements.txt
+
+# Backend: REALTOR.CA via pyRealtor
+pyRealtor>=0.2.6
+
+# MCP server
+mcp>=1.0.0
+
+# Schemas and validation
+pydantic>=2.0.0
+
+# LLM client (OpenAI-compatible for agent)
+openai>=1.0.0
