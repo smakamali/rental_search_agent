@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rental-search-agent"
+version = "0.1.0"
+description = "Rental Search Assistant MVP — MCP server, pyRealtor adapter, LLM agent, Chat UI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyRealtor>=0.2.6",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "openai>=1.0.0",
+]
+
+[project.scripts]
+rental-search-mcp = "rental_search_agent.server:main"
+rental-search-client = "rental_search_agent.client:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
