@@ -1,11 +1,16 @@
 """Streamlit chat UI for the rental search agent. Uses run_agent_step from client."""
 
+import html
 import json
 import os
 from pathlib import Path
 
 import streamlit as st
 
+try:
+    import folium
+except ImportError:
+    folium = None
 try:
     import pydeck as pdk
 except ImportError:
@@ -107,7 +112,7 @@ def _init_session_state() -> None:
 
 
 def _get_latest_search_listings(messages: list[dict]) -> list[dict]:
-    """Extract the most recent rental_search result from message history.
+    """Extract the most recent rental_search or filter_listings result from message history.
     Returns the 'listings' array (list of listing dicts) or empty list if none found.
     """
     listings = []
@@ -126,8 +131,52 @@ def _get_latest_search_listings(messages: list[dict]) -> list[dict]:
     return listings
 
 
+def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
+    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, rent, URL."""
+    rows = []
+    for i, listing in enumerate(listings):
+        bath = listing.get("bathrooms")
+        sqft = listing.get("sqft")
+        rent = listing.get("price_display") or (
+            f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
+        )
+        rows.append({
+            "rank": i + 1,
+            "MLS id": listing.get("id") or "—",
+            "address": listing.get("address") or "—",
+            "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
+            "bath": str(int(bath)) if bath is not None else "—",
+            "size": str(int(sqft)) if sqft is not None else "—",
+            "rent": rent,
+            "URL": listing.get("url") or "",
+        })
+    return rows
+
+
+def _render_results_table(listings: list[dict]) -> None:
+    """Render search results as a dataframe with rank, MLS id, address, bed, bath, size, rent, URL link."""
+    if not listings:
+        return
+    rows = _listings_to_table_rows(listings)
+    st.dataframe(
+        rows,
+        column_config={
+            "rank": st.column_config.NumberColumn("Rank", format="%d"),
+            "MLS id": st.column_config.TextColumn("MLS id"),
+            "address": st.column_config.TextColumn("Address"),
+            "bed": st.column_config.TextColumn("Bed"),
+            "bath": st.column_config.TextColumn("Bath"),
+            "size": st.column_config.TextColumn("Size (sqft)"),
+            "rent": st.column_config.TextColumn("Rent"),
+            "URL": st.column_config.LinkColumn("URL", display_text="Link"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
-    """Build list of {lat, lon, label} for listings with valid coordinates.
+    """Build list of {lat, lon, label, url} for listings with valid coordinates.
     Returns (map_points, center_lat, center_lon). Center is None if no points.
     """
     points = []
@@ -143,7 +192,8 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
             continue
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
-        points.append({"lat": lat, "lon": lon, "label": str(i + 1)})
+        url = listing.get("url") or ""
+        points.append({"lat": lat, "lon": lon, "label": str(i + 1), "url": url})
         lats.append(lat)
         lons.append(lon)
     if not points:
@@ -154,43 +204,67 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
 
 
 def _render_results_map(map_points: list[dict], center_lat: float, center_lon: float) -> None:
-    """Render a PyDeck map with scatter points and numeric labels (listing order)."""
-    if pdk is None:
-        st.caption("Map unavailable: install pydeck to show results on a map.")
+    """Render a map with points labeled by listing order (1, 2, 3, ...). Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
+    if folium is not None:
+        # Folium: markers with DivIcon so all numbers (1–9, 10, 11, ...) render correctly
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+        for pt in map_points:
+            label = pt["label"]
+            url = pt.get("url") or "#"
+            url_escaped = html.escape(url)
+            folium.Marker(
+                location=[pt["lat"], pt["lon"]],
+                icon=folium.DivIcon(
+                    icon_size=(32, 32),
+                    icon_anchor=(16, 16),
+                    html=(
+                        '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
+                        'line-height:30px;width:30px;height:30px;border-radius:50%;'
+                        'background-color:#4682B4;border:2px solid white;">'
+                        f'<a href="{url_escaped}" target="_blank" rel="noopener" '
+                        'style="color:white;text-decoration:none;">{}</a>'
+                    ).format(label),
+                ),
+            ).add_to(m)
+        st.components.v1.html(m._repr_html_(), height=400, scrolling=False)
         return
-    scatter = pdk.Layer(
-        "ScatterplotLayer",
-        data=map_points,
-        get_position="[lon, lat]",
-        get_radius=200,
-        get_fill_color=[70, 130, 180],
-        radius_min_pixels=6,
-        radius_max_pixels=12,
-    )
-    text = pdk.Layer(
-        "TextLayer",
-        data=map_points,
-        get_position="[lon, lat]",
-        get_text="label",
-        get_size=14,
-        get_color=[255, 255, 255],
-        get_text_anchor="middle",
-        get_alignment_baseline="center",
-    )
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=11,
-        pitch=0,
-    )
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[scatter, text],
-            initial_view_state=view_state,
-        ),
-        use_container_width=True,
-        height=400,
-    )
+    if pdk is not None:
+        # Fallback: PyDeck (labels 10+ may not render due to deck.gl TextLayer bug)
+        scatter = pdk.Layer(
+            "ScatterplotLayer",
+            data=map_points,
+            get_position="[lon, lat]",
+            get_radius=200,
+            get_fill_color=[70, 130, 180],
+            radius_min_pixels=6,
+            radius_max_pixels=12,
+        )
+        text = pdk.Layer(
+            "TextLayer",
+            data=map_points,
+            get_position="[lon, lat]",
+            get_text="label",
+            get_size=14,
+            get_color=[255, 255, 255],
+            get_text_anchor="middle",
+            get_alignment_baseline="center",
+        )
+        view_state = pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lon,
+            zoom=11,
+            pitch=0,
+        )
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[scatter, text],
+                initial_view_state=view_state,
+            ),
+            use_container_width=True,
+            height=400,
+        )
+        return
+    st.caption("Map unavailable: install folium (recommended) or pydeck to show results on a map.")
 
 
 def _render_chat_history() -> None:
@@ -308,8 +382,11 @@ def main() -> None:
 
     _render_chat_history()
 
-    # Show search results map when we have plottable listings (Option A: dedicated block)
+    # Search results: table (above) then map
     listings = _get_latest_search_listings(st.session_state["messages"])
+    if listings:
+        with st.expander("Search results table", expanded=True):
+            _render_results_table(listings)
     map_points, center_lat, center_lon = _build_map_data(listings)
     if map_points and center_lat is not None and center_lon is not None:
         with st.expander("Search results map", expanded=True):
