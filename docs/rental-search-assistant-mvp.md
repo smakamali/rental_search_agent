@@ -21,6 +21,8 @@ flowchart TB
     subgraph MCP["MCP Server"]
         T1[ask_user]
         T2[rental_search]
+        T2b[filter_listings]
+        T2c[summarize_listings]
         T3[simulate_viewing_request]
     end
 
@@ -37,7 +39,7 @@ flowchart TB
 |-----------|------|
 | **User** | Supplies natural-language search, answers clarification and approval prompts, receives shortlist and confirmation. |
 | **Client (Chat + Agent)** | Chat UI and LLM agent: parses intent, orchestrates the flow, calls MCP tools, presents shortlist and final summary. |
-| **MCP Server** | Exposes three tools: `ask_user` (clarification/approval), `rental_search` (listings), `simulate_viewing_request` (mock submit). |
+| **MCP Server** | Exposes five tools: `ask_user` (clarification/approval), `rental_search` (listings), `filter_listings` (narrow/sort), `summarize_listings` (stats), `simulate_viewing_request` (mock submit). |
 | **Rental Search API** | Single external source used by `rental_search` to return listings (API or scraped site). |
 
 ---
@@ -101,7 +103,7 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 - **Tool:** `rental_search(filters)` with e.g. `min_bedrooms`, `min_sqft`, `rent_min`, `rent_max`, `location`.
 - **Backend:** One rental API or one scraped site (no multiple engines).
 - **Return shape:** List of listings, e.g.  
-  `{ id, title, url, address, price, bedrooms, sqft?, source }`.
+  `{ id, title, url, address, price, bedrooms, sqft?, source, bathrooms?, latitude?, longitude?, ... }`. Streamlit UI shows a table and map (when coordinates exist).
 - Agent calls this **once** after clarification. The result list is the **shortlist** (no verification step). This is a single *logical* search from the agent’s perspective; the backend may use one or more API calls internally (e.g. for pagination).
 
 ---
@@ -130,6 +132,8 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 |-------|------|------|
 | Tool  | `ask_user(prompt, choices[], allow_multiple?)` | Same tool for clarification (single answer) and approval (multi-select). Use `allow_multiple: true` for “which listings?”; false/omitted for viewing times, geography, etc. |
 | Tool  | `rental_search(filters)` | Search one rental engine; return listing list. |
+| Tool  | `filter_listings(filters?, sort_by?, ascending?)` | Narrow and/or sort current search results in-memory. Operates on last rental_search/filter_listings result. |
+| Tool  | `summarize_listings()` | Compute statistics (price, bedrooms, bathrooms, size, property types) for current results. Operates on last rental_search/filter_listings result. |
 | Tool  | `simulate_viewing_request(listing_url, timeslot, user_details)` | “Submit” viewing request (no real form; return summary/link). |
 
 **Not in MVP:** `check_proximity`, `get_available_timeslots`, `get_viewing_requests`, `log_viewing_request`, real `submit_viewing_request`, resources like `user_profile://contact` or `config://proximity`.
@@ -139,13 +143,17 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 ## 6. Agent Flow (MVP End-to-End)
 
 1. **Parse** — From user message, extract: beds, sqft, rent range, location.
-2. **Clarify** — Call `ask_user` (single-answer) for **preferred days and times for viewings** (required). Optionally one geography question. Store viewing preference.
+2. **Clarify geography (optional)** — If location ambiguous, `ask_user` for geography. Do not ask for viewing times yet.
 3. **Search** — Call `rental_search(filters)` once; result list = shortlist. If no results, see [Error and empty states](#8-error-and-empty-states-mvp).
-4. **Present** — Show shortlist to user.
-5. **Approve** — `ask_user` with multi-select: which listings to request viewings for. If user selects none, confirm and stop (no simulate step).
-6. **Collect user details** — Before the first viewing request, collect name, email, and phone via `ask_user` or chat if not already known. Use this for all subsequent `simulate_viewing_request` calls.
-7. **Simulate submit** — For each approved listing, pick a time from the user’s viewing preference, call `simulate_viewing_request(listing_url, timeslot, user_details)`.
-8. **Confirm** — Reply with summary: “Viewing requests [simulated] for [A, B] at [times].”
+4. **Present** — Call `summarize_listings` and produce a bullet-point summary. Show shortlist in a table (and optionally a map when coordinates exist).
+5. **Narrow/sort (optional)** — If user asks to filter or sort, call `filter_listings` with criteria and/or sort options, then `summarize_listings` again and re-present.
+6. **Confirm results** — `ask_user` to confirm results look good or need refining before choosing listings. If refine, loop to step 5; if good, continue.
+7. **Viewing preference** — Call `ask_user` (single-answer) for **preferred days and times for viewings** (required). Store viewing preference. Only ask after results are presented.
+8. **Approve** — `ask_user` with multi-select: which listings to request viewings for. If user selects none, confirm and stop (no simulate step).
+9. **Collect user details** — Before the first viewing request, collect name, email, and phone via `ask_user` or chat if not already known.
+10. **Verify contact** — Show user details and ask for confirmation before simulate.
+11. **Simulate submit** — For each approved listing, pick a time from the user’s viewing preference, call `simulate_viewing_request(listing_url, timeslot, user_details)`.
+12. **Confirm** — Reply with summary: “Viewing requests [simulated] for [A, B] at [times].”
 
 ---
 
