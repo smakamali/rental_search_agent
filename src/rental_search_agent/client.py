@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -167,6 +168,21 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
 
 
+def _load_env_file(path: Path) -> None:
+    """Load KEY=VALUE lines from path into os.environ if not already set."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+
+
 def _make_llm_client() -> tuple[OpenAI, str]:
     """Build LLM client and model name. Prefer OpenRouter if OPENROUTER_API_KEY is set."""
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -176,6 +192,10 @@ def _make_llm_client() -> tuple[OpenAI, str]:
         client = OpenAI(
             api_key=openrouter_key,
             base_url=OPENROUTER_BASE_URL,
+            default_headers={
+                "HTTP-Referer": "https://github.com/smakamali/rental_search_agent",
+                "X-Title": "Rental Search Assistant",
+            },
         )
         return client, model
     if openai_key:
@@ -191,6 +211,8 @@ def _make_llm_client() -> tuple[OpenAI, str]:
 
 def run_agent_loop() -> None:
     """Run the chat loop: user message -> LLM -> tool calls -> resolve ask_user in CLI -> loop until reply."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    _load_env_file(project_root / ".env")
     client, model = _make_llm_client()
     messages: list[dict] = [
         {"role": "system", "content": flow_instructions()},
