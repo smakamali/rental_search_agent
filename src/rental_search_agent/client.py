@@ -20,7 +20,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "ask_user",
-            "description": "Ask the user for clarification or approval. Single answer (allow_multiple=False) or multi-select (allow_multiple=True). For approval use choices = listing labels that include id (e.g. '[1] 123 Main St — $2800 (id: xyz)').",
+            "description": "Ask the user for clarification or approval. Single answer (allow_multiple=False) or multi-select (allow_multiple=True). When asking which listings to request viewings for, you MUST provide choices (one per listing with id, e.g. '[1] 123 Main St — $2800 (id: xyz)') so the user gets a dropdown—never ask for listing numbers in chat.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -28,7 +28,7 @@ TOOLS = [
                     "choices": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Predefined options. Omit for free text.",
+                        "description": "Predefined options for dropdown/multiselect. REQUIRED when asking which listings to request viewings for—provide one choice per listing (e.g. '[1] 123 Main St — $2800 (id: xyz)'). Omit only for free-text questions.",
                     },
                     "allow_multiple": {
                         "type": "boolean",
@@ -144,7 +144,8 @@ def _get_current_listings_from_messages(messages: list[dict]) -> list[dict]:
                 return raw
         if isinstance(data, dict) and "error" in data:
             continue
-        break
+        # Tool results like ask_user {answer}/{selected} don't contain listings; keep looking.
+        continue
     return []
 
 
