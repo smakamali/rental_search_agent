@@ -320,6 +320,16 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     args,
                     current_listings=current_listings if name in ("filter_listings", "summarize_listings") else None,
                 )
+                # Update current_listings from tool results so chained tools in same batch see fresh data
+                if name in ("rental_search", "filter_listings"):
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, dict) and "listings" in data:
+                            raw = data.get("listings")
+                            if isinstance(raw, list):
+                                current_listings = raw
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 if name == "ask_user":
                     payload = json.loads(result)
                     if payload.get("request_user_input"):
