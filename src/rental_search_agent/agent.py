@@ -60,9 +60,16 @@ def flow_instructions() -> str:
 
 3. **Search** Call rental_search with the filter object. If the tool returns an error (e.g. "search temporarily unavailable"), tell the user and optionally suggest retrying. If the response has listings: [] and total_count: 0, do NOT run the approval step; suggest relaxing filters and offer to search again.
 
-4. **Present** In the UI, results are shown in a table (rank, MLS id, address, bed, bath, size, rent, URL). Summarize briefly in chat (e.g. count and range) and point the user to the table. The numbers/rank must match the order of listings and the map labels.
+4. **Present** In the UI, results are shown in a table (rank, MLS id, address, bed, bath, size, rent, URL). Call summarize_listings to get statistics, then produce a **bullet-point summary** with one bullet per parameter: Count, Price, Bedrooms, Bathrooms, Size (if available), Property types (if available). Each bullet should contain human-readable wording (not raw stats). Example format:
+   - **Count:** The search returned 45 listings.
+   - **Price:** Rent ranges from $950 to $3,000, with a median of $2,750.
+   - **Bedrooms:** Most are two-bedroom (42), with 3 three-bedroom options.
+   - **Bathrooms:** Most have 2 bathrooms (43), with 1 listing at 1.5 baths and 1 at 3 baths.
+   - **Size:** Sizes range from 591 to 1,500 sq ft.
+   - **Property types:** Most are Apartments (38), followed by Houses (4) and Townhouses (3).
+   **Important:** Bathroom keys like "1.5" mean one-and-a-half bathrooms, NOT 15—always write "1.5 baths", never "15 baths". Format prices as currency ($X,XXX). End by pointing the user to the table. The numbers/rank must match the order of listings and the map labels.
 
-4a. **Narrow and/or sort (optional)** If the user asks to narrow, filter, or sort the results (e.g. "only 1 bathroom", "under $2500", "sort by price", "cheapest first", "show most expensive"), call filter_listings with the appropriate criteria (if any) and/or sort_by (price, bedrooms, bathrooms, sqft, address, id, title) and ascending (true for cheapest/smallest first, false for most expensive/largest first). You can filter and sort in a single call. Then re-present the results (same as step 4) and continue to Approve. If the filtered list is empty, say so and suggest relaxing the filter or searching again.
+4a. **Narrow and/or sort (optional)** If the user asks to narrow, filter, or sort the results (e.g. "only 1 bathroom", "under $2500", "sort by price", "cheapest first", "show most expensive"), call filter_listings with the appropriate criteria (if any) and/or sort_by (price, bedrooms, bathrooms, sqft, address, id, title) and ascending (true for cheapest/smallest first, false for most expensive/largest first). You can filter and sort in a single call. Then call summarize_listings again and re-present with a bullet-point summary (same format as step 4), then continue to Approve. If the filtered list is empty, say so and suggest relaxing the filter or searching again.
 
 5. **Approve** Call ask_user with prompt like "Which listings do you want to request viewings for?" and choices = the listing labels (each including id so we can map back), allow_multiple: true. If the user selects none (selected: []), reply "No viewings requested." and stop—do not collect user details or call simulate_viewing_request.
 
