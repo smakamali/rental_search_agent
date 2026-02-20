@@ -170,7 +170,7 @@ def _render_results_table(listings: list[dict]) -> None:
             "rent": st.column_config.TextColumn("Rent"),
             "URL": st.column_config.LinkColumn("URL", display_text="Link"),
         },
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
 
@@ -297,7 +297,7 @@ def _render_results_map(map_points: list[dict], center_lat: float, center_lon: f
                 layers=[scatter, text],
                 initial_view_state=view_state,
             ),
-            use_container_width=True,
+            width='stretch',
             height=400,
         )
         return
