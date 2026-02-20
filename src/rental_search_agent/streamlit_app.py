@@ -145,7 +145,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "MLS id": listing.get("id") or "—",
             "address": listing.get("address") or "—",
             "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
-            "bath": str(int(bath)) if bath is not None else "—",
+            "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
             "rent": rent,
             "URL": listing.get("url") or "",
