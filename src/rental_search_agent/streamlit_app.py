@@ -175,6 +175,43 @@ def _render_results_table(listings: list[dict]) -> None:
     )
 
 
+def _listings_cache_key(listings: list[dict]) -> str:
+    """Stable JSON string for listings, used as cache key. Lists/dicts must be hashable for st.cache_data."""
+    return json.dumps(listings, sort_keys=True, default=str)
+
+
+@st.cache_data(show_spinner=False)
+def _get_map_html_cached(listings_json: str) -> str | None:
+    """Build Folium map HTML from listings. Returns None if no map or Folium unavailable.
+    Cached by listings content so map is not rebuilt when results are unchanged."""
+    if folium is None:
+        return None
+    listings = json.loads(listings_json) if listings_json else []
+    map_points, center_lat, center_lon = _build_map_data(listings)
+    if not map_points or center_lat is None or center_lon is None:
+        return None
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+    for pt in map_points:
+        label = pt["label"]
+        url = pt.get("url") or "#"
+        url_escaped = html.escape(url)
+        folium.Marker(
+            location=[pt["lat"], pt["lon"]],
+            icon=folium.DivIcon(
+                icon_size=(32, 32),
+                icon_anchor=(16, 16),
+                html=(
+                    '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
+                    'line-height:30px;width:30px;height:30px;border-radius:50%;'
+                    'background-color:#4682B4;border:2px solid white;">'
+                    f'<a href="{url_escaped}" target="_blank" rel="noopener" '
+                    'style="color:white;text-decoration:none;">{}</a>'
+                ).format(label),
+            ),
+        ).add_to(m)
+    return m._repr_html_()
+
+
 def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
     """Build list of {lat, lon, label, url} for listings with valid coordinates.
     Returns (map_points, center_lat, center_lon). Center is None if no points.
@@ -368,7 +405,7 @@ def _render_ask_form(pending: dict) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Rental Search Assistant", page_icon="🏠")
+    st.set_page_config(page_title="Rental Search Assistant", page_icon="🏠", layout="wide")
     st.title("Rental Search Assistant")
 
     _ensure_env_loaded()
@@ -380,34 +417,45 @@ def main() -> None:
         st.error("Set OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY in .env or environment to run the assistant.")
         st.stop()
 
-    _render_chat_history()
+    col_content, col_chat = st.columns([2, 1], vertical_alignment="bottom")
 
-    # Search results: table (above) then map
-    listings = _get_latest_search_listings(st.session_state["messages"])
-    if listings:
-        with st.expander("Search results table", expanded=True):
-            _render_results_table(listings)
-    map_points, center_lat, center_lon = _build_map_data(listings)
-    if map_points and center_lat is not None and center_lon is not None:
-        with st.expander("Search results map", expanded=True):
-            _render_results_map(map_points, center_lat, center_lon)
-    elif listings and not map_points:
-        with st.expander("Search results map", expanded=False):
-            st.caption("No map: addresses have no coordinates.")
+    with col_content:
+        listings = _get_latest_search_listings(st.session_state["messages"])
+        if listings:
+            with st.expander("Search results table", expanded=True):
+                _render_results_table(listings)
+            map_points, center_lat, center_lon = _build_map_data(listings)
+            if map_points and center_lat is not None and center_lon is not None:
+                with st.expander("Search results map", expanded=True):
+                    if folium is not None:
+                        map_html = _get_map_html_cached(_listings_cache_key(listings))
+                        if map_html:
+                            st.components.v1.html(map_html, height=400, scrolling=False)
+                        else:
+                            _render_results_map(map_points, center_lat, center_lon)
+                    else:
+                        _render_results_map(map_points, center_lat, center_lon)
+            elif not map_points:
+                with st.expander("Search results map", expanded=False):
+                    st.caption("No map: addresses have no coordinates.")
+        else:
+            st.caption("Run a search to see results here.")
 
-    pending = st.session_state.get("pending_ask")
-    if pending is not None:
-        with st.chat_message("assistant"):
-            _render_ask_form(pending)
-        return
-
-    if prompt := st.chat_input("Type your search request (e.g. 2 bed in Vancouver under 3000)"):
-        st.session_state["messages"].append({"role": "user", "content": prompt})
-        messages, payload = run_agent_step(client, model, st.session_state["messages"])
-        st.session_state["messages"] = messages
-        if payload is not None:
-            st.session_state["pending_ask"] = payload
-        st.rerun()
+    with col_chat:
+        st.subheader("Chat")
+        _render_chat_history()
+        pending = st.session_state.get("pending_ask")
+        if pending is not None:
+            with st.chat_message("assistant"):
+                _render_ask_form(pending)
+            return
+        if prompt := st.chat_input("Type your search request (e.g. 2 bed in Vancouver under 3000)"):
+            st.session_state["messages"].append({"role": "user", "content": prompt})
+            messages, payload = run_agent_step(client, model, st.session_state["messages"])
+            st.session_state["messages"] = messages
+            if payload is not None:
+                st.session_state["pending_ask"] = payload
+            st.rerun()
 
 
 def run_ui() -> None:
