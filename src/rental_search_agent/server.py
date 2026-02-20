@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP
 
 from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.filtering import filter_listings as do_filter_listings
+from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.models import (
     ListingFilterCriteria,
     RentalSearchFilters,
@@ -71,6 +72,14 @@ def filter_listings(
     except Exception as e:
         raise ValueError(f"Invalid filter criteria: {e}") from e
     return do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending)
+
+
+@mcp.tool()
+def summarize_listings(listings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute statistics (price min/median/mean/max, bedroom distribution, bathroom distribution, size stats, property types) for the current search results. Pass the current list (e.g. from last rental_search or filter_listings). Returns a stats dict for summary."""
+    if not listings or not isinstance(listings, list):
+        raise ValueError("listings is required and must be a non-empty list of listing objects.")
+    return do_summarize_listings(listings)
 
 
 def do_simulate_viewing_request(
