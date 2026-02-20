@@ -70,7 +70,11 @@ def _row_to_listing(row: pd.Series, listing_type: str) -> Listing:
     if pd.isna(bedrooms) or bedrooms < 0:
         bedrooms = 0
 
-    url = str(row.get("Website", "") or "").strip() or f"https://www.realtor.ca/listing/{row.get('MLS', '')}"
+    raw_url = str(row.get("Website", "") or "").strip() or f"https://www.realtor.ca/listing/{row.get('MLS', '')}"
+    if raw_url.startswith("http://") or raw_url.startswith("https://"):
+        url = raw_url
+    else:
+        url = "https://www.realtor.ca" + (raw_url if raw_url.startswith("/") else "/" + raw_url)
     title = str(row.get("Description", "") or "")[:200] or f"Listing {row.get('MLS', '')}"
     address = str(row.get("Address", "") or "").strip() or "Address not provided"
     postal_code = str(row.get("Postal Code", "") or "").strip() or None
