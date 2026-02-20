@@ -48,7 +48,7 @@ Or:
 python -m rental_search_agent.server
 ```
 
-The server exposes three tools: `ask_user`, `rental_search`, `simulate_viewing_request`. It uses stdio by default.
+The server exposes five tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`. It uses stdio by default.
 
 ### Chat client (CLI)
 
@@ -71,7 +71,7 @@ Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or
 
 ### Streamlit UI
 
-Web chat interface using the same agent and tools. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
+Web chat interface using the same agent and tools. Displays search results in a table and on a map (when coordinates are available). Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
 
 ```bash
 rental-search-ui
