@@ -11,6 +11,7 @@ from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.agent import flow_instructions
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.models import ListingFilterCriteria, RentalSearchFilters
+from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import do_simulate_viewing_request
 
 # Tool definitions for the LLM (OpenAI function-calling format)
@@ -89,6 +90,14 @@ TOOLS = [
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                 },
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_listings",
+            "description": "Compute statistics (price min/median/mean/max, bedroom distribution, bathroom distribution, size stats, property types) for the current search results. Call when presenting results to produce a structured summary. Uses the most recent rental_search or filter_listings result.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -173,6 +182,12 @@ def run_tool(name: str, arguments: dict, *, current_listings: list[dict] | None 
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
         resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending)
         return resp.model_dump_json()
+    if name == "summarize_listings":
+        listings = current_listings if current_listings is not None else []
+        if not listings:
+            return json.dumps({"error": "No current search results to summarize. Run a search first."})
+        result = do_summarize_listings(listings)
+        return json.dumps(result)
     if name == "simulate_viewing_request":
         try:
             resp = do_simulate_viewing_request(
@@ -302,7 +317,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                 result = run_tool(
                     name,
                     args,
-                    current_listings=current_listings if name == "filter_listings" else None,
+                    current_listings=current_listings if name in ("filter_listings", "summarize_listings") else None,
                 )
                 if name == "ask_user":
                     payload = json.loads(result)
