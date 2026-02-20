@@ -63,6 +63,19 @@ class UserDetails(BaseModel):
     preferred_times: Optional[str] = Field(None, description="Free-text viewing preference.")
 
 
+class ListingFilterCriteria(BaseModel):
+    """Criteria to narrow in-memory search results (input to filter_listings). All optional."""
+
+    min_bathrooms: Optional[int] = Field(None, ge=0, description="Minimum number of bathrooms.")
+    max_bathrooms: Optional[int] = Field(None, ge=0, description="Maximum number of bathrooms.")
+    min_bedrooms: Optional[int] = Field(None, ge=0, description="Minimum number of bedrooms.")
+    max_bedrooms: Optional[int] = Field(None, ge=0, description="Maximum number of bedrooms.")
+    min_sqft: Optional[int] = Field(None, ge=0, description="Minimum square footage.")
+    max_sqft: Optional[int] = Field(None, ge=0, description="Maximum square footage.")
+    rent_min: Optional[float] = Field(None, ge=0, description="Minimum rent (CAD/month).")
+    rent_max: Optional[float] = Field(None, ge=0, description="Maximum rent (CAD/month).")
+
+
 class RentalSearchResponse(BaseModel):
     """§5.2 rental_search response."""
 
