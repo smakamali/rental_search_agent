@@ -12,3 +12,8 @@ pydantic>=2.0.0
 
 # LLM client (OpenAI-compatible for agent)
 openai>=1.0.0
+
+# Streamlit UI
+streamlit>=1.28
+folium>=0.15.0
+pydeck>=0.8.0
