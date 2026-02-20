@@ -9,7 +9,8 @@ from openai import OpenAI
 
 from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.agent import flow_instructions
-from rental_search_agent.models import RentalSearchFilters
+from rental_search_agent.filtering import filter_listings as do_filter_listings
+from rental_search_agent.models import ListingFilterCriteria, RentalSearchFilters
 from rental_search_agent.server import do_simulate_viewing_request
 
 # Tool definitions for the LLM (OpenAI function-calling format)
@@ -48,7 +49,7 @@ TOOLS = [
                 "properties": {
                     "filters": {
                         "type": "object",
-                        "description": "Rental search filters: min_bedrooms (int), location (str) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, rent_min, rent_max, listing_type (for_rent, for_sale, for_sale_or_rent).",
+                        "description": "Rental search filters: min_bedrooms (int), location (str) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, rent_min, rent_max, listing_type. For exact bedroom count (e.g. '2 bed'), set both min_bedrooms and max_bedrooms. For 'at least N', set only min_bedrooms.",
                         "properties": {
                             "min_bedrooms": {"type": "integer", "minimum": 0},
                             "max_bedrooms": {"type": "integer", "minimum": 0},
@@ -65,6 +66,28 @@ TOOLS = [
                     },
                 },
                 "required": ["filters"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filter_listings",
+            "description": "Narrow and/or sort the current search results. Call after presenting results when the user asks to filter (e.g. 'only 1 bathroom', 'under 2500') or sort (e.g. 'sort by price', 'cheapest first', 'show most expensive'). Uses the most recent search or filter result as the list. Pass filter criteria and/or sort_by + ascending as needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_bathrooms": {"type": "integer", "minimum": 0, "description": "Minimum number of bathrooms."},
+                    "max_bathrooms": {"type": "integer", "minimum": 0, "description": "Maximum number of bathrooms."},
+                    "min_bedrooms": {"type": "integer", "minimum": 0, "description": "Minimum number of bedrooms."},
+                    "max_bedrooms": {"type": "integer", "minimum": 0, "description": "Maximum number of bedrooms."},
+                    "min_sqft": {"type": "integer", "minimum": 0, "description": "Minimum square footage."},
+                    "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
+                    "rent_min": {"type": "number", "minimum": 0, "description": "Minimum rent (CAD/month)."},
+                    "rent_max": {"type": "number", "minimum": 0, "description": "Maximum rent (CAD/month)."},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title). Omit for no sort."},
+                    "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
+                },
             },
         },
     },
@@ -97,7 +120,26 @@ TOOLS = [
 ]
 
 
-def run_tool(name: str, arguments: dict) -> str:
+def _get_current_listings_from_messages(messages: list[dict]) -> list[dict]:
+    """Return the listings array from the most recent tool result that has 'listings' (rental_search or filter_listings)."""
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        try:
+            data = json.loads(msg.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and "listings" in data:
+            raw = data.get("listings")
+            if isinstance(raw, list):
+                return raw
+        if isinstance(data, dict) and "error" in data:
+            continue
+        break
+    return []
+
+
+def run_tool(name: str, arguments: dict, *, current_listings: list[dict] | None = None) -> str:
     """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected."""
     if name == "ask_user":
         # Return payload for client to show UI and supply real result
@@ -117,6 +159,19 @@ def run_tool(name: str, arguments: dict) -> str:
             resp = search(f, use_proxy=use_proxy)
         except SearchBackendError as e:
             return json.dumps({"error": str(e)})
+        return resp.model_dump_json()
+    if name == "filter_listings":
+        listings = current_listings if current_listings is not None else []
+        if not listings:
+            return json.dumps({"error": "No current search results to filter or sort. Run a search first."})
+        sort_by = arguments.get("sort_by")
+        ascending = arguments.get("ascending", True)
+        criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "rent_min", "rent_max"}
+        criteria_dict = {k: v for k, v in arguments.items() if k in criteria_keys and v is not None}
+        if not criteria_dict and not sort_by:
+            return json.dumps({"error": "At least one filter criterion or sort_by is required."})
+        criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
+        resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending)
         return resp.model_dump_json()
     if name == "simulate_viewing_request":
         try:
@@ -237,13 +292,18 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                 ],
             }
             tool_results: list[dict] = []
+            current_listings = _get_current_listings_from_messages(messages)
             for tc in msg.tool_calls:
                 name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = run_tool(name, args)
+                result = run_tool(
+                    name,
+                    args,
+                    current_listings=current_listings if name == "filter_listings" else None,
+                )
                 if name == "ask_user":
                     payload = json.loads(result)
                     if payload.get("request_user_input"):
