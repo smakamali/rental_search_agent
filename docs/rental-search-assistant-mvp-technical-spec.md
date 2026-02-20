@@ -9,7 +9,7 @@ This document provides implementation-ready technical specifications for the [Re
 | Item | Description |
 |------|-------------|
 | **Source** | [rental-search-assistant-mvp.md](rental-search-assistant-mvp.md) |
-| **Scope** | MCP server (three tools), rental search backend adapter, agent orchestration behaviour |
+| **Scope** | MCP server (five tools), rental search backend adapter, agent orchestration behaviour |
 
 ---
 
@@ -32,6 +32,8 @@ flowchart TB
     subgraph MCP["MCP Server"]
         T1[ask_user]
         T2[rental_search]
+        T2b[filter_listings]
+        T2c[summarize_listings]
         T3[simulate_viewing_request]
     end
 
@@ -57,7 +59,7 @@ flowchart TB
 | **User** | Supplies natural-language search, answers clarification and approval prompts (via Chat UI), receives shortlist and confirmation. |
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
-| **MCP Server** | Exposes three tools: `ask_user` (clarification/approval), `rental_search` (listings), `simulate_viewing_request` (simulated viewing request). Handles tool invocation and return values. |
+| **MCP Server** | Exposes five tools: `ask_user` (clarification/approval), `rental_search` (listings), `filter_listings` (narrow/sort results), `summarize_listings` (stats), `simulate_viewing_request` (simulated viewing request). Handles tool invocation and return values. |
 | **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into pyRealtor calls; maps pyRealtor/REALTOR.CA output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
 | **pyRealtor** | Python package (`HousesFacade.search_save_houses`); fetches MLS data from REALTOR.CA for the given location (e.g. Vancouver). |
 | **REALTOR.CA** | External listing source (Canada); provides listing data consumed by pyRealtor. |
@@ -122,6 +124,8 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | `price` | number | Yes | Rent in CAD/month. |
 | `bedrooms` | number | Yes | Number of bedrooms. |
 | `sqft` | number | No | Square footage; omit if unknown. |
+| `price_display` | string | No | Formatted price for presentation (e.g. `"$2,500/month"`). Omit if unknown. |
+| `postal_code` | string | No | Postal code; omit if unknown. |
 | `source` | string | No | Source name (e.g. `"Realtor.ca"`, `"Rentals.ca"`) for display. |
 | `bathrooms` | number | No | Number of bathrooms; omit if unknown. |
 | `description` | string | No | Full or extended listing description; omit if not needed for shortlist. |
@@ -253,7 +257,36 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 
 ---
 
-### 5.3 `simulate_viewing_request`
+### 5.3 `filter_listings`
+
+**Purpose:** Narrow and/or sort the current search results in-memory. Used when the user asks to filter (e.g. “only 1 bathroom”, “under 2500”) or sort (e.g. “sort by price”, “cheapest first”). Operates on the most recent `rental_search` or `filter_listings` result.
+
+**Arguments (JSON schema):**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `listings` | array of [Listing](#42-listing-item-in-search-results) | Yes | Current list from last rental_search or filter_listings. The chat client derives this from message history; MCP clients must pass explicitly. |
+| `filters` | object | No | Optional criteria: `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, `rent_max`. All optional. |
+| `sort_by` | string | No | Attribute to sort by: `"price"`, `"bedrooms"`, `"bathrooms"`, `"sqft"`, `"address"`, `"id"`, `"title"`. |
+| `ascending` | boolean | No | Default `true`. If true, sort ascending (e.g. cheapest first); if false, descending. |
+
+At least one of `filters` (with non-empty criteria) or `sort_by` is required.
+
+**Response shape:** Same as `rental_search`: `{ "listings": [...], "total_count": N }`.
+
+---
+
+### 5.4 `summarize_listings`
+
+**Purpose:** Compute statistics for the current search results (price min/median/mean/max, bedroom/bathroom distribution, size stats, property types). Used when presenting results to produce a structured summary.
+
+**Arguments:** `listings` (array of Listing) — the current list from last rental_search or filter_listings. The chat client derives this from message history; MCP clients must pass explicitly.
+
+**Response shape:** A stats dict (count, price, bedrooms, bathrooms, sqft, house_category).
+
+---
+
+### 5.5 `simulate_viewing_request`
 
 **Purpose:** “Submit” a viewing request without real form POST or browser automation. Returns a summary and/or link (e.g. mailto, contact URL) for learning and user feedback.
 
@@ -322,13 +355,16 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 | **Bathrooms** | number (or string; coerce to numeric) | Post-filter by `min_bathrooms`, `max_bathrooms`. |
 | **Size** | string or number (e.g. sqft; may need parsing) | Map to `sqft` if present; post-filter by `min_sqft`, `max_sqft`. |
 | **Price** | number/string (for sale) | Post-filter by price range when `listing_type` is for_sale. |
-| **Rent** | number/string (for rent) | Map to `price`; post-filter by `rent_min`, `rent_max` when `listing_type` is for_rent. |
+| **Rent** | number/string (for rent) | Map to `price` when Total Rent is absent; post-filter by `rent_min`, `rent_max`. |
+| **Total Rent** | number (for rent) | Prefer over Rent when present for `price` and filtering. |
 | **Address** | string | Map to `address`. |
 | **Description** | string | Use for `title` or description if no dedicated title. |
 | **Website** | string | Map to `url`. |
-| **Latitude**, **Longitude** | number | Optional; for future proximity use. |
+| **Total Rent** | number (for rent) | When `listing_type` is for_rent, use for `price` and filtering; prefer over Rent when present. |
+| **Latitude**, **Longitude** | number | Optional; for mapping/proximity. |
 | **House Category**, **Ownership Category** | string | Optional metadata. |
 | **Open House**, **Ammenities**, **Nearby Ammenities**, **Stories** | string | Optional metadata. |
+| **Postal Code** | string | Optional; map to `postal_code`. |
 
 **Post-fetch filtering:** Apply `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, and `rent_max` on these columns when the backend does not support them as search parameters. Coerce numeric columns and handle missing or invalid values before filtering.
 
@@ -352,19 +388,23 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 
 - **Parsed criteria:** `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, `rent_max`, `location`, `listing_type` (updated after optional geography clarification).
 - **Viewing preference:** Free-text string from required `ask_user` (e.g. “weekday evenings 6–8pm”). Used when calling `simulate_viewing_request` to choose a `timeslot`.
-- **Shortlist:** The `listings` array from the last successful `rental_search` call.
+- **Shortlist:** The `listings` array from the last successful `rental_search` or `filter_listings` call.
 - **User details:** After approval step, collect once: `name`, `email`, `phone` (optional). Reuse for every `simulate_viewing_request` in that flow.
 
 ### 7.2 Flow and tool-call sequence
 
 1. **Parse** user message → extract filters (and note if location is ambiguous).
-2. **Clarify** → `ask_user(prompt, choices?, allow_multiple: false)` for viewing times (required). If location ambiguous, optional `ask_user` for geography. Set viewing preference and final location in state.
+2. **Clarify geography (optional)** → If location ambiguous, `ask_user` for geography. Do not ask for viewing times yet.
 3. **Search** → `rental_search(filters)`. If error → inform user, optionally retry once (see MVP error states). If empty list → do not call approval; suggest relaxing filters and offer to search again.
-4. **Present** → Format shortlist (title, address, price, url) in chat.
-5. **Approve** → `ask_user(prompt, choices = listing labels/ids, allow_multiple: true)`. If `selected` is empty → acknowledge “No viewings requested.” and stop (no user-details collection, no simulate).
-6. **Collect user details** → If not already in state, use chat or `ask_user` to get name, email, phone. Validate minimally (e.g. non-empty name and email); on invalid/decline, remind once or allow skip with placeholders.
-7. **Simulate submit** → For each selected listing, choose a timeslot string from viewing preference, then `simulate_viewing_request(listing_url, timeslot, user_details)`.
-8. **Confirm** → Reply with summary of simulated requests (listings and times).
+4. **Present** → Call `summarize_listings` to get statistics, then produce a bullet-point summary (Count, Price, Bedrooms, Bathrooms, Size, Property types). Results are shown in a table (and optionally a map when coordinates exist). Point user to the table.
+5. **Narrow/sort (optional)** → If user asks to filter or sort, call `filter_listings` with criteria and/or sort options, then `summarize_listings` again and re-present.
+6. **Confirm results** → `ask_user` to confirm results look good or need refining before choosing listings for viewing. If refine → loop to step 5; if good → continue.
+7. **Viewing preference** → `ask_user` (single answer) for preferred days and times for viewings. Store as viewing preference. Only ask after results are presented.
+8. **Approve** → `ask_user(prompt, choices = listing labels/ids, allow_multiple: true)`. If `selected` is empty → acknowledge “No viewings requested.” and stop (no user-details collection, no simulate).
+9. **Collect user details** → If not already in state, use chat or `ask_user` to get name, email, phone. Validate minimally.
+10. **Verify contact** → Before simulate, show user details and ask for confirmation via `ask_user`.
+11. **Simulate submit** → For each selected listing, choose a timeslot string from viewing preference, then `simulate_viewing_request(listing_url, timeslot, user_details)`.
+12. **Confirm** → Reply with summary of simulated requests (listings and times).
 
 ### 7.3 Mapping approval choices back to listings
 
@@ -460,3 +500,5 @@ For implementers who want to validate inputs/outputs, below are minimal JSON Sch
 | Version | Date | Change |
 |---------|------|--------|
 | 0.1 | Feb 17, 2026 | Initial technical spec derived from rental-search-assistant-mvp.md. |
+| 0.2 | Feb 20, 2026 | Added `filter_listings` and `summarize_listings` tools; Listing fields `price_display`, `postal_code`; backend columns Total Rent, Postal Code; updated agent flow (steps 4–12) and MCP server component table. |
+| 0.2 | Feb 20, 2026 | Added `filter_listings` and `summarize_listings` tools; Listing fields `price_display`, `postal_code`; backend columns Total Rent, Postal Code; updated agent flow (steps 4–12) and MCP server component table. |
