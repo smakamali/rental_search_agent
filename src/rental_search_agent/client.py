@@ -209,6 +209,61 @@ def _make_llm_client() -> tuple[OpenAI, str]:
     sys.exit(1)
 
 
+def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[list[dict], dict | None]:
+    """Run one or more LLM calls and tool executions. Returns (updated_messages, ask_user_payload | None).
+    When ask_user needs input, returns (messages + assistant_msg + tool_results_before_ask, payload) with
+    payload containing tool_call_id, prompt, choices, allow_multiple so the caller can append the user's answer."""
+    while True:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+        )
+        msg = resp.choices[0].message
+        if not msg:
+            return (messages, None)
+        if msg.tool_calls:
+            assistant_msg = {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+                    }
+                    for tc in msg.tool_calls
+                ],
+            }
+            tool_results: list[dict] = []
+            for tc in msg.tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = run_tool(name, args)
+                if name == "ask_user":
+                    payload = json.loads(result)
+                    if payload.get("request_user_input"):
+                        return (
+                            messages + [assistant_msg] + tool_results,
+                            {
+                                "tool_call_id": tc.id,
+                                "prompt": payload.get("prompt", ""),
+                                "choices": payload.get("choices") or [],
+                                "allow_multiple": payload.get("allow_multiple", False),
+                            },
+                        )
+                tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            messages = messages + [assistant_msg] + tool_results
+            continue
+        # No tool calls: final assistant reply
+        messages = messages + [{"role": "assistant", "content": msg.content or ""}]
+        return (messages, None)
+
+
 def run_agent_loop() -> None:
     """Run the chat loop: user message -> LLM -> tool calls -> resolve ask_user in CLI -> loop until reply."""
     project_root = Path(__file__).resolve().parent.parent.parent
@@ -224,49 +279,17 @@ def run_agent_loop() -> None:
             break
         messages.append({"role": "user", "content": user_line})
         while True:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
-            msg = resp.choices[0].message
-            if not msg:
-                break
-            if msg.tool_calls:
+            messages, payload = run_agent_step(client, model, messages)
+            if payload is not None:
+                answer_json = prompt_user_for_ask_user(payload)
                 messages.append({
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
-                        }
-                        for tc in msg.tool_calls
-                    ],
+                    "role": "tool",
+                    "tool_call_id": payload["tool_call_id"],
+                    "content": answer_json,
                 })
-                for tc in msg.tool_calls:
-                    name = tc.function.name
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    result = run_tool(name, args)
-                    if name == "ask_user":
-                        payload = json.loads(result)
-                        if payload.get("request_user_input"):
-                            result = prompt_user_for_ask_user(payload)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    })
                 continue
-            # No tool calls: final assistant reply
-            if msg.content:
-                print("\nAssistant:", msg.content)
-            messages.append({"role": "assistant", "content": msg.content or ""})
+            if messages and messages[-1].get("role") == "assistant" and messages[-1].get("content"):
+                print("\nAssistant:", messages[-1]["content"])
             break
     print("Goodbye.")
 

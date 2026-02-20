@@ -69,6 +69,22 @@ python -m rental_search_agent.client
 
 Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or `OPENAI_MODEL` when using OpenAI directly.
 
+### Streamlit UI
+
+Web chat interface using the same agent and tools. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
+
+```bash
+rental-search-ui
+```
+
+Or:
+
+```bash
+streamlit run src/rental_search_agent/streamlit_app.py
+```
+
+The CLI remains available as `rental-search-client` or `python -m rental_search_agent.client` for terminal use.
+
 ## Backend
 
 - **In scope:** Single backend **pyRealtor** (REALTOR.CA, Canada/Vancouver). No other backends.

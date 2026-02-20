@@ -13,11 +13,13 @@ dependencies = [
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
     "openai>=1.0.0",
+    "streamlit>=1.28",
 ]
 
 [project.scripts]
 rental-search-mcp = "rental_search_agent.server:main"
 rental-search-client = "rental_search_agent.client:main"
+rental-search-ui = "rental_search_agent.streamlit_app:run_ui"
 
 [tool.setuptools.packages.find]
 where = ["src"]
