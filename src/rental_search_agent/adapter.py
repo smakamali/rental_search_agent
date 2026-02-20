@@ -34,17 +34,36 @@ def _parse_sqft(val) -> Optional[float]:
     return None
 
 
+def _format_price_display(val, price: float, listing_type: str) -> Optional[str]:
+    """Use raw value if it looks like formatted text (e.g. $2,500/month), else format from price."""
+    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+        s = str(val).strip()
+        if s and ("$" in s or "," in s):
+            return s
+    if listing_type == "for_rent":
+        return f"${int(price):,}/month" if price else None
+    return f"${int(price):,}" if price else None
+
+
 def _row_to_listing(row: pd.Series, listing_type: str) -> Listing:
     """Map one DataFrame row (pyRealtor output) to Listing."""
-    price_col = "Rent" if listing_type == "for_rent" else "Price"
-    price_val = row.get(price_col)
+    # Prefer Total Rent (numeric) for sorting when available; fall back to Rent/Price
+    if listing_type == "for_rent" and "Total Rent" in row.index:
+        price_val = row.get("Total Rent")
+        rent_display_val = row.get("Rent")
+    else:
+        price_col = "Rent" if listing_type == "for_rent" else "Price"
+        price_val = row.get(price_col)
+        rent_display_val = price_val
     if price_val is not None and not (isinstance(price_val, float) and pd.isna(price_val)):
         try:
-            price = float(re.sub(r"[^\d.]", "", str(price_val)))
+            price = float(price_val) if isinstance(price_val, (int, float)) else float(re.sub(r"[^\d.]", "", str(price_val)))
         except (ValueError, TypeError):
             price = 0.0
     else:
         price = 0.0
+
+    price_display = _format_price_display(rent_display_val, price, listing_type)
 
     bedrooms_val = row.get("Bedrooms")
     bedrooms = int(_coerce_numeric(pd.Series([bedrooms_val])).iloc[0]) if bedrooms_val is not None else 0
@@ -54,6 +73,7 @@ def _row_to_listing(row: pd.Series, listing_type: str) -> Listing:
     url = str(row.get("Website", "") or "").strip() or f"https://www.realtor.ca/listing/{row.get('MLS', '')}"
     title = str(row.get("Description", "") or "")[:200] or f"Listing {row.get('MLS', '')}"
     address = str(row.get("Address", "") or "").strip() or "Address not provided"
+    postal_code = str(row.get("Postal Code", "") or "").strip() or None
 
     return Listing(
         id=str(row.get("MLS", "") or ""),
@@ -61,6 +81,7 @@ def _row_to_listing(row: pd.Series, listing_type: str) -> Listing:
         url=url,
         address=address,
         price=price,
+        price_display=price_display,
         bedrooms=bedrooms,
         sqft=_parse_sqft(row.get("Size")),
         source="Realtor.ca",
@@ -74,6 +95,7 @@ def _row_to_listing(row: pd.Series, listing_type: str) -> Listing:
         nearby_ammenities=str(row.get("Nearby Ammenities", "") or "").strip() or None,
         open_house=str(row.get("Open House", "") or "").strip() or None,
         stories=float(row["Stories"]) if pd.notna(row.get("Stories")) and str(row.get("Stories")).strip() else None,
+        postal_code=postal_code,
     )
 
 
@@ -122,9 +144,13 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
     if df.empty:
         return RentalSearchResponse(listings=[], total_count=0)
 
-    price_col = "Rent" if listing_type == "for_rent" else "Price"
+    # Prefer Total Rent (numeric) for filtering/sorting when available
+    if listing_type == "for_rent" and "Total Rent" in df.columns:
+        price_col = "Total Rent"
+    else:
+        price_col = "Rent" if listing_type == "for_rent" else "Price"
     if price_col not in df.columns:
-        price_col = "Price" if "Price" in df.columns else None
+        price_col = "Price" if "Price" in df.columns else ("Rent" if "Rent" in df.columns else None)
     if price_col is None:
         return RentalSearchResponse(listings=[], total_count=0)
 

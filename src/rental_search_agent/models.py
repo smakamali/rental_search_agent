@@ -30,7 +30,8 @@ class Listing(BaseModel):
     title: str = Field(..., description="Short title or headline.")
     url: str = Field(..., description="Canonical URL for the listing.")
     address: str = Field(..., description="Human-readable address or area.")
-    price: float = Field(..., ge=0, description="Rent in CAD/month.")
+    price: float = Field(..., ge=0, description="Rent/price as number (for sorting).")
+    price_display: Optional[str] = Field(None, description="Formatted rent/price for presentation (e.g. $2,500/month).")
     bedrooms: int = Field(..., ge=0, description="Number of bedrooms.")
     sqft: Optional[float] = Field(None, ge=0, description="Square footage.")
     source: Optional[str] = Field(None, description="Source name for display.")
@@ -44,11 +45,13 @@ class Listing(BaseModel):
     nearby_ammenities: Optional[str] = Field(None, description="Nearby features.")
     open_house: Optional[str] = Field(None, description="Open house date/time text.")
     stories: Optional[float] = Field(None, ge=0, description="Number of stories.")
+    postal_code: Optional[str] = Field(None, description="Postal code.")
 
     def to_short_label(self, index: Optional[int] = None) -> str:
-        """Short label for approval choices, e.g. '[1] 123 Main St — $2800'."""
+        """Short label for approval choices, e.g. '[1] 123 Main St — $2,800/month'."""
         prefix = f"[{index}] " if index is not None else ""
-        return f"{prefix}{self.address} — ${int(self.price)}"
+        rent_str = self.price_display if self.price_display else f"${int(self.price):,}"
+        return f"{prefix}{self.address} — {rent_str}"
 
 
 class UserDetails(BaseModel):

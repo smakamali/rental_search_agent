@@ -6,8 +6,72 @@ from pathlib import Path
 
 import streamlit as st
 
+try:
+    import pydeck as pdk
+except ImportError:
+    pdk = None
+
 from rental_search_agent.agent import flow_instructions
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
+
+# Keys for stored user preferences (viewing time, name, email, phone)
+PREF_KEYS = ("viewing_preference", "name", "email", "phone")
+
+
+def _preferences_file() -> Path:
+    """Path to optional JSON file for persisting preferences across sessions."""
+    return Path.home() / ".rental_search_agent" / "preferences.json"
+
+
+def _load_preferences_from_file() -> dict:
+    """Load preferences from file if it exists; otherwise return default dict."""
+    default = {k: "" for k in PREF_KEYS}
+    path = _preferences_file()
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text())
+        return {k: data.get(k, "") or "" for k in PREF_KEYS}
+    except Exception:
+        return default
+
+
+def _save_preferences_to_file(prefs: dict) -> None:
+    """Write preferences to file. No-op on failure (e.g. directory missing)."""
+    path = _preferences_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
+    except Exception:
+        pass
+
+
+def _preferences_block(prefs: dict) -> str:
+    """Build the preferences block to inject into the system message."""
+    viewing = (prefs.get("viewing_preference") or "").strip()
+    name = (prefs.get("name") or "").strip()
+    email = (prefs.get("email") or "").strip()
+    phone = (prefs.get("phone") or "").strip()
+    if not viewing and not name and not email:
+        return "No stored user preferences. Ask for viewing preference and for name/email when needed."
+    parts = []
+    if viewing:
+        parts.append(f"viewing_preference = {viewing!r}")
+    if name:
+        parts.append(f"name = {name!r}")
+    if email:
+        parts.append(f"email = {email!r}")
+    if phone:
+        parts.append(f"phone = {phone!r}")
+    block = "Stored user preferences: " + "; ".join(parts)
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them."
+    return block
+
+
+def _build_system_content() -> str:
+    """System message content: flow instructions + current preferences block."""
+    prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
+    return flow_instructions() + "\n\n" + _preferences_block(prefs)
 
 
 def _ensure_env_loaded() -> None:
@@ -29,12 +93,104 @@ def _get_client_and_model():
 
 
 def _init_session_state() -> None:
+    if "user_preferences" not in st.session_state:
+        st.session_state["user_preferences"] = _load_preferences_from_file()
     if "messages" not in st.session_state:
         st.session_state["messages"] = [
-            {"role": "system", "content": flow_instructions()},
+            {"role": "system", "content": _build_system_content()},
         ]
+    else:
+        # Keep system message in sync with current preferences
+        st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
     if "pending_ask" not in st.session_state:
         st.session_state["pending_ask"] = None
+
+
+def _get_latest_search_listings(messages: list[dict]) -> list[dict]:
+    """Extract the most recent rental_search result from message history.
+    Returns the 'listings' array (list of listing dicts) or empty list if none found.
+    """
+    listings = []
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        try:
+            data = json.loads(msg.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and "listings" in data:
+            raw = data.get("listings")
+            if isinstance(raw, list):
+                listings = raw
+            break
+    return listings
+
+
+def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
+    """Build list of {lat, lon, label} for listings with valid coordinates.
+    Returns (map_points, center_lat, center_lon). Center is None if no points.
+    """
+    points = []
+    lats, lons = [], []
+    for i, listing in enumerate(listings):
+        lat = listing.get("latitude")
+        lon = listing.get("longitude")
+        if lat is None or lon is None:
+            continue
+        try:
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        points.append({"lat": lat, "lon": lon, "label": str(i + 1)})
+        lats.append(lat)
+        lons.append(lon)
+    if not points:
+        return points, None, None
+    center_lat = sum(lats) / len(lats)
+    center_lon = sum(lons) / len(lons)
+    return points, center_lat, center_lon
+
+
+def _render_results_map(map_points: list[dict], center_lat: float, center_lon: float) -> None:
+    """Render a PyDeck map with scatter points and numeric labels (listing order)."""
+    if pdk is None:
+        st.caption("Map unavailable: install pydeck to show results on a map.")
+        return
+    scatter = pdk.Layer(
+        "ScatterplotLayer",
+        data=map_points,
+        get_position="[lon, lat]",
+        get_radius=200,
+        get_fill_color=[70, 130, 180],
+        radius_min_pixels=6,
+        radius_max_pixels=12,
+    )
+    text = pdk.Layer(
+        "TextLayer",
+        data=map_points,
+        get_position="[lon, lat]",
+        get_text="label",
+        get_size=14,
+        get_color=[255, 255, 255],
+        get_text_anchor="middle",
+        get_alignment_baseline="center",
+    )
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=11,
+        pitch=0,
+    )
+    st.pydeck_chart(
+        pdk.Deck(
+            layers=[scatter, text],
+            initial_view_state=view_state,
+        ),
+        use_container_width=True,
+        height=400,
+    )
 
 
 def _render_chat_history() -> None:
@@ -59,6 +215,36 @@ def _build_answer_json(pending: dict, answer_value: str | list[str]) -> str:
         selected = answer_value if isinstance(answer_value, list) else [answer_value] if answer_value else []
         return json.dumps({"selected": selected})
     return json.dumps({"answer": answer_value if isinstance(answer_value, str) else str(answer_value or "")})
+
+
+def _render_preferences_sidebar() -> None:
+    """Sidebar form to set or edit viewing time, name, email, phone. Saves to session and optional file."""
+    prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
+    with st.sidebar:
+        st.subheader("Your details")
+        st.caption("Optional. If set, the assistant will use these and not ask again.")
+        with st.form("preferences_form"):
+            viewing = st.text_input(
+                "Preferred viewing times",
+                value=prefs.get("viewing_preference", ""),
+                placeholder="e.g. weekday evenings 6–8pm",
+                key="pref_viewing",
+            )
+            name = st.text_input("Name", value=prefs.get("name", ""), key="pref_name")
+            email = st.text_input("Email", value=prefs.get("email", ""), key="pref_email")
+            phone = st.text_input("Phone (optional)", value=prefs.get("phone", ""), key="pref_phone")
+            submitted = st.form_submit_button("Save")
+            if submitted:
+                new_prefs = {
+                    "viewing_preference": (viewing or "").strip(),
+                    "name": (name or "").strip(),
+                    "email": (email or "").strip(),
+                    "phone": (phone or "").strip(),
+                }
+                st.session_state["user_preferences"] = new_prefs
+                _save_preferences_to_file(new_prefs)
+                st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
+                st.rerun()
 
 
 def _render_ask_form(pending: dict) -> None:
@@ -113,6 +299,7 @@ def main() -> None:
 
     _ensure_env_loaded()
     _init_session_state()
+    _render_preferences_sidebar()
 
     client, model = _get_client_and_model()
     if client is None or model is None:
@@ -120,6 +307,16 @@ def main() -> None:
         st.stop()
 
     _render_chat_history()
+
+    # Show search results map when we have plottable listings (Option A: dedicated block)
+    listings = _get_latest_search_listings(st.session_state["messages"])
+    map_points, center_lat, center_lon = _build_map_data(listings)
+    if map_points and center_lat is not None and center_lon is not None:
+        with st.expander("Search results map", expanded=True):
+            _render_results_map(map_points, center_lat, center_lon)
+    elif listings and not map_points:
+        with st.expander("Search results map", expanded=False):
+            st.caption("No map: addresses have no coordinates.")
 
     pending = st.session_state.get("pending_ask")
     if pending is not None:

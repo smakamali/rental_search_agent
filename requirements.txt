@@ -15,3 +15,4 @@ openai>=1.0.0
 
 # Streamlit UI
 streamlit>=1.28
+pydeck>=0.8.0
