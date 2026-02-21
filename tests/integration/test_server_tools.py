@@ -8,12 +8,23 @@ from rental_search_agent.adapter import SearchBackendError
 from rental_search_agent.models import Listing, RentalSearchResponse
 from rental_search_agent.server import (
     ask_user,
+    calendar_create_event,
+    calendar_delete_event,
+    calendar_get_available_slots,
+    calendar_list_events,
+    calendar_update_event,
+    draft_viewing_plan,
     filter_listings,
     rental_search,
     simulate_viewing_request,
     summarize_listings,
 )
-from tests.fixtures.sample_data import sample_listing, sample_listings
+from tests.fixtures.sample_data import (
+    sample_available_slots,
+    sample_listing,
+    sample_listings,
+    sample_listings_with_coords,
+)
 
 
 class TestAskUser:
@@ -151,3 +162,89 @@ class TestSimulateViewingRequest:
                 timeslot="Tue",
                 user_details={"email": "j@x.com"},
             )
+
+
+class TestDraftViewingPlan:
+    def test_valid_listings_and_slots(self):
+        listings = sample_listings_with_coords()
+        slots = sample_available_slots(3)
+        result = draft_viewing_plan(listings, slots)
+        assert "entries" in result
+        assert len(result["entries"]) == 3
+        assert result["entries"][0]["listing_id"] in ("mls-001", "mls-002", "mls-003")
+
+    def test_more_listings_than_slots_raises(self):
+        listings = sample_listings_with_coords()
+        slots = sample_available_slots(2)
+        with pytest.raises(ValueError, match="Not enough slots"):
+            draft_viewing_plan(listings, slots)
+
+
+class TestCalendarListEvents:
+    def test_returns_events_when_mocked(self):
+        with patch("rental_search_agent.server.do_calendar_list_events") as m:
+            m.return_value = [
+                {"id": "ev1", "summary": "Meeting", "start": {"dateTime": "2026-02-25T10:00:00"}, "end": {"dateTime": "2026-02-25T11:00:00"}},
+            ]
+            result = calendar_list_events("2026-02-25T00:00:00", "2026-02-26T00:00:00")
+            assert "events" in result
+            assert len(result["events"]) == 1
+            assert result["events"][0]["id"] == "ev1"
+            assert result["events"][0]["summary"] == "Meeting"
+
+
+class TestCalendarGetAvailableSlots:
+    def test_returns_slots_when_mocked(self):
+        with patch("rental_search_agent.server.do_calendar_get_available_slots") as m:
+            m.return_value = [
+                {"start": "2026-02-25T18:00:00", "end": "2026-02-25T19:00:00", "display": "Tue Feb 25, 06:00PM"},
+            ]
+            result = calendar_get_available_slots(
+                "weekday evenings 6-8pm",
+                "2026-02-25T00:00:00",
+                "2026-03-05T00:00:00",
+            )
+            assert "slots" in result
+            assert len(result["slots"]) == 1
+            assert result["slots"][0]["display"] == "Tue Feb 25, 06:00PM"
+
+    def test_auth_error_raises_value_error(self):
+        with patch("rental_search_agent.server.do_calendar_get_available_slots") as m:
+            m.side_effect = ValueError("credentials not found")
+            with pytest.raises(ValueError, match="credentials not found"):
+                calendar_get_available_slots(
+                    "weekday evenings",
+                    "2026-02-25T00:00:00",
+                    "2026-03-05T00:00:00",
+                )
+
+
+class TestCalendarCreateEvent:
+    def test_returns_event_when_mocked(self):
+        with patch("rental_search_agent.server.do_calendar_create_event") as m:
+            m.return_value = {"id": "ev123", "htmlLink": "https://calendar.google.com/ev123", "summary": "Viewing"}
+            result = calendar_create_event(
+                summary="Rental viewing: 123 Main St",
+                start_datetime="2026-02-25T18:00:00",
+                end_datetime="2026-02-25T19:00:00",
+                listing_id="mls-001",
+                listing_url="https://example.com/1",
+            )
+            assert result["id"] == "ev123"
+            assert "Viewing" in result["summary"]
+
+
+class TestCalendarUpdateEvent:
+    def test_returns_event_when_mocked(self):
+        with patch("rental_search_agent.server.do_calendar_update_event") as m:
+            m.return_value = {"id": "ev123", "htmlLink": "https://calendar.google.com/ev123", "summary": "Updated"}
+            result = calendar_update_event("ev123", start_datetime="2026-02-26T18:00:00", end_datetime="2026-02-26T19:00:00")
+            assert result["id"] == "ev123"
+            assert result["summary"] == "Updated"
+
+
+class TestCalendarDeleteEvent:
+    def test_returns_deleted_when_mocked(self):
+        with patch("rental_search_agent.server.do_calendar_delete_event"):
+            result = calendar_delete_event("ev123")
+            assert result["deleted"] == "ev123"

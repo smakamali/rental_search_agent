@@ -8,3 +8,9 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# Google Calendar credentials and token (secrets)
+.rental_search_agent/
+
+# Debug log (created when agent runs)
+rental_search_agent_debug.log

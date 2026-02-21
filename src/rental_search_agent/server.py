@@ -1,10 +1,18 @@
-"""MCP server: ask_user, rental_search, simulate_viewing_request. Per spec §5."""
+"""MCP server: ask_user, rental_search, simulate_viewing_request, calendar tools, draft_viewing_plan. Per spec §5."""
 
+import logging
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from rental_search_agent.adapter import SearchBackendError, search
+from rental_search_agent.calendar_service import (
+    create_event as do_calendar_create_event,
+    delete_event as do_calendar_delete_event,
+    get_available_slots as do_calendar_get_available_slots,
+    list_events as do_calendar_list_events,
+    update_event as do_calendar_update_event,
+)
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.models import (
@@ -14,6 +22,7 @@ from rental_search_agent.models import (
     SimulateViewingRequestResponse,
     UserDetails,
 )
+from rental_search_agent.viewing_plan import draft_viewing_plan as do_draft_viewing_plan
 
 mcp = FastMCP(
     "Rental Search Assistant",
@@ -109,6 +118,117 @@ def simulate_viewing_request(
 ) -> SimulateViewingRequestResponse:
     """Simulate a viewing request (no real form POST). Returns a summary and optional contact_url."""
     return do_simulate_viewing_request(listing_url, timeslot, user_details)
+
+
+def _calendar_error(msg: str) -> None:
+    """Re-raise as ValueError for calendar errors."""
+    raise ValueError(msg) from None
+
+
+@mcp.tool()
+def calendar_list_events(
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """List events in the given time range. time_min and time_max are ISO datetime strings."""
+    try:
+        events = do_calendar_list_events(time_min, time_max, calendar_id, max_results)
+        return {"events": [{"id": e.get("id"), "summary": e.get("summary"), "start": e.get("start"), "end": e.get("end")} for e in events]}
+    except Exception as e:
+        _calendar_error(str(e))
+
+
+@mcp.tool()
+def calendar_get_available_slots(
+    preferred_times: str,
+    date_range_start: str,
+    date_range_end: str,
+    slot_duration_minutes: int = 60,
+) -> dict[str, Any]:
+    """Get available calendar slots within user's preferred viewing times. Call before drafting a viewing plan."""
+    try:
+        slots = do_calendar_get_available_slots(
+            preferred_times, date_range_start, date_range_end, slot_duration_minutes
+        )
+        return {"slots": slots}
+    except Exception as e:
+        logging.warning("calendar_get_available_slots failed: %s", e)
+        _calendar_error(str(e))
+
+
+@mcp.tool()
+def calendar_create_event(
+    summary: str,
+    start_datetime: str,
+    end_datetime: str,
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+    listing_id: Optional[str] = None,
+    listing_url: Optional[str] = None,
+) -> dict[str, Any]:
+    """Create a calendar event. Store listing_id and listing_url for update flow."""
+    try:
+        ext = {}
+        if listing_id:
+            ext["listing_id"] = listing_id
+        if listing_url:
+            ext["listing_url"] = listing_url
+        event = do_calendar_create_event(
+            summary, start_datetime, end_datetime,
+            description=description, location=location,
+            extended_properties=ext if ext else None,
+        )
+        return {"id": event.get("id"), "htmlLink": event.get("htmlLink"), "summary": event.get("summary")}
+    except Exception as e:
+        _calendar_error(str(e))
+
+
+@mcp.tool()
+def calendar_update_event(
+    event_id: str,
+    summary: Optional[str] = None,
+    start_datetime: Optional[str] = None,
+    end_datetime: Optional[str] = None,
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+) -> dict[str, Any]:
+    """Update an existing calendar event."""
+    try:
+        event = do_calendar_update_event(
+            event_id,
+            summary=summary,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            description=description,
+            location=location,
+        )
+        return {"id": event.get("id"), "htmlLink": event.get("htmlLink"), "summary": event.get("summary")}
+    except Exception as e:
+        _calendar_error(str(e))
+
+
+@mcp.tool()
+def calendar_delete_event(event_id: str) -> dict[str, Any]:
+    """Delete a calendar event."""
+    try:
+        do_calendar_delete_event(event_id)
+        return {"deleted": event_id}
+    except Exception as e:
+        _calendar_error(str(e))
+
+
+@mcp.tool()
+def draft_viewing_plan(listings: list[dict[str, Any]], available_slots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Draft a viewing plan: assign slots to listings, clustering nearby listings to minimize commute. Pass selected listings and slots from calendar_get_available_slots."""
+    try:
+        plan = do_draft_viewing_plan(listings, available_slots)
+        return {"entries": [e.model_dump() for e in plan.entries]}
+    except ValueError as e:
+        raise
+    except Exception as e:
+        raise ValueError(str(e)) from e
 
 
 def main() -> None:

@@ -87,3 +87,5 @@ class TestFlowInstructions:
         instructions = flow_instructions()
         assert "rental search assistant" in instructions.lower()
         assert "rental_search" in instructions or "rental search" in instructions
+        assert "draft_viewing_plan" in instructions
+        assert "calendar_get_available_slots" in instructions

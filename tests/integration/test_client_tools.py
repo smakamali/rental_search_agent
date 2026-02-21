@@ -7,7 +7,12 @@ import pytest
 
 from rental_search_agent.client import _get_current_listings_from_messages, run_tool
 from rental_search_agent.models import RentalSearchResponse
-from tests.fixtures.sample_data import sample_listing, sample_listings
+from tests.fixtures.sample_data import (
+    sample_available_slots,
+    sample_listing,
+    sample_listings,
+    sample_listings_with_coords,
+)
 
 
 class TestRunTool:
@@ -91,6 +96,138 @@ class TestRunTool:
         data = json.loads(result)
         assert "error" in data
         assert "Unknown tool" in data["error"]
+
+    def test_draft_viewing_plan_valid(self):
+        listings = sample_listings_with_coords()
+        slots = sample_available_slots(3)
+        result = run_tool(
+            "draft_viewing_plan",
+            {"listings": listings, "available_slots": slots},
+        )
+        data = json.loads(result)
+        assert "entries" in data
+        assert len(data["entries"]) == 3
+
+    def test_draft_viewing_plan_not_enough_slots_returns_error(self):
+        listings = sample_listings_with_coords()
+        slots = sample_available_slots(2)
+        result = run_tool(
+            "draft_viewing_plan",
+            {"listings": listings, "available_slots": slots},
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "Not enough slots" in data["error"]
+
+    def test_calendar_get_available_slots_mocked(self):
+        with patch("rental_search_agent.client.calendar_get_available_slots") as m:
+            m.return_value = {"slots": sample_available_slots(2)}
+            result = run_tool(
+                "calendar_get_available_slots",
+                {
+                    "preferred_times": "weekday evenings 6-8pm",
+                    "date_range_start": "2026-02-25T00:00:00",
+                    "date_range_end": "2026-03-05T00:00:00",
+                },
+            )
+            data = json.loads(result)
+            assert "slots" in data
+            assert len(data["slots"]) == 2
+
+    def test_calendar_get_available_slots_auth_error_returns_error(self):
+        with patch("rental_search_agent.client.calendar_get_available_slots") as m:
+            m.side_effect = ValueError("credentials not found")
+            result = run_tool(
+                "calendar_get_available_slots",
+                {
+                    "preferred_times": "weekday evenings",
+                    "date_range_start": "2026-02-25T00:00:00",
+                    "date_range_end": "2026-03-05T00:00:00",
+                },
+            )
+            data = json.loads(result)
+            assert "error" in data
+            assert "credentials" in data["error"]
+
+    def test_calendar_create_event_mocked(self):
+        with patch("rental_search_agent.client.calendar_create_event") as m:
+            m.return_value = {"id": "ev123", "htmlLink": "https://calendar.google.com/ev123", "summary": "Viewing"}
+            result = run_tool(
+                "calendar_create_event",
+                {
+                    "summary": "Rental viewing: 123 Main St",
+                    "start_datetime": "2026-02-25T18:00:00",
+                    "end_datetime": "2026-02-25T19:00:00",
+                },
+            )
+            data = json.loads(result)
+            assert data["id"] == "ev123"
+            assert "Viewing" in data["summary"]
+
+    def test_calendar_update_event_mocked(self):
+        with patch("rental_search_agent.client.calendar_update_event") as m:
+            m.return_value = {
+                "id": "ev123",
+                "htmlLink": "https://calendar.google.com/ev123",
+                "summary": "Updated viewing",
+            }
+            result = run_tool(
+                "calendar_update_event",
+                {
+                    "event_id": "ev123",
+                    "summary": "Updated viewing",
+                    "start_datetime": "2026-02-25T18:30:00",
+                    "end_datetime": "2026-02-25T19:30:00",
+                },
+            )
+            data = json.loads(result)
+            assert data["id"] == "ev123"
+            assert data["summary"] == "Updated viewing"
+            m.assert_called_once()
+            called_args, called_kwargs = m.call_args
+            assert called_kwargs["event_id"] == "ev123"
+            assert called_kwargs["summary"] == "Updated viewing"
+
+    def test_calendar_delete_event_mocked(self):
+        with patch("rental_search_agent.client.calendar_delete_event") as m:
+            m.return_value = {"deleted": "ev123"}
+            result = run_tool(
+                "calendar_delete_event",
+                {"event_id": "ev123"},
+            )
+            data = json.loads(result)
+            assert data["deleted"] == "ev123"
+            m.assert_called_once_with("ev123")
+
+    def test_calendar_list_events_mocked(self):
+        events = [
+            {"id": "ev1", "summary": "Viewing 1"},
+            {"id": "ev2", "summary": "Viewing 2"},
+        ]
+        with patch("rental_search_agent.client.calendar_list_events") as m:
+            m.return_value = events
+            result = run_tool(
+                "calendar_list_events",
+                {
+                    "time_min": "2026-02-25T00:00:00",
+                    "time_max": "2026-02-26T00:00:00",
+                },
+            )
+            data = json.loads(result)
+            assert isinstance(data, list)
+            assert len(data) == 2
+            assert data[0]["id"] == "ev1"
+            assert data[1]["id"] == "ev2"
+
+    def test_calendar_create_event_validation_error(self):
+        result = run_tool(
+            "calendar_create_event",
+            {"summary": "Rental viewing: 123 Main St"},
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "start_datetime" in data["error"]
+        assert "end_datetime" in data["error"]
 
 
 class TestGetCurrentListingsFromMessages:

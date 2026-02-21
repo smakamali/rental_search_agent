@@ -1,8 +1,18 @@
 """Agent state, flow (§7), and mapping (§7.3). Used by the client that runs the LLM loop."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from rental_search_agent.calendar_service import default_timezone
 from rental_search_agent.models import Listing, RentalSearchFilters, UserDetails
+
+
+def current_date_context() -> str:
+    """Return a string to prepend to system message with today's date."""
+    tz = ZoneInfo(default_timezone())
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    return f"Today's date is {today}.\n\n"
 
 
 @dataclass
@@ -81,8 +91,16 @@ def flow_instructions() -> str:
 
 8. **Verify contact information** Before submitting any viewing request, show the user the contact details that will be used and ask for confirmation. Use ask_user with a prompt that clearly displays the contact info (e.g. "I'll use this contact information for the viewing request: Name: [name], Email: [email], Phone: [phone or 'not provided'].") and ask "Does this look correct?" Use choices like "Yes, submit" and "No, I need to update my details" (single answer). If the user selects "No, I need to update my details", ask for the corrected name/email/phone (or direct them to update their details in the sidebar if available) and then repeat this verification step. Do not call simulate_viewing_request until the user confirms.
 
-9. **Simulate submit** For each selected listing, call simulate_viewing_request(listing_url, timeslot, user_details) with the listing's url, a timeslot string derived from the viewing preference (e.g. "Tuesday 6–8pm"), and the user_details object (name, email, optional phone/preferred_times).
+8c. **Verify date range** Before calling calendar_get_available_slots, use ask_user to confirm the date range with the user. Prompt: "I'll check your calendar for available slots from [start date] to [end date]. Does this date range work for scheduling viewings?" with choices "Yes, proceed" and "No, I want a different range". If the user selects "No", ask what range they prefer (e.g. "Which date range would you like?"), then call calendar_get_available_slots with the updated range.
 
-10. **Confirm** Summarize the simulated viewing requests for the user.
+9. **Get available slots** Call calendar_get_available_slots(preferred_times=viewing_preference, date_range_start=..., date_range_end=...). When the user did not specify a date range, omit date_range_start and date_range_end; the tool will use tomorrow through 2 weeks from today. If the tool returns an error (e.g. credentials not found), inform the user and suggest connecting their calendar, or optionally continue with placeholder timeslots if appropriate.
+
+10. **Draft viewing plan** IMMEDIATELY after calendar_get_available_slots returns, you MUST call draft_viewing_plan. Do NOT respond with text only—always call draft_viewing_plan as a tool. Pass listings=selected_listings (from step 6) and available_slots=the slots array from step 9. If the tool returns "Not enough slots", tell the user and suggest expanding the date range or reducing the number of listings.
+
+11. **Present and approve plan** Use ask_user to show the plan: list each entry as "Address → slot_display" (e.g. "123 Main St → Monday Mar 02, 06:00PM") and ask "Does this viewing plan work for you?" with choices "Approve plan" and "I want to make changes". If the user wants changes, ask what to change, optionally re-run draft_viewing_plan, and re-present. Do not create calendar events or call simulate_viewing_request until the user approves.
+
+12. **Execute** For each entry in the approved plan, in order: (1) call calendar_create_event with summary (e.g. "Rental viewing: [address]"), start_datetime and end_datetime from the plan entry (use the ISO values like "2026-03-02T18:00:00", NOT slot_display), description with listing URL, and extended_properties listing_id/listing_url; (2) call simulate_viewing_request(listing_url, slot_display, user_details).
+
+13. **Confirm** Summarize the created calendar events and simulated viewing requests for the user.
 
 When building approval choices for listing selection, ALWAYS use ask_user with choices (never prompt-only). Use exact choice strings that include listing id (e.g. "[1] 123 Main St — $2800 (id: xyz)") so the user gets a dropdown and selected values can be mapped back to listing url and title."""
