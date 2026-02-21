@@ -100,3 +100,28 @@ class SimulateViewingRequestResponse(BaseModel):
 
     summary: str = Field(..., description="Human-readable summary for the agent to show the user.")
     contact_url: Optional[str] = Field(None, description="Optional mailto or contact URL.")
+
+
+class AvailableSlot(BaseModel):
+    """A timeslot available for a viewing."""
+
+    start: str = Field(..., description="ISO datetime string (inclusive start).")
+    end: str = Field(..., description="ISO datetime string (exclusive end).")
+    display: str = Field(..., description="Human-readable slot label.")
+
+
+class ViewingPlanEntry(BaseModel):
+    """One entry in a viewing plan: listing mapped to a timeslot."""
+
+    listing_id: str = Field(..., description="Listing ID.")
+    listing_address: str = Field(..., description="Listing address.")
+    listing_url: str = Field(..., description="Listing URL.")
+    slot_display: str = Field(..., description="Human-readable timeslot.")
+    start_datetime: str = Field(..., description="ISO datetime start.")
+    end_datetime: str = Field(..., description="ISO datetime end.")
+
+
+class ViewingPlan(BaseModel):
+    """Ordered plan of listing -> timeslot mappings."""
+
+    entries: list[ViewingPlanEntry] = Field(..., description="List of viewing plan entries.")
