@@ -18,6 +18,13 @@ dependencies = [
     "pydeck>=0.8.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
 [project.scripts]
 rental-search-mcp = "rental_search_agent.server:main"
 rental-search-client = "rental_search_agent.client:main"
