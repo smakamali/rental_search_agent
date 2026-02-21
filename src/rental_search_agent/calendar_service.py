@@ -18,8 +18,14 @@ DEFAULT_CREDENTIALS_PATH = _PROJECT_ROOT / ".rental_search_agent" / "credentials
 DEFAULT_TOKEN_PATH = _PROJECT_ROOT / ".rental_search_agent" / "token.json"
 
 REALTOR_CALENDAR_NAME = "Realtor Agent"
+DEFAULT_TIMEZONE = "America/Vancouver"
 
 logger = logging.getLogger(__name__)
+
+
+def default_timezone() -> str:
+    """Return timezone from env or default. Used for calendar and date display."""
+    return os.environ.get("TIMEZONE", DEFAULT_TIMEZONE)
 
 # Weekday numbers: 0=Mon, 6=Sun
 WEEKDAYS = {0, 1, 2, 3, 4}
@@ -140,16 +146,16 @@ def _get_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
-def get_or_create_realtor_calendar_id() -> str:
-    """Return the Realtor Agent calendar ID. Creates the calendar if it does not exist."""
+def get_or_create_realtor_calendar_id(service: Any | None = None) -> str:
+    """Return the Realtor Agent calendar ID. Creates the calendar if it does not exist.
+    If service is provided, uses it; otherwise builds via _get_service()."""
     logger.debug("get_or_create_realtor_calendar_id: acquiring lock")
     with _CREDENTIALS_LOCK:
-        logger.debug("get_or_create_realtor_calendar_id: building service")
-        service = _get_service()
+        svc = service if service is not None else _get_service()
         page_token = None
         while True:
             logger.debug("get_or_create_realtor_calendar_id: listing calendars (page_token=%s)", bool(page_token))
-            result = service.calendarList().list(pageToken=page_token).execute()
+            result = svc.calendarList().list(pageToken=page_token).execute()
             for item in result.get("items", []):
                 if item.get("summary") == REALTOR_CALENDAR_NAME:
                     cal_id = item["id"]
@@ -160,8 +166,8 @@ def get_or_create_realtor_calendar_id() -> str:
                 break
         logger.debug("get_or_create_realtor_calendar_id: creating new calendar")
         created = (
-            service.calendars()
-            .insert(body={"summary": REALTOR_CALENDAR_NAME, "timeZone": "America/Vancouver"})
+            svc.calendars()
+            .insert(body={"summary": REALTOR_CALENDAR_NAME, "timeZone": default_timezone()})
             .execute()
         )
         logger.debug("get_or_create_realtor_calendar_id: created calendar %s", created["id"][:20] + "...")
@@ -219,23 +225,19 @@ def get_available_slots(
     time_min: str,
     time_max: str,
     slot_duration_minutes: int = 60,
-    timezone: str = "America/Vancouver",
+    timezone: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get available slots within preferred times. Uses FreeBusy on primary + Realtor Agent calendars."""
-    from googleapiclient.discovery import build
-
+    if timezone is None:
+        timezone = default_timezone()
     logger.debug("get_available_slots: start (time_min=%s time_max=%s)", time_min, time_max)
     tz = ZoneInfo(timezone)
     time_min_rfc = _to_rfc3339(time_min, tz)
     time_max_rfc = _to_rfc3339(time_max, tz)
+    service = _get_service()
     logger.debug("get_available_slots: getting/creating Realtor calendar")
-    realtor_id = get_or_create_realtor_calendar_id()
+    realtor_id = get_or_create_realtor_calendar_id(service=service)
     logger.debug("get_available_slots: Realtor calendar id resolved")
-
-    logger.debug("get_available_slots: getting credentials")
-    creds = get_credentials()
-    logger.debug("get_available_slots: building service")
-    service = build("calendar", "v3", credentials=creds, cache_discovery=False)
     body = {
         "timeMin": time_min_rfc,
         "timeMax": time_max_rfc,
@@ -311,10 +313,12 @@ def create_event(
     end_datetime: str,
     description: str | None = None,
     location: str | None = None,
-    timezone: str = "America/Vancouver",
+    timezone: str | None = None,
     extended_properties: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Create a calendar event in the Realtor Agent calendar."""
+    if timezone is None:
+        timezone = default_timezone()
     calendar_id = get_or_create_realtor_calendar_id()
     service = _get_service()
     body = {
@@ -338,9 +342,11 @@ def update_event(
     end_datetime: str | None = None,
     description: str | None = None,
     location: str | None = None,
-    timezone: str = "America/Vancouver",
+    timezone: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing event in the Realtor Agent calendar."""
+    if timezone is None:
+        timezone = default_timezone()
     calendar_id = get_or_create_realtor_calendar_id()
     service = _get_service()
     event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
