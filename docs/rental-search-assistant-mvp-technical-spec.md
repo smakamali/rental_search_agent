@@ -78,11 +78,144 @@ flowchart TB
 
 **Data flow (summary):** User ↔ Client ↔ Agent ↔ MCP. For search: `rental_search` → Adapter → pyRealtor ↔ REALTOR.CA; Adapter returns mapped listings to `rental_search` → Agent. `ask_user` and `simulate_viewing_request` do not call external services in this diagram (user input for `ask_user` is gathered via the Client/UI).
 
-### 2.1 Google Calendar (optional)
+### 2.1 Class Diagram
+
+The following diagram captures the main data models and their relationships. Pydantic models form the core; `AgentState` holds runtime state; module-level functions (`adapter`, `calendar_service`, `filtering`, `summarizer`, `viewing_plan`) operate on these types.
+
+```mermaid
+classDiagram
+    class RentalSearchFilters {
+        +int min_bedrooms
+        +int? max_bedrooms
+        +int? min_bathrooms
+        +int? max_bathrooms
+        +int? min_sqft
+        +int? max_sqft
+        +float? rent_min
+        +float? rent_max
+        +str location
+        +str? listing_type
+    }
+
+    class Listing {
+        +str id
+        +str title
+        +str url
+        +str address
+        +float price
+        +str? price_display
+        +int bedrooms
+        +float? sqft
+        +str? source
+        +float? bathrooms
+        +float? latitude
+        +float? longitude
+        +str? house_category
+        +str? postal_code
+        +to_short_label(index) str
+    }
+
+    class UserDetails {
+        +str name
+        +str email
+        +str? phone
+        +str? preferred_times
+    }
+
+    class ListingFilterCriteria {
+        +int? min_bedrooms
+        +int? max_bedrooms
+        +int? min_bathrooms
+        +int? max_bathrooms
+        +int? min_sqft
+        +int? max_sqft
+        +float? rent_min
+        +float? rent_max
+    }
+
+    class RentalSearchResponse {
+        +List~Listing~ listings
+        +int total_count
+    }
+
+    class AskUserAnswerResponse {
+        +str answer
+    }
+
+    class AskUserSelectedResponse {
+        +List~str~ selected
+    }
+
+    class SimulateViewingRequestResponse {
+        +str summary
+        +str? contact_url
+    }
+
+    class AvailableSlot {
+        +str start
+        +str end
+        +str display
+    }
+
+    class ViewingPlanEntry {
+        +str listing_id
+        +str listing_address
+        +str listing_url
+        +str slot_display
+        +str start_datetime
+        +str end_datetime
+    }
+
+    class ViewingPlan {
+        +List~ViewingPlanEntry~ entries
+    }
+
+    class AgentState {
+        +RentalSearchFilters? filters
+        +str viewing_preference
+        +List~Listing~ shortlist
+        +UserDetails? user_details
+    }
+
+    class SearchBackendError {
+        <<Exception>>
+    }
+
+    RentalSearchResponse "1" *-- "0..*" Listing : listings
+    ViewingPlan "1" *-- "0..*" ViewingPlanEntry : entries
+    AgentState o-- RentalSearchFilters : filters
+    AgentState o-- UserDetails : user_details
+    AgentState o-- "0..*" Listing : shortlist
+
+    adapter ..> RentalSearchFilters : uses
+    adapter ..> RentalSearchResponse : returns
+    adapter ..> Listing : maps to
+    filtering ..> Listing : in/out
+    filtering ..> ListingFilterCriteria : uses
+    filtering ..> RentalSearchResponse : returns
+    summarizer ..> Listing : uses
+    viewing_plan ..> ViewingPlan : returns
+    viewing_plan ..> ViewingPlanEntry : creates
+    calendar_service ..> AvailableSlot : produces
+```
+
+| Layer | Module | Key types / functions |
+|-------|--------|------------------------|
+| **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
+| **Agent** | `agent.py` | `AgentState` (dataclass), `flow_instructions()`, `build_approval_choices()`, `selected_to_listings()` |
+| **Adapter** | `adapter.py` | `search(filters)`, `SearchBackendError` |
+| **Filtering** | `filtering.py` | `filter_listings(listings, criteria, sort_by, ascending)` |
+| **Summarizer** | `summarizer.py` | `summarize_listings(listings)` |
+| **Viewing plan** | `viewing_plan.py` | `draft_viewing_plan(listings, available_slots)` |
+| **Calendar** | `calendar_service.py` | `get_available_slots()`, `list_events()`, `create_event()`, `update_event()`, `delete_event()` |
+| **MCP Server** | `server.py` | FastMCP tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_*`, `draft_viewing_plan` |
+| **Client** | `client.py` | `run_agent_step()`, `run_agent_loop()` — orchestrates LLM + tool calls |
+
+### 2.2 Google Calendar (optional)
 
 Calendar tools use the **Google Calendar API** with OAuth 2.0. Credentials: place `credentials.json` in `.rental_search_agent/` (or set `GOOGLE_CALENDAR_CREDENTIALS_PATH`). On first run, a browser flow stores the token at `token.json` (or `GOOGLE_CALENDAR_TOKEN_PATH`). If credentials are missing, calendar tools return an error; the agent can fall back to simulated-only flow.
 
-### 2.2 LLM provider (OpenRouter)
+### 2.3 LLM provider (OpenRouter)
 
 The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backend: a single API (`https://openrouter.ai/api/v1`) and one API key provide access to 400+ models (OpenAI, Anthropic, Google, etc.) with a normalized chat-completions interface. The implementation uses the OpenAI-compatible Python client with `base_url` and `OPENROUTER_API_KEY`; model is selected via `OPENROUTER_MODEL` (e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet`). If `OPENROUTER_API_KEY` is not set, the client falls back to direct OpenAI (`OPENAI_API_KEY`, `OPENAI_MODEL`).
 
