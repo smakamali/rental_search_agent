@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 from openai import OpenAI
 
 from rental_search_agent.adapter import SearchBackendError, search
+from rental_search_agent.calendar_service import default_timezone
 from rental_search_agent.agent import current_date_context, flow_instructions, selected_to_listings
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.models import Listing, ListingFilterCriteria, RentalSearchFilters
@@ -378,7 +380,7 @@ def run_tool(name: str, arguments: dict, *, current_listings: list[dict] | None 
     if name == "calendar_get_available_slots":
         try:
             logger.debug("calendar_get_available_slots: computing date range")
-            tz = ZoneInfo("America/Vancouver")
+            tz = ZoneInfo(default_timezone())
             now = datetime.now(tz)
             tomorrow = (now.date() + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
             two_weeks = (now.date() + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59")
@@ -648,7 +650,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                 except Exception as e:
                     logger.debug("draft_viewing_plan auto-call failed: %s", e)
                     result = json.dumps({"error": str(e)})
-                synthetic_id = "call_auto_draft_viewing_plan"
+                synthetic_id = f"call_auto_draft_viewing_plan_{uuid.uuid4().hex}"
                 assistant_msg = {
                     "role": "assistant",
                     "content": msg.content or "",
