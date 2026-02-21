@@ -9,7 +9,7 @@ This document provides implementation-ready technical specifications for the [Re
 | Item | Description |
 |------|-------------|
 | **Source** | [rental-search-assistant-mvp.md](rental-search-assistant-mvp.md) |
-| **Scope** | MCP server (five tools), rental search backend adapter, agent orchestration behaviour |
+| **Scope** | MCP server (eleven tools), rental search backend adapter, Google Calendar integration, viewing plan drafting, agent orchestration behaviour |
 
 ---
 
@@ -35,6 +35,12 @@ flowchart TB
         T2b[filter_listings]
         T2c[summarize_listings]
         T3[simulate_viewing_request]
+        T4[calendar_list_events]
+        T5[calendar_get_available_slots]
+        T6[calendar_create_event]
+        T7[calendar_update_event]
+        T8[calendar_delete_event]
+        T9[draft_viewing_plan]
     end
 
     subgraph Backend["Rental Search Backend"]
@@ -43,9 +49,15 @@ flowchart TB
         Adapter <--> PyRealtor
     end
 
-    subgraph External["External Data Source"]
+    subgraph External["External"]
         REALTOR[REALTOR.CA]
+        GC[Google Calendar]
     end
+
+    T5 -->|"OAuth"| GC
+    T6 -->|"create"| GC
+    T7 -->|"update"| GC
+    T8 -->|"delete"| GC
 
     U <-->|"NL query, answers,\napproval"| UI
     Agent <-->|"tool calls /\nresults"| MCP
@@ -59,14 +71,18 @@ flowchart TB
 | **User** | Supplies natural-language search, answers clarification and approval prompts (via Chat UI), receives shortlist and confirmation. |
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
-| **MCP Server** | Exposes five tools: `ask_user` (clarification/approval), `rental_search` (listings), `filter_listings` (narrow/sort results), `summarize_listings` (stats), `simulate_viewing_request` (simulated viewing request). Handles tool invocation and return values. |
+| **MCP Server** | Exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. Handles tool invocation and return values. |
 | **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into pyRealtor calls; maps pyRealtor/REALTOR.CA output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
 | **pyRealtor** | Python package (`HousesFacade.search_save_houses`); fetches MLS data from REALTOR.CA for the given location (e.g. Vancouver). |
 | **REALTOR.CA** | External listing source (Canada); provides listing data consumed by pyRealtor. |
 
 **Data flow (summary):** User ↔ Client ↔ Agent ↔ MCP. For search: `rental_search` → Adapter → pyRealtor ↔ REALTOR.CA; Adapter returns mapped listings to `rental_search` → Agent. `ask_user` and `simulate_viewing_request` do not call external services in this diagram (user input for `ask_user` is gathered via the Client/UI).
 
-### 2.1 LLM provider (OpenRouter)
+### 2.1 Google Calendar (optional)
+
+Calendar tools use the **Google Calendar API** with OAuth 2.0. Credentials: place `credentials.json` in `.rental_search_agent/` (or set `GOOGLE_CALENDAR_CREDENTIALS_PATH`). On first run, a browser flow stores the token at `token.json` (or `GOOGLE_CALENDAR_TOKEN_PATH`). If credentials are missing, calendar tools return an error; the agent can fall back to simulated-only flow.
+
+### 2.2 LLM provider (OpenRouter)
 
 The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backend: a single API (`https://openrouter.ai/api/v1`) and one API key provide access to 400+ models (OpenAI, Anthropic, Google, etc.) with a normalized chat-completions interface. The implementation uses the OpenAI-compatible Python client with `base_url` and `OPENROUTER_API_KEY`; model is selected via `OPENROUTER_MODEL` (e.g. `openai/gpt-4o-mini`, `anthropic/claude-3.5-sonnet`). If `OPENROUTER_API_KEY` is not set, the client falls back to direct OpenAI (`OPENAI_API_KEY`, `OPENAI_MODEL`).
 
@@ -176,7 +192,18 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 }
 ```
 
-### 4.4 Timeslot (for simulate_viewing_request)
+### 4.4 Viewing plan (from draft_viewing_plan)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `listing_id` | string | Listing ID. |
+| `listing_address` | string | Listing address. |
+| `listing_url` | string | Canonical URL. |
+| `slot_display` | string | Human-readable timeslot (e.g. "Monday Mar 02, 06:00PM"). |
+| `start_datetime` | string | ISO datetime start. |
+| `end_datetime` | string | ISO datetime end. |
+
+### 4.5 Timeslot (for simulate_viewing_request)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -323,6 +350,70 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 ---
 
+### 5.6 Calendar tools
+
+#### `calendar_list_events`
+
+**Purpose:** List events in the given time range from the user's calendar.
+
+**Arguments:** `time_min`, `time_max` (ISO datetime strings), `calendar_id` (default `"primary"`), `max_results` (default 50).
+
+**Response:** `{ "events": [{ "id", "summary", "start", "end" }, ...] }`.
+
+---
+
+#### `calendar_get_available_slots`
+
+**Purpose:** Get available calendar slots within the user's preferred viewing times. Call **before** drafting a viewing plan.
+
+**Arguments:** `preferred_times` (e.g. "weekday evenings 6-8pm"), `date_range_start`, `date_range_end` (ISO datetime; optional, default tomorrow through 2 weeks from today), `slot_duration_minutes` (default 60).
+
+**Response:** `{ "slots": [{ "start", "end", "display" }, ...] }`.
+
+---
+
+#### `calendar_create_event`
+
+**Purpose:** Create a calendar event (e.g. for a viewing). Store `listing_id` and `listing_url` in extended properties for update flow.
+
+**Arguments:** `summary`, `start_datetime`, `end_datetime` (ISO format), optional `description`, `location`, `listing_id`, `listing_url`.
+
+**Response:** `{ "id", "htmlLink", "summary" }`.
+
+---
+
+#### `calendar_update_event`
+
+**Purpose:** Update an existing calendar event.
+
+**Arguments:** `event_id`, optional `summary`, `start_datetime`, `end_datetime`, `description`, `location`.
+
+**Response:** `{ "id", "htmlLink", "summary" }`.
+
+---
+
+#### `calendar_delete_event`
+
+**Purpose:** Delete a calendar event.
+
+**Arguments:** `event_id`.
+
+**Response:** `{ "deleted": event_id }`.
+
+---
+
+### 5.7 `draft_viewing_plan`
+
+**Purpose:** Draft a viewing plan by assigning available slots to listings. Clusters nearby listings (by lat/lon) to minimize commute. Call **immediately** after `calendar_get_available_slots` returns.
+
+**Arguments:** `listings` (selected listings with `id`, `address`, `url`, `latitude`, `longitude`), `available_slots` (from `calendar_get_available_slots`).
+
+**Response:** `{ "entries": [{ "listing_id", "listing_address", "listing_url", "slot_display", "start_datetime", "end_datetime" }, ...] }`.
+
+**Errors:** If more listings than slots, raises ValueError; agent should suggest expanding date range or reducing listings.
+
+---
+
 ## 6. Rental Search Backend (Adapter) Contract
 
 The MCP server’s `rental_search` tool talks to a **single** rental backend (API or scraper). The adapter must:
@@ -360,7 +451,6 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 | **Address** | string | Map to `address`. |
 | **Description** | string | Use for `title` or description if no dedicated title. |
 | **Website** | string | Map to `url`. |
-| **Total Rent** | number (for rent) | When `listing_type` is for_rent, use for `price` and filtering; prefer over Rent when present. |
 | **Latitude**, **Longitude** | number | Optional; for mapping/proximity. |
 | **House Category**, **Ownership Category** | string | Optional metadata. |
 | **Open House**, **Ammenities**, **Nearby Ammenities**, **Stories** | string | Optional metadata. |
@@ -403,8 +493,12 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 8. **Approve** → `ask_user(prompt, choices = listing labels/ids, allow_multiple: true)`. If `selected` is empty → acknowledge “No viewings requested.” and stop (no user-details collection, no simulate).
 9. **Collect user details** → If not already in state, use chat or `ask_user` to get name, email, phone. Validate minimally.
 10. **Verify contact** → Before simulate, show user details and ask for confirmation via `ask_user`.
-11. **Simulate submit** → For each selected listing, choose a timeslot string from viewing preference, then `simulate_viewing_request(listing_url, timeslot, user_details)`.
-12. **Confirm** → Reply with summary of simulated requests (listings and times).
+11. **Verify date range** → Before calling `calendar_get_available_slots`, use `ask_user` to confirm the date range with the user.
+12. **Get available slots** → Call `calendar_get_available_slots(preferred_times, date_range_start?, date_range_end?)`. If credentials missing, inform user; optionally continue with simulated-only flow.
+13. **Draft viewing plan** → **Immediately** after `calendar_get_available_slots` returns, call `draft_viewing_plan(listings, available_slots)`. If "Not enough slots", suggest expanding date range or reducing listings.
+14. **Present and approve plan** → Use `ask_user` to show plan (Address → slot_display) and ask "Does this viewing plan work?" Do not create events or call simulate until user approves.
+15. **Execute** → For each plan entry: (1) `calendar_create_event` with summary, start_datetime, end_datetime from plan (ISO values, not slot_display); (2) `simulate_viewing_request(listing_url, slot_display, user_details)`.
+16. **Confirm** → Reply with summary of created calendar events and simulated viewing requests.
 
 ### 7.3 Mapping approval choices back to listings
 
@@ -501,4 +595,4 @@ For implementers who want to validate inputs/outputs, below are minimal JSON Sch
 |---------|------|--------|
 | 0.1 | Feb 17, 2026 | Initial technical spec derived from rental-search-assistant-mvp.md. |
 | 0.2 | Feb 20, 2026 | Added `filter_listings` and `summarize_listings` tools; Listing fields `price_display`, `postal_code`; backend columns Total Rent, Postal Code; updated agent flow (steps 4–12) and MCP server component table. |
-| 0.2 | Feb 20, 2026 | Added `filter_listings` and `summarize_listings` tools; Listing fields `price_display`, `postal_code`; backend columns Total Rent, Postal Code; updated agent flow (steps 4–12) and MCP server component table. |
+| 0.3 | Feb 20, 2026 | Added Google Calendar integration (calendar_list_events, calendar_get_available_slots, calendar_create_event, calendar_update_event, calendar_delete_event), draft_viewing_plan; ViewingPlanEntry model; updated agent flow (steps 11–16) with calendar and viewing plan. |
