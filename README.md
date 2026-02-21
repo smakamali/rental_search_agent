@@ -1,6 +1,6 @@
 # Rental Search Assistant MVP
 
-Chat-based rental search assistant: natural-language search, shortlist, and simulated viewing requests. Uses REALTOR.CA via **pyRealtor** only; the Apify backend is **not** used in this MVP.
+Chat-based rental search assistant: natural-language search, shortlist, viewing plan drafting (with Google Calendar), and simulated viewing requests. Uses REALTOR.CA via **pyRealtor** only; the Apify backend is **not** used in this MVP.
 
 **LLM:** The client uses [OpenRouter](https://openrouter.ai) by default (one API key, 400+ models). You can still use direct OpenAI via `OPENAI_API_KEY`.
 
@@ -31,6 +31,8 @@ pip install -e .
 | `OPENAI_API_KEY` | Alternative to OpenRouter. Direct OpenAI API key (used if `OPENROUTER_API_KEY` is not set). |
 | `OPENAI_MODEL` | Optional when using OpenAI. Model name (default: `gpt-4o-mini`). |
 | `USE_PROXY` | Optional. Set to `1`, `true`, or `yes` to enable proxy for pyRealtor (e.g. if REALTOR.CA rate-limits). |
+| `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
+| `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
 
 ## Running
 
@@ -48,7 +50,7 @@ Or:
 python -m rental_search_agent.server
 ```
 
-The server exposes five tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`. It uses stdio by default.
+The server exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. It uses stdio by default.
 
 ### Chat client (CLI)
 
@@ -84,6 +86,17 @@ streamlit run src/rental_search_agent/streamlit_app.py
 ```
 
 The CLI remains available as `rental-search-client` or `python -m rental_search_agent.client` for terminal use.
+
+## Google Calendar (optional)
+
+Calendar tools (`calendar_get_available_slots`, `calendar_create_event`, etc.) use the Google Calendar API. To enable:
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com) and enable the Calendar API.
+2. Download OAuth client credentials (Desktop app) as `credentials.json`.
+3. Place it in `.rental_search_agent/` (or set `GOOGLE_CALENDAR_CREDENTIALS_PATH`).
+4. On first use, a browser will open for OAuth; the token is saved at `.rental_search_agent/token.json`.
+
+Without credentials, calendar tools return an error; the agent can fall back to a simulated-only flow (no events created).
 
 ## Testing
 
