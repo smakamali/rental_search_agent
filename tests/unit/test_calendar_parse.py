@@ -50,3 +50,16 @@ class TestParsePreferredTimes:
         days, start, end = parse_preferred_times("mornings")
         assert start == 9
         assert end == 12
+
+    @pytest.mark.parametrize(
+        "input_str, expected_start, expected_end",
+        [
+            ("18:00-20:15", 18, 20),
+            ("9-17", 9, 17),
+        ],
+    )
+    def test_explicit_time_ranges(self, input_str, expected_start, expected_end):
+        days, start, end = parse_preferred_times(input_str)
+        assert days == ALL_DAYS
+        assert start == expected_start
+        assert end == expected_end
