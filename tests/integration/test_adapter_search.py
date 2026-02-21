@@ -152,7 +152,13 @@ class TestAdapterSearch:
         mock_pyRealtor.HousesFacade.return_value = mock_facade
 
         with patch.dict(sys.modules, {"pyRealtor": mock_pyRealtor}):
-
             filters = RentalSearchFilters(min_bedrooms=2, location="Vancouver")
             with pytest.raises(SearchBackendError, match="temporarily unavailable"):
+                search(filters)
+
+    def test_search_raises_error_when_pyrealtor_missing(self):
+        """When pyRealtor is missing or broken, search raises SearchBackendError."""
+        with patch.dict(sys.modules, {"pyRealtor": None}, clear=False):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            with pytest.raises(SearchBackendError):
                 search(filters)
