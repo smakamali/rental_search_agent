@@ -24,6 +24,8 @@ flowchart TB
         T2b[filter_listings]
         T2c[summarize_listings]
         T3[simulate_viewing_request]
+        T4[calendar_*]
+        T5[draft_viewing_plan]
     end
 
     subgraph External["External"]
@@ -39,7 +41,7 @@ flowchart TB
 |-----------|------|
 | **User** | Supplies natural-language search, answers clarification and approval prompts, receives shortlist and confirmation. |
 | **Client (Chat + Agent)** | Chat UI and LLM agent: parses intent, orchestrates the flow, calls MCP tools, presents shortlist and final summary. |
-| **MCP Server** | Exposes five tools: `ask_user` (clarification/approval), `rental_search` (listings), `filter_listings` (narrow/sort), `summarize_listings` (stats), `simulate_viewing_request` (mock submit). |
+| **MCP Server** | Exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. |
 | **Rental Search API** | Single external source used by `rental_search` to return listings (API or scraped site). |
 
 ---
@@ -55,14 +57,16 @@ flowchart TB
 | **Single search engine** | One `rental_search(filters)` call against one API or one scraped site. |
 | **Shortlist** | Present search results as the shortlist (filtering = whatever the search engine supports). No proximity verification. |
 | **User approval** | Ask user which listings they want to request viewings for (multi-select). |
-| **Simulated viewing request** | A tool that “submits” a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
+| **Simulated viewing request** | A tool that "submits" a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
+| **Calendar integration** | Google Calendar API: list events, get available slots within preferred times, create/update/delete events. Optional; agent can fall back to simulated-only flow if credentials missing. |
+| **Viewing plan** | `draft_viewing_plan` assigns slots to listings, clustering nearby listings (by lat/lon) to minimize commute. User approves plan before events are created. | “submits” a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
 
 ### Out of scope (for later)
 
 | Component | Reason |
 |-----------|--------|
 | **Proximity verification** | Geocoding, routing/transit APIs, and config (downtown, skytrain) add significant setup. |
-| **Calendar integration** | OAuth and calendar APIs are out of scope; user states preferred times in natural language only. |
+| **Viewing plan editing** | User cannot yet adjust draft plan (add/remove listings, change times) in MVP; plan approval is binary. |
 | **Viewing request log / double-booking** | No persistent log or slot-dedup; optional in-memory only. |
 | **Real form submission** | No browser automation or platform-specific form adapters; submission is simulated. |
 | **Multiple search engines** | One source only. |
@@ -134,7 +138,13 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 | Tool  | `rental_search(filters)` | Search one rental engine; return listing list. |
 | Tool  | `filter_listings(filters?, sort_by?, ascending?)` | Narrow and/or sort current search results in-memory. Operates on last rental_search/filter_listings result. |
 | Tool  | `summarize_listings()` | Compute statistics (price, bedrooms, bathrooms, size, property types) for current results. Operates on last rental_search/filter_listings result. |
-| Tool  | `simulate_viewing_request(listing_url, timeslot, user_details)` | “Submit” viewing request (no real form; return summary/link). |
+| Tool  | `simulate_viewing_request(listing_url, timeslot, user_details)` | "Submit" viewing request (no real form; return summary/link). |
+| Tool  | `calendar_list_events(time_min, time_max, ...)` | List events in time range. |
+| Tool  | `calendar_get_available_slots(preferred_times, date_range_start?, date_range_end?, ...)` | Get available slots. Call before draft_viewing_plan. |
+| Tool  | `calendar_create_event(summary, start_datetime, end_datetime, ...)` | Create calendar event for viewing. |
+| Tool  | `calendar_update_event(event_id, ...)` | Update calendar event. |
+| Tool  | `calendar_delete_event(event_id)` | Delete calendar event. |
+| Tool  | `draft_viewing_plan(listings, available_slots)` | Assign slots to listings; call immediately after calendar_get_available_slots. | “Submit” viewing request (no real form; return summary/link). |
 
 **Not in MVP:** `check_proximity`, `get_available_timeslots`, `get_viewing_requests`, `log_viewing_request`, real `submit_viewing_request`, resources like `user_profile://contact` or `config://proximity`.
 
@@ -152,7 +162,12 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 8. **Approve** — `ask_user` with multi-select: which listings to request viewings for. If user selects none, confirm and stop (no simulate step).
 9. **Collect user details** — Before the first viewing request, collect name, email, and phone via `ask_user` or chat if not already known.
 10. **Verify contact** — Show user details and ask for confirmation before simulate.
-11. **Simulate submit** — For each approved listing, pick a time from the user’s viewing preference, call `simulate_viewing_request(listing_url, timeslot, user_details)`.
+11. **Verify date range** — Before calling `calendar_get_available_slots`, use `ask_user` to confirm the date range.
+12. **Get available slots** — Call `calendar_get_available_slots(preferred_times, date_range_start?, date_range_end?)`. If credentials missing, inform user; optionally fall back to simulated-only flow.
+13. **Draft viewing plan** — **Immediately** after slots returned, call `draft_viewing_plan(listings, available_slots)`. If "Not enough slots", suggest expanding date range or reducing listings.
+14. **Present and approve plan** — Use `ask_user` to show plan (Address to slot) and ask "Does this viewing plan work?" Do not create events or simulate until user approves.
+15. **Execute** — For each plan entry: (1) `calendar_create_event`; (2) `simulate_viewing_request`.
+16. **Confirm** — Reply with summary of created calendar events and simulated viewing requests. — For each approved listing, pick a time from the user’s viewing preference, call `simulate_viewing_request(listing_url, timeslot, user_details)`.
 12. **Confirm** — Reply with summary: “Viewing requests [simulated] for [A, B] at [times].”
 
 ---
@@ -161,7 +176,7 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 
 - **LLM:** The client uses [OpenRouter](https://openrouter.ai) by default for LLM calls (unified API for many models); direct OpenAI remains supported via environment variables.
 - **Single engine:** Choose one rental API or one site to scrape; document it.
-- **No calendar:** Preferred times are free text from the user only.
+- **Calendar:** Google Calendar API for available slots and event management; optional (agent can fall back to simulated-only flow if credentials missing).
 - **No double-booking guarantee:** Optional in-memory “log” is fine for learning; not required.
 - **Simulated submit:** Keeps the flow intact for learning without Playwright, selectors, or ToS concerns.
 
