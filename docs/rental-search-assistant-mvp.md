@@ -152,6 +152,98 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 
 ## 6. Agent Flow (MVP End-to-End)
 
+### Workflow Diagram
+
+The diagram below captures the agent's end-to-end workflow: parse → clarify → search → shortlist → approve → execute.
+
+```mermaid
+flowchart TB
+    subgraph Input["User Input"]
+        U1[Natural language query]
+    end
+
+    subgraph Discovery["Discovery"]
+        P1[1. Parse criteria]
+        C1{2. Location ambiguous?}
+        P2[Clarify geography]
+        S1[3. rental_search]
+        N1{Results empty?}
+        E1[Suggest relaxing filters, offer to retry]
+    end
+
+    subgraph Shortlist["Shortlist"]
+        P3[4. Present: summarize_listings + table]
+        F1{5. User wants to narrow/sort?}
+        P4[filter_listings, re-present]
+        C2{6. Results look good?}
+        P5[7. Get viewing preference]
+    end
+
+    subgraph Approval["Approval"]
+        A1[8. ask_user: which listings?]
+        A2{User selected any?}
+        S2[No viewings requested — stop]
+    end
+
+    subgraph Prep["Preparation"]
+        U2[9. Collect user details]
+        V1[10. Verify contact]
+        V2[11. Verify date range]
+    end
+
+    subgraph Calendar["Calendar & Plan"]
+        G1[12. calendar_get_available_slots]
+        D1[13. draft_viewing_plan]
+        D2{Enough slots?}
+        P6[14. Present plan, ask approval]
+        A3{15. Plan approved?}
+    end
+
+    subgraph Execute["Execute"]
+        X1[16. For each: calendar_create_event + simulate_viewing_request]
+        X2[17. Confirm summary]
+    end
+
+    U1 --> P1
+    P1 --> C1
+    C1 -->|Yes| P2 --> S1
+    C1 -->|No| S1
+    S1 --> N1
+    N1 -->|Yes| E1
+    N1 -->|No| P3
+    P3 --> F1
+    F1 -->|Yes| P4 --> C2
+    F1 -->|No| C2
+    P4 -.->|refine again| F1
+    C2 -->|Refine| F1
+    C2 -->|Good| P5
+    P5 --> A1
+    A1 --> A2
+    A2 -->|No| S2
+    A2 -->|Yes| U2
+    U2 --> V1 --> V2 --> G1
+    G1 --> D1 --> D2
+    D2 -->|Not enough| P6
+    D2 -->|OK| P6
+    P6 --> A3
+    A3 -->|No| P6
+    A3 -->|Yes| X1
+    X1 --> X2
+```
+
+| Phase | Steps | Key Tools |
+|-------|-------|-----------|
+| Discovery | 1–3 | Parse (LLM), `ask_user`, `rental_search` |
+| Shortlist | 4–7 | `summarize_listings`, `filter_listings`, `ask_user` |
+| Approval | 8 | `ask_user` (multi-select) |
+| Preparation | 9–11 | `ask_user` (gather details, verify) |
+| Calendar & Plan | 12–15 | `calendar_get_available_slots`, `draft_viewing_plan`, `ask_user` |
+| Execute | 16–17 | `calendar_create_event`, `simulate_viewing_request` |
+
+---
+
+### Flow Steps (Detailed)
+
 1. **Parse** — From user message, extract: beds, sqft, rent range, location.
 2. **Clarify geography (optional)** — If location ambiguous, `ask_user` for geography. Do not ask for viewing times yet.
 3. **Search** — Call `rental_search(filters)` once; result list = shortlist. If no results, see [Error and empty states](#8-error-and-empty-states-mvp).
@@ -167,8 +259,7 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 13. **Draft viewing plan** — **Immediately** after slots returned, call `draft_viewing_plan(listings, available_slots)`. If "Not enough slots", suggest expanding date range or reducing listings.
 14. **Present and approve plan** — Use `ask_user` to show plan (Address to slot) and ask "Does this viewing plan work?" Do not create events or simulate until user approves.
 15. **Execute** — For each plan entry: (1) `calendar_create_event`; (2) `simulate_viewing_request`.
-16. **Confirm** — Reply with summary of created calendar events and simulated viewing requests. — For each approved listing, pick a time from the user’s viewing preference, call `simulate_viewing_request(listing_url, timeslot, user_details)`.
-12. **Confirm** — Reply with summary: “Viewing requests [simulated] for [A, B] at [times].”
+16. **Confirm** — Reply with summary of created calendar events and simulated viewing requests.
 
 ---
 
