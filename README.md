@@ -85,6 +85,16 @@ streamlit run src/rental_search_agent/streamlit_app.py
 
 The CLI remains available as `rental-search-client` or `python -m rental_search_agent.client` for terminal use.
 
+## Testing
+
+With the `realtor_agent` conda env active:
+
+```bash
+pip install -e ".[dev]"
+pytest
+pytest --cov=rental_search_agent --cov-report=term-missing
+```
+
 ## Backend
 
 - **In scope:** Single backend **pyRealtor** (REALTOR.CA, Canada/Vancouver). No other backends.
