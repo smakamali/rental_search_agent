@@ -128,6 +128,18 @@ class TestGetCurrentListingsFromMessages:
         result = _get_current_listings_from_messages(messages)
         assert result == []
 
+    def test_error_and_listings_listings_take_precedence(self):
+        """When a tool result has both 'error' and 'listings', listings are returned (listings take precedence)."""
+        listings = [{"id": "1", "address": "123 Main St"}]
+        messages = [
+            {
+                "role": "tool",
+                "content": json.dumps({"error": "partial failure", "listings": listings}),
+            },
+        ]
+        result = _get_current_listings_from_messages(messages)
+        assert result == listings
+
     def test_malformed_json_skipped(self):
         listings = [{"id": "1"}]
         messages = [
