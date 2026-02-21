@@ -33,6 +33,7 @@ pip install -e .
 | `USE_PROXY` | Optional. Set to `1`, `true`, or `yes` to enable proxy for pyRealtor (e.g. if REALTOR.CA rate-limits). |
 | `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
+| `TIMEZONE` | Optional. Timezone for calendar and date display (default: `America/Vancouver`). |
 
 ## Running
 
