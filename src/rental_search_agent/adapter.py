@@ -1,5 +1,6 @@
 """Rental search backend adapter: pyRealtor → Listing shape. Per spec §6."""
 
+import logging
 import os
 import re
 import tempfile
@@ -8,6 +9,8 @@ from typing import Optional
 import pandas as pd
 
 from rental_search_agent.models import Listing, RentalSearchFilters, RentalSearchResponse
+
+logger = logging.getLogger(__name__)
 
 
 class SearchBackendError(Exception):
@@ -132,6 +135,7 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
             )
         except Exception as e:
             os.chdir(cwd)
+            logger.warning("Rental search failed: %s: %s", type(e).__name__, e)
             raise SearchBackendError("The rental search is temporarily unavailable.") from e
         finally:
             os.chdir(cwd)
@@ -143,6 +147,7 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
                 report_path = os.path.join(tmpdir, report_name)
                 df = pd.read_excel(report_path, sheet_name="Listings")
         except Exception as e:
+            logger.warning("Rental search (read results) failed: %s: %s", type(e).__name__, e)
             raise SearchBackendError("The rental search is temporarily unavailable.") from e
 
     if df.empty:
