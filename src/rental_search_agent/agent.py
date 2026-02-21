@@ -4,12 +4,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from rental_search_agent.calendar_service import default_timezone
 from rental_search_agent.models import Listing, RentalSearchFilters, UserDetails
 
 
 def current_date_context() -> str:
     """Return a string to prepend to system message with today's date."""
-    tz = ZoneInfo("America/Vancouver")
+    tz = ZoneInfo(default_timezone())
     today = datetime.now(tz).strftime("%Y-%m-%d")
     return f"Today's date is {today}.\n\n"
 
