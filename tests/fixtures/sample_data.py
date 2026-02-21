@@ -44,6 +44,50 @@ def sample_listings(n: int = 3) -> list[Listing]:
     ]
 
 
+def sample_available_slots(n: int = 3) -> list[dict]:
+    """Create n sample available slot dicts with start, end, display."""
+    from datetime import datetime, timedelta
+
+    base = datetime(2026, 2, 25, 18, 0, 0)
+    slots = []
+    for i in range(n):
+        start = base + timedelta(hours=i * 2)
+        end = start + timedelta(hours=1)
+        slots.append({
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "display": start.strftime("%A %b %d, %I:%M%p"),
+        })
+    return slots
+
+
+def sample_listings_with_coords() -> list[dict]:
+    """Listings for clustering tests: two downtown Vancouver (close), one Surrey (far)."""
+    return [
+        {
+            "id": "mls-001",
+            "address": "123 Main St, Vancouver",
+            "url": "https://example.com/1",
+            "latitude": 49.28,
+            "longitude": -123.12,
+        },
+        {
+            "id": "mls-002",
+            "address": "456 Granville St, Vancouver",
+            "url": "https://example.com/2",
+            "latitude": 49.283,
+            "longitude": -123.115,
+        },
+        {
+            "id": "mls-003",
+            "address": "789 King George Blvd, Surrey",
+            "url": "https://example.com/3",
+            "latitude": 49.19,
+            "longitude": -122.85,
+        },
+    ]
+
+
 def sample_rental_filters(
     min_bedrooms: int = 2,
     location: str = "Vancouver",
