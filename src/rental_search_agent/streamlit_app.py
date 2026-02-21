@@ -16,7 +16,7 @@ try:
 except ImportError:
     pdk = None
 
-from rental_search_agent.agent import flow_instructions
+from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
 
 # Keys for stored user preferences (viewing time, name, email, phone)
@@ -74,9 +74,9 @@ def _preferences_block(prefs: dict) -> str:
 
 
 def _build_system_content() -> str:
-    """System message content: flow instructions + current preferences block."""
+    """System message content: current date + flow instructions + current preferences block."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
-    return flow_instructions() + "\n\n" + _preferences_block(prefs)
+    return current_date_context() + flow_instructions() + "\n\n" + _preferences_block(prefs)
 
 
 def _ensure_env_loaded() -> None:
@@ -98,6 +98,7 @@ def _get_client_and_model():
 
 
 def _init_session_state() -> None:
+    _ensure_env_loaded()
     if "user_preferences" not in st.session_state:
         st.session_state["user_preferences"] = _load_preferences_from_file()
     if "messages" not in st.session_state:
