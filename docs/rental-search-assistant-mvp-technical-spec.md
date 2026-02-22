@@ -41,6 +41,7 @@ flowchart TB
         T7[calendar_update_event]
         T8[calendar_delete_event]
         T9[draft_viewing_plan]
+        T10[modify_viewing_plan]
     end
 
     subgraph Backend["Rental Search Backend"]
@@ -71,7 +72,7 @@ flowchart TB
 | **User** | Supplies natural-language search, answers clarification and approval prompts (via Chat UI), receives shortlist and confirmation. |
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
-| **MCP Server** | Exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. Handles tool invocation and return values. |
+| **MCP Server** | Exposes twelve tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
 | **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into pyRealtor calls; maps pyRealtor/REALTOR.CA output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
 | **pyRealtor** | Python package (`HousesFacade.search_save_houses`); fetches MLS data from REALTOR.CA for the given location (e.g. Vancouver). |
 | **REALTOR.CA** | External listing source (Canada); provides listing data consumed by pyRealtor. |
@@ -541,9 +542,21 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 **Arguments:** `listings` (selected listings with `id`, `address`, `url`, `latitude`, `longitude`), `available_slots` (from `calendar_get_available_slots`).
 
-**Response:** `{ "entries": [{ "listing_id", "listing_address", "listing_url", "slot_display", "start_datetime", "end_datetime" }, ...] }`.
+**Response:** `{ "entries": [{ "listing_id", "listing_address", "listing_url", "slot_display", "start_datetime", "end_datetime" }, ...], "unused_slots": [{ "start", "end", "display" }, ...] }`.
 
 **Errors:** If more listings than slots, raises ValueError; agent should suggest expanding date range or reducing listings.
+
+---
+
+### 5.8 `modify_viewing_plan`
+
+**Purpose:** Modify the viewing plan when the user wants changes in Step 11. Supports add (listings to add with slot), remove (listing IDs to remove), and update (change slot for a listing).
+
+**Arguments:** `current_entries` (existing plan entries from last `draft_viewing_plan` or `modify_viewing_plan`), `available_slots` (from `calendar_get_available_slots`), `remove` (optional list of listing IDs), `add` (optional list of `{listing_id, listing_address, listing_url, slot: {start, end, display}}`), `update` (optional list of `{listing_id, new_slot: {start, end, display}}`). Current plan and available slots are derived from message history by the client; the agent passes only `remove`, `add`, `update`.
+
+**Response:** `{ "entries": [...], "unused_slots": [...] }` (same shape as `draft_viewing_plan`).
+
+**Errors:** Listing not found (remove/update); slot already in use; slot not in available_slots; listing already in plan (add).
 
 ---
 
@@ -629,7 +642,7 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 11. **Verify date range** → Before calling `calendar_get_available_slots`, use `ask_user` to confirm the date range with the user.
 12. **Get available slots** → Call `calendar_get_available_slots(preferred_times, date_range_start?, date_range_end?)`. If credentials missing, inform user; optionally continue with simulated-only flow.
 13. **Draft viewing plan** → **Immediately** after `calendar_get_available_slots` returns, call `draft_viewing_plan(listings, available_slots)`. If "Not enough slots", suggest expanding date range or reducing listings.
-14. **Present and approve plan** → Use `ask_user` to show plan (Address → slot_display) and ask "Does this viewing plan work?" Do not create events or call simulate until user approves.
+14. **Present and approve plan** → Use `ask_user` to show plan (Address → slot_display) and ask "Does this viewing plan work?" If the user wants changes, ask what to modify (add, remove, or update slot), then call `modify_viewing_plan` with `remove`, `add`, and/or `update` as appropriate. Use `unused_slots` from the plan response for valid add/update slots. Use `draft_viewing_plan` only for a full re-plan (e.g. different date range). Re-present and repeat until user approves. Do not create events or call simulate until user approves.
 15. **Execute** → For each plan entry: (1) `calendar_create_event` with summary, start_datetime, end_datetime from plan (ISO values, not slot_display); (2) `simulate_viewing_request(listing_url, slot_display, user_details)`.
 16. **Confirm** → Reply with summary of created calendar events and simulated viewing requests.
 
