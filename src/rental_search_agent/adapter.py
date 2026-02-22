@@ -189,6 +189,17 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
     if filters.rent_max is not None:
         mask &= df["_price"] <= filters.rent_max
 
+    if filters.rent_min is not None or filters.rent_max is not None:
+        dropped = len(df) - mask.sum()
+        if dropped > 0:
+            logger.debug(
+                "Post-fetch rent filter excluded %d of %d listings (rent_min=%s, rent_max=%s)",
+                dropped,
+                len(df),
+                filters.rent_min,
+                filters.rent_max,
+            )
+
     df = df.loc[mask].drop(columns=["_bedrooms", "_bathrooms", "_size", "_price"], errors="ignore")
 
     listings = [_row_to_listing(row, listing_type) for _, row in df.iterrows()]
