@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from rental_search_agent.client import _get_current_listings_from_messages, run_tool
+from rental_search_agent.client import (
+    _get_current_listings_from_messages,
+    _get_viewing_plan_from_messages,
+    run_tool,
+)
+from rental_search_agent.server import draft_viewing_plan
 from rental_search_agent.models import RentalSearchResponse
 from tests.fixtures.sample_data import (
     sample_available_slots,
@@ -118,6 +123,32 @@ class TestRunTool:
         data = json.loads(result)
         assert "error" in data
         assert "Not enough slots" in data["error"]
+
+    def test_modify_viewing_plan_with_context(self):
+        plan = draft_viewing_plan(sample_listings_with_coords(), sample_available_slots(3))
+        slots = sample_available_slots(3)
+        result = run_tool(
+            "modify_viewing_plan",
+            {"remove": ["mls-002"]},
+            current_plan_entries=plan["entries"],
+            available_slots=slots,
+        )
+        data = json.loads(result)
+        assert "entries" in data
+        assert len(data["entries"]) == 2
+        ids = [e["listing_id"] for e in data["entries"]]
+        assert "mls-001" in ids
+        assert "mls-003" in ids
+        assert "mls-002" not in ids
+
+    def test_modify_viewing_plan_no_plan_returns_error(self):
+        result = run_tool(
+            "modify_viewing_plan",
+            {"remove": ["mls-002"]},
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "No current viewing plan" in data["error"]
 
     def test_calendar_get_available_slots_mocked(self):
         with patch("rental_search_agent.client.calendar_get_available_slots") as m:
@@ -285,3 +316,30 @@ class TestGetCurrentListingsFromMessages:
         ]
         result = _get_current_listings_from_messages(messages)
         assert result == listings
+
+
+class TestGetViewingPlanFromMessages:
+    def test_extracts_entries_from_draft_viewing_plan_result(self):
+        entries = [
+            {"listing_id": "a", "listing_address": "A", "listing_url": "https://a", "slot_display": "Mon", "start_datetime": "2026-02-25T18:00:00", "end_datetime": "2026-02-25T19:00:00"},
+        ]
+        messages = [
+            {"role": "tool", "content": json.dumps({"entries": entries})},
+        ]
+        result = _get_viewing_plan_from_messages(messages)
+        assert result == entries
+
+    def test_most_recent_plan_wins(self):
+        old_entries = [{"listing_id": "old"}]
+        new_entries = [{"listing_id": "new"}]
+        messages = [
+            {"role": "tool", "content": json.dumps({"entries": old_entries})},
+            {"role": "tool", "content": json.dumps({"entries": new_entries})},
+        ]
+        result = _get_viewing_plan_from_messages(messages)
+        assert result == new_entries
+
+    def test_empty_when_no_plan(self):
+        messages = [{"role": "tool", "content": json.dumps({"slots": []})}]
+        result = _get_viewing_plan_from_messages(messages)
+        assert result == []

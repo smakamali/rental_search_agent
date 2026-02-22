@@ -15,6 +15,7 @@ from rental_search_agent.server import (
     calendar_update_event,
     draft_viewing_plan,
     filter_listings,
+    modify_viewing_plan,
     rental_search,
     simulate_viewing_request,
     summarize_listings,
@@ -178,6 +179,53 @@ class TestDraftViewingPlan:
         slots = sample_available_slots(2)
         with pytest.raises(ValueError, match="Not enough slots"):
             draft_viewing_plan(listings, slots)
+
+    def test_returns_unused_slots(self):
+        listings = [{"id": "a", "address": "A", "url": "https://a", "latitude": 49.28, "longitude": -123.12}]
+        slots = sample_available_slots(3)
+        result = draft_viewing_plan(listings, slots)
+        assert "unused_slots" in result
+        assert len(result["unused_slots"]) == 2
+
+
+class TestModifyViewingPlan:
+    def test_remove_listing(self):
+        plan = draft_viewing_plan(sample_listings_with_coords(), sample_available_slots(3))
+        result = modify_viewing_plan(
+            plan["entries"],
+            sample_available_slots(3),
+            remove=["mls-002"],
+        )
+        assert "entries" in result
+        assert len(result["entries"]) == 2
+        ids = [e["listing_id"] for e in result["entries"]]
+        assert "mls-001" in ids
+        assert "mls-003" in ids
+        assert "mls-002" not in ids
+        assert "unused_slots" in result
+
+    def test_add_listing(self):
+        plan = draft_viewing_plan(
+            [{"id": "a", "address": "A", "url": "https://a", "latitude": 49.28, "longitude": -123.12}],
+            sample_available_slots(3),
+        )
+        slots = sample_available_slots(3)
+        result = modify_viewing_plan(
+            plan["entries"],
+            slots,
+            add=[
+                {
+                    "listing_id": "b",
+                    "listing_address": "B",
+                    "listing_url": "https://b",
+                    "slot": slots[1],
+                }
+            ],
+        )
+        assert len(result["entries"]) == 2
+        ids = [e["listing_id"] for e in result["entries"]]
+        assert "a" in ids
+        assert "b" in ids
 
 
 class TestCalendarListEvents:
