@@ -125,11 +125,14 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
         try:
             os.chdir(tmpdir)
             house_obj = pyRealtor.HousesFacade()
+            # Skip price_from/sorted_col_name: pyRealtor has quirks (col_name must be Price/Rent;
+            # sorted_col_name triggers set_sort_method which only accepts listing_price/listing_date_posted,
+            # and Rent is not mapped). Apply rent_min/rent_max post-fetch in the mask below.
             house_obj.search_save_houses(
                 search_area=filters.location,
                 country="Canada",
                 listing_type=listing_type,
-                price_from=int(filters.rent_min) if filters.rent_min is not None else None,
+                price_from=None,
                 use_proxy=use_proxy,
                 report_file_name=report_name,
             )
