@@ -41,7 +41,7 @@ flowchart TB
 |-----------|------|
 | **User** | Supplies natural-language search, answers clarification and approval prompts, receives shortlist and confirmation. |
 | **Client (Chat + Agent)** | Chat UI and LLM agent: parses intent, orchestrates the flow, calls MCP tools, presents shortlist and final summary. |
-| **MCP Server** | Exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. |
+| **MCP Server** | Exposes twelve tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`, `modify_viewing_plan`. |
 | **Rental Search API** | Single external source used by `rental_search` to return listings (API or scraped site). |
 
 ---
@@ -59,14 +59,14 @@ flowchart TB
 | **User approval** | Ask user which listings they want to request viewings for (multi-select). |
 | **Simulated viewing request** | A tool that "submits" a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
 | **Calendar integration** | Google Calendar API: list events, get available slots within preferred times, create/update/delete events. Optional; agent can fall back to simulated-only flow if credentials missing. |
-| **Viewing plan** | `draft_viewing_plan` assigns slots to listings, clustering nearby listings (by lat/lon) to minimize commute. User approves plan before events are created. | “submits” a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
+| **Viewing plan** | `draft_viewing_plan` assigns slots to listings, clustering nearby listings (by lat/lon) to minimize commute. `modify_viewing_plan` allows add/remove/update of plan entries when the user wants changes. User approves plan before events are created. | “submits” a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
 
 ### Out of scope (for later)
 
 | Component | Reason |
 |-----------|--------|
 | **Proximity verification** | Geocoding, routing/transit APIs, and config (downtown, skytrain) add significant setup. |
-| **Viewing plan editing** | User cannot yet adjust draft plan (add/remove listings, change times) in MVP; plan approval is binary. |
+| ~~Viewing plan editing~~ | Now in scope: `modify_viewing_plan` allows add/remove/update of entries before approval. |
 | **Viewing request log / double-booking** | No persistent log or slot-dedup; optional in-memory only. |
 | **Real form submission** | No browser automation or platform-specific form adapters; submission is simulated. |
 | **Multiple search engines** | One source only. |
@@ -144,7 +144,8 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 | Tool  | `calendar_create_event(summary, start_datetime, end_datetime, ...)` | Create calendar event for viewing. |
 | Tool  | `calendar_update_event(event_id, ...)` | Update calendar event. |
 | Tool  | `calendar_delete_event(event_id)` | Delete calendar event. |
-| Tool  | `draft_viewing_plan(listings, available_slots)` | Assign slots to listings; call immediately after calendar_get_available_slots. | “Submit” viewing request (no real form; return summary/link). |
+| Tool  | `draft_viewing_plan(listings, available_slots)` | Assign slots to listings; call immediately after calendar_get_available_slots. |
+| Tool  | `modify_viewing_plan(remove?, add?, update?)` | Add, remove, or update plan entries when user wants changes in Step 11. | “Submit” viewing request (no real form; return summary/link). |
 
 **Not in MVP:** `check_proximity`, `get_available_timeslots`, `get_viewing_requests`, `log_viewing_request`, real `submit_viewing_request`, resources like `user_profile://contact` or `config://proximity`.
 

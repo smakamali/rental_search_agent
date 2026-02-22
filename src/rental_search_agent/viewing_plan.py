@@ -6,6 +6,23 @@ from typing import Any
 from rental_search_agent.models import ViewingPlan, ViewingPlanEntry
 
 
+def _slot_key(slot: dict[str, Any]) -> tuple[str, str]:
+    """Return (start, end) tuple for slot identity."""
+    return (str(slot.get("start", "")), str(slot.get("end", "")))
+
+
+def _compute_unused_slots(
+    entries: list[ViewingPlanEntry], available_slots: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return slots from available_slots that are not assigned to any entry."""
+    used = {(e.start_datetime, e.end_datetime) for e in entries}
+    return [
+        s
+        for s in available_slots
+        if (str(s.get("start", "")), str(s.get("end", ""))) not in used
+    ]
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distance in km between two points (haversine formula)."""
     R = 6371  # Earth radius in km
@@ -124,4 +141,111 @@ def draft_viewing_plan(
                     end_datetime=end,
                 )
             )
+    return ViewingPlan(entries=entries)
+
+
+def modify_viewing_plan(
+    current_entries: list[ViewingPlanEntry | dict[str, Any]],
+    available_slots: list[dict[str, Any]],
+    *,
+    remove: list[str] | None = None,
+    add: list[dict[str, Any]] | None = None,
+    update: list[dict[str, Any]] | None = None,
+) -> ViewingPlan:
+    """Modify a viewing plan: add, remove, or update entries.
+
+    Args:
+        current_entries: Existing plan entries (ViewingPlanEntry or dict).
+        available_slots: Full list from calendar_get_available_slots.
+        remove: Listing IDs to remove.
+        add: List of {listing_id, listing_address, listing_url, slot: {start, end, display}}.
+        update: List of {listing_id, new_slot: {start, end, display}}.
+
+    Returns:
+        ViewingPlan with modified entries.
+    """
+    remove = remove or []
+    add = add or []
+    update = update or []
+
+    # Normalize to ViewingPlanEntry
+    entries: list[ViewingPlanEntry] = []
+    for e in current_entries:
+        if isinstance(e, dict):
+            entries.append(ViewingPlanEntry.model_validate(e))
+        else:
+            entries.append(e)
+
+    available_keys = {_slot_key(s) for s in available_slots}
+    used_keys: set[tuple[str, str]] = {(e.start_datetime, e.end_datetime) for e in entries}
+    entry_by_id = {e.listing_id: e for e in entries}
+
+    # Remove
+    for lid in remove:
+        if lid not in entry_by_id:
+            raise ValueError(f"Listing {lid!r} not found in plan (cannot remove).")
+        entry = entry_by_id.pop(lid)
+        entries = [x for x in entries if x.listing_id != lid]
+        used_keys.discard((entry.start_datetime, entry.end_datetime))
+
+    # Update
+    for item in update:
+        lid = item.get("listing_id")
+        new_slot = item.get("new_slot")
+        if not lid or not new_slot:
+            raise ValueError("update item must have listing_id and new_slot.")
+        if lid not in entry_by_id:
+            raise ValueError(f"Listing {lid!r} not found in plan (cannot update).")
+        start = str(new_slot.get("start", ""))
+        end = str(new_slot.get("end", ""))
+        key = (start, end)
+        if key not in available_keys:
+            raise ValueError(f"Slot {start} - {end} is not in available_slots.")
+        if key in used_keys:
+            raise ValueError(f"Slot {start} - {end} is already used by another entry.")
+        entry = entry_by_id[lid]
+        used_keys.discard((entry.start_datetime, entry.end_datetime))
+        display = str(new_slot.get("display", f"{start} - {end}"))
+        updated = ViewingPlanEntry(
+            listing_id=entry.listing_id,
+            listing_address=entry.listing_address,
+            listing_url=entry.listing_url,
+            slot_display=display,
+            start_datetime=start,
+            end_datetime=end,
+        )
+        used_keys.add(key)
+        entry_by_id[lid] = updated
+        entries = [updated if x.listing_id == lid else x for x in entries]
+
+    # Add
+    for item in add:
+        lid = str(item.get("listing_id", ""))
+        address = str(item.get("listing_address", ""))
+        url = str(item.get("listing_url", ""))
+        slot = item.get("slot")
+        if not lid or not address or not url or not slot:
+            raise ValueError("add item must have listing_id, listing_address, listing_url, slot.")
+        if lid in entry_by_id:
+            raise ValueError(f"Listing {lid!r} is already in the plan (cannot add).")
+        start = str(slot.get("start", ""))
+        end = str(slot.get("end", ""))
+        key = (start, end)
+        if key not in available_keys:
+            raise ValueError(f"Slot {start} - {end} is not in available_slots.")
+        if key in used_keys:
+            raise ValueError(f"Slot {start} - {end} is already used by another entry.")
+        display = str(slot.get("display", f"{start} - {end}"))
+        new_entry = ViewingPlanEntry(
+            listing_id=lid,
+            listing_address=address,
+            listing_url=url,
+            slot_display=display,
+            start_datetime=start,
+            end_datetime=end,
+        )
+        entries.append(new_entry)
+        used_keys.add(key)
+        entry_by_id[lid] = new_entry
+
     return ViewingPlan(entries=entries)
