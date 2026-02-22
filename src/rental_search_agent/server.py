@@ -22,7 +22,11 @@ from rental_search_agent.models import (
     SimulateViewingRequestResponse,
     UserDetails,
 )
-from rental_search_agent.viewing_plan import draft_viewing_plan as do_draft_viewing_plan
+from rental_search_agent.viewing_plan import (
+    _compute_unused_slots,
+    draft_viewing_plan as do_draft_viewing_plan,
+    modify_viewing_plan as do_modify_viewing_plan,
+)
 
 mcp = FastMCP(
     "Rental Search Assistant",
@@ -224,7 +228,33 @@ def draft_viewing_plan(listings: list[dict[str, Any]], available_slots: list[dic
     """Draft a viewing plan: assign slots to listings, clustering nearby listings to minimize commute. Pass selected listings and slots from calendar_get_available_slots."""
     try:
         plan = do_draft_viewing_plan(listings, available_slots)
-        return {"entries": [e.model_dump() for e in plan.entries]}
+        unused = _compute_unused_slots(plan.entries, available_slots)
+        return {"entries": [e.model_dump() for e in plan.entries], "unused_slots": unused}
+    except ValueError as e:
+        raise
+    except Exception as e:
+        raise ValueError(str(e)) from e
+
+
+@mcp.tool()
+def modify_viewing_plan(
+    current_entries: list[dict[str, Any]],
+    available_slots: list[dict[str, Any]],
+    remove: Optional[list[str]] = None,
+    add: Optional[list[dict[str, Any]]] = None,
+    update: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Modify a viewing plan: add, remove, or update entries. Used when user wants changes in Step 11. Pass current plan entries and available_slots from prior tool results. remove: listing IDs to remove. add: [{listing_id, listing_address, listing_url, slot: {start, end, display}}]. update: [{listing_id, new_slot: {start, end, display}}]."""
+    try:
+        plan = do_modify_viewing_plan(
+            current_entries,
+            available_slots,
+            remove=remove or [],
+            add=add or [],
+            update=update or [],
+        )
+        unused = _compute_unused_slots(plan.entries, available_slots)
+        return {"entries": [e.model_dump() for e in plan.entries], "unused_slots": unused}
     except ValueError as e:
         raise
     except Exception as e:
