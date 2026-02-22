@@ -25,6 +25,7 @@ from rental_search_agent.server import (
     calendar_update_event,
     do_simulate_viewing_request,
     draft_viewing_plan,
+    modify_viewing_plan,
 )
 
 # Tool definitions for the LLM (OpenAI function-calling format)
@@ -160,7 +161,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "draft_viewing_plan",
-            "description": "REQUIRED after calendar_get_available_slots: Draft a viewing plan by assigning slots to listings (clusters nearby listings). Call this tool immediately when slots are returned—do not respond to the user until you have called it. Pass listings (selected from step 6) and available_slots (from calendar_get_available_slots). Returns entries with start_datetime, end_datetime (ISO), slot_display.",
+            "description": "REQUIRED after calendar_get_available_slots: Draft a viewing plan by assigning slots to listings (clusters nearby listings). Call this tool immediately when slots are returned—do not respond to the user until you have called it. Pass listings (selected from step 6) and available_slots (from calendar_get_available_slots). Returns entries with start_datetime, end_datetime (ISO), slot_display, and unused_slots.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -168,6 +169,43 @@ TOOLS = [
                     "available_slots": {"type": "array", "items": {"type": "object"}, "description": "Slots from calendar_get_available_slots."},
                 },
                 "required": ["listings", "available_slots"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "modify_viewing_plan",
+            "description": "Modify the viewing plan when the user wants changes in Step 11. Supports: remove (listing IDs to remove), add (listings to add with their slot: [{listing_id, listing_address, listing_url, slot: {start, end, display}}]), update (change slot for listing: [{listing_id, new_slot: {start, end, display}}]). Current plan entries and available_slots come from prior tool results. Use unused_slots from the plan response to pick valid slots for add/update.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "remove": {"type": "array", "items": {"type": "string"}, "description": "Listing IDs to remove from the plan."},
+                    "add": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "listing_id": {"type": "string"},
+                                "listing_address": {"type": "string"},
+                                "listing_url": {"type": "string"},
+                                "slot": {"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}, "display": {"type": "string"}}},
+                            },
+                        },
+                        "description": "Listings to add: each needs listing_id, listing_address, listing_url, slot (from unused_slots).",
+                    },
+                    "update": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "listing_id": {"type": "string"},
+                                "new_slot": {"type": "object", "properties": {"start": {"type": "string"}, "end": {"type": "string"}, "display": {"type": "string"}}},
+                            },
+                        },
+                        "description": "Change slot for listing: each needs listing_id and new_slot (from unused_slots).",
+                    },
+                },
             },
         },
     },
@@ -296,6 +334,22 @@ def _get_available_slots_from_messages(messages: list[dict]) -> list[dict]:
     return []
 
 
+def _get_viewing_plan_from_messages(messages: list[dict]) -> list[dict]:
+    """Return entries from the most recent draft_viewing_plan or modify_viewing_plan tool result."""
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        try:
+            data = json.loads(msg.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and "entries" in data:
+            raw = data.get("entries")
+            if isinstance(raw, list):
+                return raw
+    return []
+
+
 def _get_selected_listings_from_messages(messages: list[dict]) -> list[dict]:
     """Return selected listing dicts from the ask_user listing-selection step (choices with id)."""
     current_listings_raw: list[dict] = []
@@ -327,7 +381,14 @@ def _get_selected_listings_from_messages(messages: list[dict]) -> list[dict]:
         return []
 
 
-def run_tool(name: str, arguments: dict, *, current_listings: list[dict] | None = None) -> str:
+def run_tool(
+    name: str,
+    arguments: dict,
+    *,
+    current_listings: list[dict] | None = None,
+    current_plan_entries: list[dict] | None = None,
+    available_slots: list[dict] | None = None,
+) -> str:
     """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected."""
     if name == "ask_user":
         # Return payload for client to show UI and supply real result
@@ -411,6 +472,26 @@ def run_tool(name: str, arguments: dict, *, current_listings: list[dict] | None 
             return json.dumps(result)
         except ValueError as e:
             logger.debug("draft_viewing_plan: error %s", e)
+            return json.dumps({"error": str(e)})
+    if name == "modify_viewing_plan":
+        plan_entries = current_plan_entries if current_plan_entries is not None else []
+        slots = available_slots if available_slots is not None else []
+        if not plan_entries:
+            return json.dumps({"error": "No current viewing plan to modify. Draft a plan first."})
+        if not slots:
+            return json.dumps({"error": "No available slots in context. Run calendar_get_available_slots first."})
+        try:
+            result = modify_viewing_plan(
+                plan_entries,
+                slots,
+                remove=arguments.get("remove") or [],
+                add=arguments.get("add") or [],
+                update=arguments.get("update") or [],
+            )
+            logger.debug("modify_viewing_plan: %d entries", len(result.get("entries", [])))
+            return json.dumps(result)
+        except ValueError as e:
+            logger.debug("modify_viewing_plan: error %s", e)
             return json.dumps({"error": str(e)})
     if name == "calendar_create_event":
         try:
@@ -601,6 +682,8 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             }
             tool_results: list[dict] = []
             current_listings = _get_current_listings_from_messages(messages)
+            current_plan_entries = _get_viewing_plan_from_messages(messages)
+            available_slots = _get_available_slots_from_messages(messages)
             for tc in msg.tool_calls:
                 name = tc.function.name
                 logger.debug("Executing tool: %s", name)
@@ -612,8 +695,10 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     name,
                     args,
                     current_listings=current_listings if name in ("filter_listings", "summarize_listings") else None,
+                    current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
+                    available_slots=available_slots if name == "modify_viewing_plan" else None,
                 )
-                # Update current_listings from tool results so chained tools in same batch see fresh data
+                # Update derived context from tool results so chained tools in same batch see fresh data
                 if name in ("rental_search", "filter_listings"):
                     try:
                         data = json.loads(result)
@@ -621,6 +706,15 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                             raw = data.get("listings")
                             if isinstance(raw, list):
                                 current_listings = raw
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name in ("draft_viewing_plan", "modify_viewing_plan"):
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, dict) and "entries" in data:
+                            raw = data.get("entries")
+                            if isinstance(raw, list):
+                                current_plan_entries = raw
                     except (json.JSONDecodeError, TypeError):
                         pass
                 logger.debug("Tool %s completed", name)
