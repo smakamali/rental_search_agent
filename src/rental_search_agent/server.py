@@ -15,13 +15,21 @@ from rental_search_agent.calendar_service import (
 )
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
+from rental_search_agent.geocoding import (
+    geocode_location as do_geocode_location,
+    geocode_proximity_references as do_geocode_proximity_references,
+)
 from rental_search_agent.models import (
+    GeocodedReference,
     ListingFilterCriteria,
+    ProximityRule,
     RentalSearchFilters,
     RentalSearchResponse,
     SimulateViewingRequestResponse,
     UserDetails,
 )
+from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
+from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.viewing_plan import (
     _compute_unused_slots,
     draft_viewing_plan as do_draft_viewing_plan,
@@ -72,19 +80,21 @@ def filter_listings(
     filters: dict[str, Any],
     sort_by: Optional[str] = None,
     ascending: bool = True,
+    proximity_rules: Optional[list[dict[str, Any]]] = None,
 ) -> RentalSearchResponse:
-    """Narrow and/or sort search results. Pass the current list (e.g. from last rental_search or filter_listings), filter criteria (optional), and optional sort_by (price, bedrooms, bathrooms, sqft, address, id, title) and ascending. Returns listings and total_count in same shape as rental_search."""
+    """Narrow and/or sort search results. Pass the current list (e.g. from last rental_search or filter_listings or enrich_listings_with_proximity), filter criteria (optional), optional sort_by and ascending, and optional proximity_rules (from parse_proximity_preferences). When proximity_rules is set, listings must satisfy all rules (AND); unknown proximity keeps the listing. Returns listings and total_count in same shape as rental_search."""
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list of listing objects.")
     criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "rent_min", "rent_max"}
     criteria_dict = {k: v for k, v in (filters or {}).items() if k in criteria_keys and v is not None}
-    if not criteria_dict and not sort_by:
-        raise ValueError("At least one filter criterion or sort_by is required.")
+    if not criteria_dict and not sort_by and not (proximity_rules and len(proximity_rules) > 0):
+        raise ValueError("At least one filter criterion, sort_by, or proximity_rules is required.")
     try:
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
     except Exception as e:
         raise ValueError(f"Invalid filter criteria: {e}") from e
-    return do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending)
+    rule_objs = [ProximityRule.model_validate(r) for r in (proximity_rules or [])] if proximity_rules else None
+    return do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=rule_objs)
 
 
 @mcp.tool()
@@ -93,6 +103,58 @@ def summarize_listings(listings: list[dict[str, Any]]) -> dict[str, Any]:
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list of listing objects.")
     return do_summarize_listings(listings)
+
+
+@mcp.tool()
+def parse_proximity_preferences(proximity_text: str) -> dict[str, Any]:
+    """Parse free-text proximity preferences (e.g. 'max 30 min drive to downtown, 5 min walk to transit') into a list of structured rules. Returns { rules: [{ location, mode, max_minutes }, ...] }. Use when the user has set proximity_preferences or stated them in chat."""
+    if not isinstance(proximity_text, str):
+        raise ValueError("proximity_text must be a string.")
+    rules = do_parse_proximity_preferences(proximity_text.strip())
+    return {"rules": [r.model_dump() for r in rules]}
+
+
+@mcp.tool()
+def geocode_location(location: str) -> dict[str, Any]:
+    """Resolve a single location string to coordinates (lat, lon, display_name). Uses Google Geocoding API. Requires GOOGLE_MAPS_API_KEY."""
+    if not isinstance(location, str) or not location.strip():
+        raise ValueError("location must be a non-empty string.")
+    ref = do_geocode_location(location.strip())
+    return ref.model_dump()
+
+
+@mcp.tool()
+def geocode_proximity_references(rules: list[dict[str, Any]]) -> dict[str, Any]:
+    """Geocode all locations from parsed proximity rules. Skips 'nearest transit station' (resolved at enrichment time). Pass the rules array from parse_proximity_preferences. Returns { refs: [{ location, lat, lon, display_name }, ...] }. Requires GOOGLE_MAPS_API_KEY."""
+    if not isinstance(rules, list):
+        raise ValueError("rules must be a list of rule objects from parse_proximity_preferences.")
+    try:
+        rule_objs = [ProximityRule.model_validate(r) for r in rules]
+    except Exception as e:
+        raise ValueError(f"Invalid rules: {e}") from e
+    refs = do_geocode_proximity_references(rule_objs)
+    return {"refs": [r.model_dump() for r in refs]}
+
+
+@mcp.tool()
+def enrich_listings_with_proximity(
+    listings: list[dict[str, Any]],
+    rules: list[dict[str, Any]],
+    geocoded_refs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Enrich listings with proximity data (distance_km, duration_min) per rule using Google Directions. Pass current listings, rules from parse_proximity_preferences, and refs from geocode_proximity_references. Returns { listings: [...] } with each listing having a 'proximity' dict. Listings without coordinates get proximity unknown. Requires GOOGLE_MAPS_API_KEY."""
+    if not listings or not isinstance(listings, list):
+        raise ValueError("listings is required and must be a non-empty list.")
+    try:
+        rule_objs = [ProximityRule.model_validate(r) for r in (rules or [])]
+    except Exception as e:
+        raise ValueError(f"Invalid rules: {e}") from e
+    try:
+        ref_objs = [GeocodedReference.model_validate(r) for r in (geocoded_refs or [])]
+    except Exception as e:
+        raise ValueError(f"Invalid geocoded_refs: {e}") from e
+    enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
+    return {"listings": enriched, "total_count": len(enriched)}
 
 
 def do_simulate_viewing_request(

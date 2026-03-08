@@ -15,7 +15,19 @@ from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.calendar_service import default_timezone
 from rental_search_agent.agent import current_date_context, flow_instructions, selected_to_listings
 from rental_search_agent.filtering import filter_listings as do_filter_listings
-from rental_search_agent.models import Listing, ListingFilterCriteria, RentalSearchFilters
+from rental_search_agent.geocoding import (
+    geocode_location as do_geocode_location,
+    geocode_proximity_references as do_geocode_proximity_references,
+)
+from rental_search_agent.models import (
+    GeocodedReference,
+    Listing,
+    ListingFilterCriteria,
+    ProximityRule,
+    RentalSearchFilters,
+)
+from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
+from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -27,6 +39,53 @@ from rental_search_agent.server import (
     draft_viewing_plan,
     modify_viewing_plan,
 )
+
+# Keys for stored user preferences (same as Streamlit; shared preferences.json)
+PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences")
+
+
+def _preferences_file() -> Path:
+    """Path to optional JSON file for persisting preferences (shared with Streamlit)."""
+    return Path.home() / ".rental_search_agent" / "preferences.json"
+
+
+def _load_preferences_from_file() -> dict:
+    """Load preferences from file if it exists; otherwise return default dict."""
+    default = {k: "" for k in PREF_KEYS}
+    path = _preferences_file()
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text())
+        return {k: data.get(k, "") or "" for k in PREF_KEYS}
+    except Exception:
+        return default
+
+
+def _preferences_block(prefs: dict) -> str:
+    """Build the preferences block to inject into the system message (same logic as Streamlit)."""
+    viewing = (prefs.get("viewing_preference") or "").strip()
+    name = (prefs.get("name") or "").strip()
+    email = (prefs.get("email") or "").strip()
+    phone = (prefs.get("phone") or "").strip()
+    proximity = (prefs.get("proximity_preferences") or "").strip()
+    if not viewing and not name and not email and not proximity:
+        return "No stored user preferences. Ask for viewing preference and for name/email when needed."
+    parts = []
+    if viewing:
+        parts.append(f"viewing_preference = {viewing!r}")
+    if name:
+        parts.append(f"name = {name!r}")
+    if email:
+        parts.append(f"email = {email!r}")
+    if phone:
+        parts.append(f"phone = {phone!r}")
+    if proximity:
+        parts.append(f"proximity_preferences = {proximity!r}")
+    block = "Stored user preferences: " + "; ".join(parts)
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results."
+    return block
+
 
 # Tool definitions for the LLM (OpenAI function-calling format)
 TOOLS = [
@@ -88,7 +147,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "filter_listings",
-            "description": "Narrow and/or sort the current search results. Call after presenting results when the user asks to filter (e.g. 'only 1 bathroom', 'under 2500') or sort (e.g. 'sort by price', 'cheapest first', 'show most expensive'). Uses the most recent search or filter result as the list. Pass filter criteria and/or sort_by + ascending as needed.",
+            "description": "Narrow and/or sort the current search results. Call after presenting results when the user asks to filter (e.g. 'only 1 bathroom', 'under 2500') or sort, or to apply proximity rules (pass proximity_rules from parse_proximity_preferences). Uses the most recent search, filter, or enrich_listings_with_proximity result. Pass filter criteria and/or sort_by + ascending and/or proximity_rules.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -102,6 +161,7 @@ TOOLS = [
                     "rent_max": {"type": "number", "minimum": 0, "description": "Maximum rent (CAD/month)."},
                     "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title). Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
+                    "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
             },
         },
@@ -112,6 +172,64 @@ TOOLS = [
             "name": "summarize_listings",
             "description": "Compute statistics (price min/median/mean/max, bedroom distribution, bathroom distribution, size stats, property types) for the current search results. Call when presenting results to produce a structured summary. Uses the most recent rental_search or filter_listings result.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parse_proximity_preferences",
+            "description": "Parse free-text proximity preferences (e.g. 'max 30 min drive to downtown, 5 min walk to transit') into a list of structured rules. Returns { rules: [{ location, mode, max_minutes }, ...] }. Call when the user has set proximity_preferences or stated them in chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "proximity_text": {"type": "string", "description": "Free-text proximity preferences from stored prefs or user message."},
+                },
+                "required": ["proximity_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "geocode_location",
+            "description": "Resolve a single location string to coordinates (lat, lon, display_name). Uses Google Geocoding API. Requires GOOGLE_MAPS_API_KEY.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "Address or place name to geocode."},
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "geocode_proximity_references",
+            "description": "Geocode all locations from parsed proximity rules. Skips 'nearest transit station'. Pass the rules array from parse_proximity_preferences. Returns { refs: [{ location, lat, lon, display_name }, ...] }. Requires GOOGLE_MAPS_API_KEY.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rules": {"type": "array", "items": {"type": "object"}, "description": "List of rule objects from parse_proximity_preferences."},
+                },
+                "required": ["rules"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enrich_listings_with_proximity",
+            "description": "Enrich listings with proximity data (distance_km, duration_min) per rule. Pass current listings, rules from parse_proximity_preferences, and refs from geocode_proximity_references. Returns { listings: [...], total_count } with each listing having 'proximity' dict. Call after geocode_proximity_references. Requires GOOGLE_MAPS_API_KEY.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "listings": {"type": "array", "items": {"type": "object"}, "description": "Current listing objects (from rental_search or filter_listings)."},
+                    "rules": {"type": "array", "items": {"type": "object"}, "description": "Rules from parse_proximity_preferences."},
+                    "geocoded_refs": {"type": "array", "items": {"type": "object"}, "description": "Refs from geocode_proximity_references."},
+                },
+                "required": ["listings", "rules", "geocoded_refs"],
+            },
         },
     },
     {
@@ -417,10 +535,12 @@ def run_tool(
         ascending = arguments.get("ascending", True)
         criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "rent_min", "rent_max"}
         criteria_dict = {k: v for k, v in arguments.items() if k in criteria_keys and v is not None}
-        if not criteria_dict and not sort_by:
-            return json.dumps({"error": "At least one filter criterion or sort_by is required."})
+        proximity_rules_raw = arguments.get("proximity_rules") or []
+        if not criteria_dict and not sort_by and not proximity_rules_raw:
+            return json.dumps({"error": "At least one filter criterion, sort_by, or proximity_rules is required."})
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
-        resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending)
+        proximity_rules = [ProximityRule.model_validate(r) for r in proximity_rules_raw] if proximity_rules_raw else None
+        resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=proximity_rules)
         return resp.model_dump_json()
     if name == "summarize_listings":
         listings = current_listings if current_listings is not None else []
@@ -428,6 +548,40 @@ def run_tool(
             return json.dumps({"error": "No current search results to summarize. Run a search first."})
         result = do_summarize_listings(listings)
         return json.dumps(result)
+    if name == "parse_proximity_preferences":
+        text = (arguments.get("proximity_text") or "").strip()
+        rules = do_parse_proximity_preferences(text)
+        return json.dumps({"rules": [r.model_dump() for r in rules]})
+    if name == "geocode_location":
+        try:
+            loc = (arguments.get("location") or "").strip()
+            if not loc:
+                return json.dumps({"error": "location is required and must be non-empty."})
+            ref = do_geocode_location(loc)
+            return json.dumps(ref.model_dump())
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+    if name == "geocode_proximity_references":
+        try:
+            raw_rules = arguments.get("rules") or []
+            rule_objs = [ProximityRule.model_validate(r) for r in raw_rules]
+            refs = do_geocode_proximity_references(rule_objs)
+            return json.dumps({"refs": [r.model_dump() for r in refs]})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+    if name == "enrich_listings_with_proximity":
+        try:
+            listings = arguments.get("listings") or []
+            rules_raw = arguments.get("rules") or []
+            refs_raw = arguments.get("geocoded_refs") or []
+            if not listings:
+                return json.dumps({"error": "listings is required and must be non-empty."})
+            rule_objs = [ProximityRule.model_validate(r) for r in rules_raw]
+            ref_objs = [GeocodedReference.model_validate(r) for r in refs_raw]
+            enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
+            return json.dumps({"listings": enriched, "total_count": len(enriched)})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
     if name == "simulate_viewing_request":
         try:
             resp = do_simulate_viewing_request(
@@ -772,8 +926,10 @@ def run_agent_loop() -> None:
     project_root = Path(__file__).resolve().parent.parent.parent
     _load_env_file(project_root / ".env")
     client, model = _make_llm_client()
+    prefs = _load_preferences_from_file()
+    system_content = current_date_context() + flow_instructions() + "\n\n" + _preferences_block(prefs)
     messages: list[dict] = [
-        {"role": "system", "content": current_date_context() + flow_instructions()},
+        {"role": "system", "content": system_content},
     ]
     print("Rental Search Assistant (CLI). Type your search request (e.g. '2 bed in Vancouver under 3000'). Empty line to quit.\n")
     while True:
