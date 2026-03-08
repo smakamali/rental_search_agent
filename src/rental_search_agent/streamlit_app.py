@@ -19,8 +19,8 @@ except ImportError:
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
 
-# Keys for stored user preferences (viewing time, name, email, phone)
-PREF_KEYS = ("viewing_preference", "name", "email", "phone")
+# Keys for stored user preferences (viewing time, name, email, phone, proximity)
+PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences")
 
 
 def _preferences_file() -> Path:
@@ -57,7 +57,8 @@ def _preferences_block(prefs: dict) -> str:
     name = (prefs.get("name") or "").strip()
     email = (prefs.get("email") or "").strip()
     phone = (prefs.get("phone") or "").strip()
-    if not viewing and not name and not email:
+    proximity = (prefs.get("proximity_preferences") or "").strip()
+    if not viewing and not name and not email and not proximity:
         return "No stored user preferences. Ask for viewing preference and for name/email when needed."
     parts = []
     if viewing:
@@ -68,8 +69,10 @@ def _preferences_block(prefs: dict) -> str:
         parts.append(f"email = {email!r}")
     if phone:
         parts.append(f"phone = {phone!r}")
+    if proximity:
+        parts.append(f"proximity_preferences = {proximity!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them."
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results."
     return block
 
 
@@ -132,8 +135,37 @@ def _get_latest_search_listings(messages: list[dict]) -> list[dict]:
     return listings
 
 
+def _format_proximity_display(proximity: dict | None) -> str:
+    """Format listing.proximity for table display: short summary or 'Distance unknown'."""
+    if not proximity or not isinstance(proximity, dict):
+        return "—"
+    parts = []
+    has_unknown = False
+    for rule_key, val in proximity.items():
+        if val is None:
+            has_unknown = True
+            continue
+        if not isinstance(val, dict):
+            has_unknown = True
+            continue
+        loc = (rule_key.split("|")[0] if "|" in rule_key else rule_key).strip()
+        dist = val.get("distance_km")
+        dur = val.get("duration_min")
+        if dur is not None:
+            parts.append(f"{loc}: {float(dur):.0f} min")
+        elif dist is not None:
+            parts.append(f"{loc}: {float(dist):.1f} km")
+        else:
+            has_unknown = True
+    if has_unknown and not parts:
+        return "Distance unknown"
+    if has_unknown:
+        return "; ".join(parts) + " (some unknown)"
+    return "; ".join(parts) if parts else "—"
+
+
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, rent, URL."""
+    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, rent, Proximity, URL."""
     rows = []
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
@@ -149,13 +181,14 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
             "rent": rent,
+            "Proximity": _format_proximity_display(listing.get("proximity")),
             "URL": listing.get("url") or "",
         })
     return rows
 
 
 def _render_results_table(listings: list[dict]) -> None:
-    """Render search results as a dataframe with rank, MLS id, address, bed, bath, size, rent, URL link."""
+    """Render search results as a dataframe with rank, MLS id, address, bed, bath, size, rent, Proximity, URL link."""
     if not listings:
         return
     rows = _listings_to_table_rows(listings)
@@ -169,6 +202,7 @@ def _render_results_table(listings: list[dict]) -> None:
             "bath": st.column_config.TextColumn("Bath"),
             "size": st.column_config.TextColumn("Size (sqft)"),
             "rent": st.column_config.TextColumn("Rent"),
+            "Proximity": st.column_config.TextColumn("Proximity"),
             "URL": st.column_config.LinkColumn("URL", display_text="Link"),
         },
         width='stretch',
@@ -345,6 +379,12 @@ def _render_preferences_sidebar() -> None:
             name = st.text_input("Name", value=prefs.get("name", ""), key="pref_name")
             email = st.text_input("Email", value=prefs.get("email", ""), key="pref_email")
             phone = st.text_input("Phone (optional)", value=prefs.get("phone", ""), key="pref_phone")
+            proximity = st.text_area(
+                "Proximity preferences",
+                value=prefs.get("proximity_preferences", ""),
+                placeholder="e.g. max 30 min drive to downtown, 5 min walk to transit",
+                key="pref_proximity",
+            )
             submitted = st.form_submit_button("Save")
             if submitted:
                 new_prefs = {
@@ -352,6 +392,7 @@ def _render_preferences_sidebar() -> None:
                     "name": (name or "").strip(),
                     "email": (email or "").strip(),
                     "phone": (phone or "").strip(),
+                    "proximity_preferences": (proximity or "").strip(),
                 }
                 st.session_state["user_preferences"] = new_prefs
                 _save_preferences_to_file(new_prefs)
