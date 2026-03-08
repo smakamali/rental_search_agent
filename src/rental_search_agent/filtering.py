@@ -1,8 +1,8 @@
 """In-memory filter and sort for search results. Used by filter_listings tool."""
 
-from typing import Any, Optional
+from typing import Any, List, Optional
 
-from rental_search_agent.models import Listing, ListingFilterCriteria, RentalSearchResponse
+from rental_search_agent.models import Listing, ListingFilterCriteria, ProximityRule, RentalSearchResponse
 
 # Attributes that can be used for sorting
 SORTABLE_ATTRS = frozenset({"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title"})
@@ -63,14 +63,48 @@ def _listing_matches(listing: Listing | dict, criteria: ListingFilterCriteria) -
     return True
 
 
+def _rule_key(rule: ProximityRule) -> str:
+    """Stable key for a rule (must match proximity.py)."""
+    return f"{rule.location}|{rule.mode}"
+
+
+def _listing_matches_proximity(listing: Listing | dict, rules: List[ProximityRule]) -> bool:
+    """Return True if listing satisfies all proximity rules (AND). Unknown proximity for a rule keeps the listing."""
+    if not rules:
+        return True
+    if isinstance(listing, dict):
+        prox = listing.get("proximity")
+    else:
+        prox = getattr(listing, "proximity", None)
+    if not isinstance(prox, dict):
+        return True  # no proximity data: keep (treat as unknown)
+    for rule in rules:
+        rk = _rule_key(rule)
+        val = prox.get(rk)
+        if val is None:
+            continue  # unknown: keep
+        if not isinstance(val, dict):
+            continue
+        duration_min = val.get("duration_min")
+        if duration_min is None:
+            continue
+        try:
+            if float(duration_min) > rule.max_minutes:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 def filter_listings(
     listings: list[Listing] | list[dict],
     criteria: ListingFilterCriteria | dict,
     *,
     sort_by: Optional[str] = None,
     ascending: bool = True,
+    proximity_rules: Optional[List[ProximityRule]] = None,
 ) -> RentalSearchResponse:
-    """Filter in-memory listings by criteria. Optionally sort by attribute. Returns same shape as rental_search."""
+    """Filter in-memory listings by criteria and/or proximity rules (AND). Optionally sort. Returns same shape as rental_search. Listings with unknown proximity for a rule are kept."""
     if isinstance(criteria, dict):
         criteria = ListingFilterCriteria.model_validate(criteria)
     filtered: list[Listing] = []
@@ -79,8 +113,11 @@ def filter_listings(
             listing = Listing.model_validate(item)
         else:
             listing = item
-        if _listing_matches(listing, criteria):
-            filtered.append(listing)
+        if not _listing_matches(listing, criteria):
+            continue
+        if proximity_rules and not _listing_matches_proximity(listing, proximity_rules):
+            continue
+        filtered.append(listing)
     if sort_by and sort_by in SORTABLE_ATTRS:
         filtered.sort(key=lambda lst: _get_sort_key(lst, sort_by), reverse=not ascending)
     return RentalSearchResponse(listings=filtered, total_count=len(filtered))
