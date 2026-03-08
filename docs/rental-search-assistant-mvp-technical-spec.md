@@ -9,7 +9,7 @@ This document provides implementation-ready technical specifications for the [Re
 | Item | Description |
 |------|-------------|
 | **Source** | [rental-search-assistant-mvp.md](rental-search-assistant-mvp.md) |
-| **Scope** | MCP server (eleven tools), rental search backend adapter, Google Calendar integration, viewing plan drafting, agent orchestration behaviour |
+| **Scope** | MCP server (fifteen+ tools), rental search backend adapter, Google Calendar integration, viewing plan drafting, **geographic proximity preferences** (geocoding, enrichment, filtering), agent orchestration behaviour |
 
 ---
 
@@ -34,6 +34,9 @@ flowchart TB
         T2[rental_search]
         T2b[filter_listings]
         T2c[summarize_listings]
+        T2d[parse_proximity_preferences]
+        T2e[geocode_proximity_references]
+        T2f[enrich_listings_with_proximity]
         T3[simulate_viewing_request]
         T4[calendar_list_events]
         T5[calendar_get_available_slots]
@@ -53,8 +56,12 @@ flowchart TB
     subgraph External["External"]
         REALTOR[REALTOR.CA]
         GC[Google Calendar]
+        GM[Google Maps\nGeocoding/Directions/Places]
     end
 
+    T2d -->|"API key"| GM
+    T2e -->|"API key"| GM
+    T2f -->|"API key"| GM
     T5 -->|"OAuth"| GC
     T6 -->|"create"| GC
     T7 -->|"update"| GC
@@ -72,7 +79,7 @@ flowchart TB
 | **User** | Supplies natural-language search, answers clarification and approval prompts (via Chat UI), receives shortlist and confirmation. |
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
-| **MCP Server** | Exposes twelve tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
+| **MCP Server** | Exposes tools including `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
 | **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into pyRealtor calls; maps pyRealtor/REALTOR.CA output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
 | **pyRealtor** | Python package (`HousesFacade.search_save_houses`); fetches MLS data from REALTOR.CA for the given location (e.g. Vancouver). |
 | **REALTOR.CA** | External listing source (Canada); provides listing data consumed by pyRealtor. |
@@ -111,9 +118,23 @@ classDiagram
         +float? bathrooms
         +float? latitude
         +float? longitude
+        +dict? proximity
         +str? house_category
         +str? postal_code
         +to_short_label(index) str
+    }
+
+    class ProximityRule {
+        +str location
+        +str mode
+        +float max_minutes
+    }
+
+    class GeocodedReference {
+        +str location
+        +float lat
+        +float lon
+        +str? display_name
     }
 
     class UserDetails {
@@ -133,6 +154,7 @@ classDiagram
         +float? rent_min
         +float? rent_max
     }
+    ListingFilterCriteria ..> ProximityRule : optional proximity_rules
 
     class RentalSearchResponse {
         +List~Listing~ listings
@@ -202,10 +224,13 @@ classDiagram
 
 | Layer | Module | Key types / functions |
 |-------|--------|------------------------|
-| **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
+| **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `ProximityRule`, `GeocodedReference`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
 | **Agent** | `agent.py` | `AgentState` (dataclass), `flow_instructions()`, `build_approval_choices()`, `selected_to_listings()` |
 | **Adapter** | `adapter.py` | `search(filters)`, `SearchBackendError` |
-| **Filtering** | `filtering.py` | `filter_listings(listings, criteria, sort_by, ascending)` |
+| **Filtering** | `filtering.py` | `filter_listings(listings, criteria, sort_by, ascending, proximity_rules)` |
+| **Geocoding** | `geocoding.py` | `geocode_location()`, `geocode_proximity_references()` |
+| **Proximity** | `proximity.py` | `get_nearest_transit_station()`, `enrich_listings_with_proximity()` |
+| **Proximity parser** | `proximity_parser.py` | `parse_proximity_preferences()` |
 | **Summarizer** | `summarizer.py` | `summarize_listings(listings)` |
 | **Viewing plan** | `viewing_plan.py` | `draft_viewing_plan(listings, available_slots)` |
 | **Calendar** | `calendar_service.py` | `get_available_slots()`, `list_events()`, `create_event()`, `update_event()`, `delete_event()` |
@@ -227,7 +252,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 - **Currency:** CAD. All rent values in documents and APIs are in CAD/month unless otherwise noted.
 - **Area:** Square feet (sqft). Optional field; omit if backend does not provide it.
 - **IDs:** Listings use an opaque `id` (string) and a `url` (string). The agent uses both for display and for `simulate_viewing_request(listing_url, ...)`.
-- **Location:** Free-form string (e.g. `"Vancouver"`, `"City of Vancouver"`, `"Metro Vancouver"`). Backend interprets; no geocoding in MVP.
+- **Location:** Free-form string (e.g. `"Vancouver"`, `"City of Vancouver"`, `"Metro Vancouver"`). Backend interprets. For **proximity preferences**, locations are geocoded via Google Geocoding API; "nearest transit station" is resolved per listing via Google Places (type=transit_station).
 
 ---
 
@@ -306,7 +331,24 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 }
 ```
 
-### 4.3 User details (for viewing request)
+### 4.3 Proximity rule (input to proximity tools)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `location` | string | Yes | Location string (e.g. "downtown Vancouver", "nearest transit station"). |
+| `mode` | string | Yes | Travel mode: `"drive"`, `"walk"`, or `"transit"`. |
+| `max_minutes` | number | Yes | Maximum duration in minutes. |
+
+### 4.4 Geocoded reference (from geocode_proximity_references)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `location` | string | Original location string. |
+| `lat` | number | Latitude. |
+| `lon` | number | Longitude. |
+| `display_name` | string | Optional. Human-readable name from geocoder. |
+
+### 4.5 User details (for viewing request)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -326,7 +368,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 }
 ```
 
-### 4.4 Viewing plan (from draft_viewing_plan)
+### 4.6 Viewing plan (from draft_viewing_plan)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -337,7 +379,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | `start_datetime` | string | ISO datetime start. |
 | `end_datetime` | string | ISO datetime end. |
 
-### 4.5 Timeslot (for simulate_viewing_request)
+### 4.7 Timeslot (for simulate_viewing_request)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -447,7 +489,49 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 ---
 
-### 5.5 `simulate_viewing_request`
+### 5.5 Proximity tools
+
+#### `parse_proximity_preferences`
+
+**Purpose:** Parse free-text proximity preferences (e.g. "max 30 min drive to downtown, 5 min walk to transit") into a list of structured rules. Use when the user has set proximity_preferences or stated them in chat.
+
+**Arguments:** `proximity_text` (string).
+
+**Response:** `{ "rules": [{ "location", "mode", "max_minutes" }, ...] }`.
+
+---
+
+#### `geocode_location`
+
+**Purpose:** Resolve a single location string to coordinates (lat, lon, display_name). Uses Google Geocoding API. Requires GOOGLE_MAPS_API_KEY.
+
+**Arguments:** `location` (string).
+
+**Response:** `{ "location", "lat", "lon", "display_name" }`.
+
+---
+
+#### `geocode_proximity_references`
+
+**Purpose:** Geocode all locations from parsed proximity rules. Skips "nearest transit station" (resolved at enrichment time). Pass the rules array from parse_proximity_preferences.
+
+**Arguments:** `rules` (array of rule objects).
+
+**Response:** `{ "refs": [{ "location", "lat", "lon", "display_name" }, ...] }`.
+
+---
+
+#### `enrich_listings_with_proximity`
+
+**Purpose:** Enrich listings with proximity data (distance_km, duration_min) per rule using Google Directions and Places APIs. Pass current listings, rules from parse_proximity_preferences, and refs from geocode_proximity_references. Listings without coordinates get proximity unknown.
+
+**Arguments:** `listings`, `rules`, `geocoded_refs`.
+
+**Response:** `{ "listings": [...], "total_count": N }` with each listing having a `proximity` dict.
+
+---
+
+### 5.6 `simulate_viewing_request`
 
 **Purpose:** “Submit” a viewing request without real form POST or browser automation. Returns a summary and/or link (e.g. mailto, contact URL) for learning and user feedback.
 
@@ -484,7 +568,7 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 ---
 
-### 5.6 Calendar tools
+### 5.7 Calendar tools
 
 #### `calendar_list_events`
 
@@ -536,7 +620,7 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 ---
 
-### 5.7 `draft_viewing_plan`
+### 5.8 `draft_viewing_plan`
 
 **Purpose:** Draft a viewing plan by assigning available slots to listings. Clusters nearby listings (by lat/lon) to minimize commute. Call **immediately** after `calendar_get_available_slots` returns.
 
@@ -548,7 +632,7 @@ At least one of `filters` (with non-empty criteria) or `sort_by` is required.
 
 ---
 
-### 5.8 `modify_viewing_plan`
+### 5.9 `modify_viewing_plan`
 
 **Purpose:** Modify the viewing plan when the user wants changes in Step 11. Supports add (listings to add with slot), remove (listing IDs to remove), and update (change slot for a listing).
 
@@ -633,7 +717,8 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 2. **Clarify geography (optional)** → If location ambiguous, `ask_user` for geography. Do not ask for viewing times yet.
 3. **Search** → `rental_search(filters)`. If error → inform user, optionally retry once (see MVP error states). If empty list → do not call approval; suggest relaxing filters and offer to search again.
 4. **Present** → Call `summarize_listings` to get statistics, then produce a bullet-point summary (Count, Price, Bedrooms, Bathrooms, Size, Property types). Results are shown in a table (and optionally a map when coordinates exist). Point user to the table.
-5. **Narrow/sort (optional)** → If user asks to filter or sort, call `filter_listings` with criteria and/or sort options, then `summarize_listings` again and re-present.
+4p. **Proximity (optional)** → If the user has set or stated proximity preferences: call `parse_proximity_preferences`, then `geocode_proximity_references`, then `enrich_listings_with_proximity`, then `filter_listings(proximity_rules=rules)`. Listings with unknown proximity are kept. Add a Proximity bullet to the summary when presenting.
+5. **Narrow/sort (optional)** → If user asks to filter or sort, call `filter_listings` with criteria and/or sort options (and optionally `proximity_rules`), then `summarize_listings` again and re-present.
 6. **Confirm results** → `ask_user` to confirm results look good or need refining before choosing listings for viewing. If refine → loop to step 5; if good → continue.
 7. **Viewing preference** → `ask_user` (single answer) for preferred days and times for viewings. Store as viewing preference. Only ask after results are presented.
 8. **Approve** → `ask_user(prompt, choices = listing labels/ids, allow_multiple: true)`. If `selected` is empty → acknowledge “No viewings requested.” and stop (no user-details collection, no simulate).
@@ -742,3 +827,4 @@ For implementers who want to validate inputs/outputs, below are minimal JSON Sch
 | 0.1 | Feb 17, 2026 | Initial technical spec derived from rental-search-assistant-mvp.md. |
 | 0.2 | Feb 20, 2026 | Added `filter_listings` and `summarize_listings` tools; Listing fields `price_display`, `postal_code`; backend columns Total Rent, Postal Code; updated agent flow (steps 4–12) and MCP server component table. |
 | 0.3 | Feb 20, 2026 | Added Google Calendar integration (calendar_list_events, calendar_get_available_slots, calendar_create_event, calendar_update_event, calendar_delete_event), draft_viewing_plan; ViewingPlanEntry model; updated agent flow (steps 11–16) with calendar and viewing plan. |
+| 0.4 | Mar 2026 | Geographic proximity preferences: ProximityRule, GeocodedReference; Listing.proximity; parse_proximity_preferences, geocode_location, geocode_proximity_references, enrich_listings_with_proximity; filter_listings proximity_rules (AND, keep unknown); flow step 4p; Google Geocoding, Directions, Places APIs. |
