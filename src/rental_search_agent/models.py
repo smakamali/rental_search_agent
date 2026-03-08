@@ -1,6 +1,6 @@
 """Data models per technical spec §4 and §5."""
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,12 +46,33 @@ class Listing(BaseModel):
     open_house: Optional[str] = Field(None, description="Open house date/time text.")
     stories: Optional[float] = Field(None, ge=0, description="Number of stories.")
     postal_code: Optional[str] = Field(None, description="Postal code.")
+    proximity: Optional[dict[str, Any]] = Field(
+        None,
+        description="Per-rule proximity data: keys are rule identifiers, values are { distance_km, duration_min } or null for unknown.",
+    )
 
     def to_short_label(self, index: Optional[int] = None) -> str:
         """Short label for approval choices, e.g. '[1] 123 Main St — $2,800/month'."""
         prefix = f"[{index}] " if index is not None else ""
         rent_str = self.price_display if self.price_display else f"${int(self.price):,}"
         return f"{prefix}{self.address} — {rent_str}"
+
+
+class ProximityRule(BaseModel):
+    """One geographic proximity constraint: location, mode, and max time/distance."""
+
+    location: str = Field(..., description="Location string (e.g. 'downtown Vancouver', 'nearest transit station').")
+    mode: Literal["drive", "walk", "transit"] = Field(..., description="Travel mode for the constraint.")
+    max_minutes: float = Field(..., ge=0, description="Maximum duration in minutes.")
+
+
+class GeocodedReference(BaseModel):
+    """A location resolved to coordinates (from geocoding)."""
+
+    location: str = Field(..., description="Original location string.")
+    lat: float = Field(..., description="Latitude.")
+    lon: float = Field(..., description="Longitude.")
+    display_name: Optional[str] = Field(None, description="Human-readable name from geocoder.")
 
 
 class UserDetails(BaseModel):
