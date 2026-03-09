@@ -147,7 +147,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "filter_listings",
-            "description": "Narrow and/or sort the current search results. Call after presenting results when the user asks to filter (e.g. 'only 1 bathroom', 'under 2500') or sort, or to apply proximity rules (pass proximity_rules from parse_proximity_preferences). Uses the most recent search, filter, or enrich_listings_with_proximity result. Pass filter criteria and/or sort_by + ascending and/or proximity_rules.",
+            "description": "Narrow and/or sort the current search results. Always re-filters from the complete search results (from the most recent rental_search or enrich_listings_with_proximity result), not from a previously filtered subset — so call it again with relaxed or updated criteria instead of running a new rental_search. Pass filter criteria and/or sort_by + ascending and/or proximity_rules.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -418,6 +418,41 @@ def _get_current_listings_from_messages(messages: list[dict]) -> list[dict]:
         # Tool results like ask_user {answer}/{selected} don't contain listings; keep looking.
         continue
     return []
+
+
+def _get_listings_from_tool(messages: list[dict], tool_name: str) -> list[dict]:
+    """Return listings from the most recent result of a specific tool, identified by tool_call_id mapping."""
+    id_to_name: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            tc_id = tc.get("id")
+            name = (tc.get("function") or {}).get("name")
+            if tc_id and name:
+                id_to_name[tc_id] = name
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        if id_to_name.get(msg.get("tool_call_id")) != tool_name:
+            continue
+        try:
+            data = json.loads(msg.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("listings"), list):
+            return data["listings"]
+    return []
+
+
+def _get_master_listings_from_messages(messages: list[dict]) -> list[dict]:
+    """Return listings from the most recent rental_search result (the master set)."""
+    return _get_listings_from_tool(messages, "rental_search")
+
+
+def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
+    """Return listings from the most recent enrich_listings_with_proximity result."""
+    return _get_listings_from_tool(messages, "enrich_listings_with_proximity")
 
 
 def _last_completed_tool_name(messages: list[dict]) -> str | None:
@@ -836,6 +871,8 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             }
             tool_results: list[dict] = []
             current_listings = _get_current_listings_from_messages(messages)
+            master_listings = _get_master_listings_from_messages(messages)
+            enriched_master = _get_enriched_master_from_messages(messages)
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
             for tc in msg.tool_calls:
@@ -845,21 +882,44 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                # filter_listings always re-filters from the master (enriched if available, else raw)
+                # so that relaxing filters never requires a new rental_search call.
+                # summarize_listings uses current_listings (the latest filtered view for same-turn chaining).
+                if name == "filter_listings":
+                    filter_source = enriched_master or master_listings
+                elif name == "summarize_listings":
+                    filter_source = current_listings
+                else:
+                    filter_source = None
                 result = run_tool(
                     name,
                     args,
-                    current_listings=current_listings if name in ("filter_listings", "summarize_listings") else None,
+                    current_listings=filter_source,
                     current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
                     available_slots=available_slots if name == "modify_viewing_plan" else None,
                 )
                 # Update derived context from tool results so chained tools in same batch see fresh data
-                if name in ("rental_search", "filter_listings"):
+                if name == "rental_search":
                     try:
                         data = json.loads(result)
-                        if isinstance(data, dict) and "listings" in data:
-                            raw = data.get("listings")
-                            if isinstance(raw, list):
-                                current_listings = raw
+                        if isinstance(data, dict) and isinstance(data.get("listings"), list):
+                            master_listings = data["listings"]
+                            current_listings = master_listings
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name == "enrich_listings_with_proximity":
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, dict) and isinstance(data.get("listings"), list):
+                            enriched_master = data["listings"]
+                            current_listings = enriched_master
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name == "filter_listings":
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, dict) and isinstance(data.get("listings"), list):
+                            current_listings = data["listings"]
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):
