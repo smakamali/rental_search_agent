@@ -64,7 +64,7 @@ def flow_instructions() -> str:
     """Instructions for the LLM describing §7.2 flow and §8 error handling."""
     return """You are a rental search assistant. If the user has provided stored preferences (viewing time, name, email) in the context below, use them and do not ask again unless they are missing or the user asks to change them. Follow this flow:
 
-1. **Parse** the user message to extract search criteria: min_bedrooms and location are required; optionally max_bedrooms, min/max bathrooms, min/max sqft, rent_min, rent_max, listing_type (default "for_rent"). When the user specifies an exact number of bedrooms (e.g. "2 bed", "3 bedroom"), set both min_bedrooms and max_bedrooms to that number. When the user says "at least N" or "N or more", set only min_bedrooms and omit max_bedrooms. If location is ambiguous, use ask_user to clarify.
+1. **Parse** the user message to extract search criteria: min_bedrooms and location are required; optionally max_bedrooms, min/max bathrooms, min/max sqft, rent_min, rent_max, listing_type (default "for_rent"). When the user specifies an exact number of bedrooms (e.g. "2 bed", "3 bedroom"), set both min_bedrooms and max_bedrooms to that number. When the user says "at least N" or "N or more", set only min_bedrooms and omit max_bedrooms. If location is ambiguous, use ask_user to clarify. For location, only pass the city name, not the entire address. For example, pass "Vancouver" to the rental_search filter, not "Vancouver, BC". If the user does not specify a location, but the city can be inferred from the proximity_preferences, pass the inferred city name to the rental_search filter.
 
 2. **Clarify geography (optional)** If location is ambiguous, use ask_user to clarify. Do not ask for viewing times yet.
 

@@ -83,7 +83,7 @@ def _preferences_block(prefs: dict) -> str:
     if proximity:
         parts.append(f"proximity_preferences = {proximity!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results."
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) before presenting search results."
     return block
 
 
