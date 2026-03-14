@@ -47,7 +47,7 @@ class TestParseProximityPreferencesValid:
         mock_client.chat.completions.create.return_value = _make_llm_response(rules_payload)
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("30 min drive to downtown Vancouver")
@@ -67,7 +67,7 @@ class TestParseProximityPreferencesValid:
         mock_client.chat.completions.create.return_value = _make_llm_response(rules_payload)
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("30 min drive to downtown; 5 min walk to skytrain")
@@ -85,7 +85,7 @@ class TestParseProximityPreferencesValid:
         mock_client.chat.completions.create.return_value = _make_llm_response(rules_payload)
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("30 min drive to downtown Vancouver twice")
@@ -102,7 +102,7 @@ class TestParseProximityPreferencesValid:
         mock_client.chat.completions.create.return_value = _make_llm_response(rules_payload)
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("drive to downtown; transit to UBC")
@@ -125,7 +125,7 @@ class TestParseProximityPreferencesValid:
         mock_client.chat.completions.create.return_value = mock_resp
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("some preference text")
@@ -139,7 +139,7 @@ class TestParseProximityPreferencesErrors:
         mock_client.chat.completions.create.side_effect = Exception("API error")
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             with pytest.raises(ValueError, match="Failed to parse proximity preferences"):
@@ -157,7 +157,7 @@ class TestParseProximityPreferencesErrors:
         mock_client.chat.completions.create.return_value = mock_resp
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             with pytest.raises(ValueError, match="LLM returned invalid JSON"):
@@ -165,7 +165,7 @@ class TestParseProximityPreferencesErrors:
 
     def test_missing_api_key_raises_value_error(self):
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             side_effect=ValueError("No LLM API key found"),
         ):
             with pytest.raises(ValueError, match="No LLM API key found"):
@@ -184,7 +184,7 @@ class TestParseProximityPreferencesErrors:
         mock_client.chat.completions.create.return_value = mock_resp
 
         with patch(
-            "rental_search_agent.proximity_parser._make_llm_client",
+            "rental_search_agent.proximity_parser.get_llm_client_and_model",
             return_value=(mock_client, "gpt-4o-mini"),
         ):
             result = parse_proximity_preferences("some text")

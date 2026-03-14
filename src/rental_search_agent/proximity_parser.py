@@ -2,11 +2,9 @@
 
 import json
 import logging
-import os
 from typing import List
 
-from openai import OpenAI
-
+from rental_search_agent.api_config import get_llm_client_and_model
 from rental_search_agent.models import ProximityRule
 
 logger = logging.getLogger(__name__)
@@ -24,27 +22,6 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _make_llm_client() -> tuple[OpenAI, str]:
-    """Build an OpenAI-compatible LLM client from environment variables."""
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if openrouter_key:
-        model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-        client = OpenAI(
-            api_key=openrouter_key,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={
-                "HTTP-Referer": "https://github.com/smakamali/rental_search_agent",
-                "X-Title": "Rental Search Assistant",
-            },
-        )
-        return client, model
-    if openai_key:
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        return OpenAI(api_key=openai_key), model
-    raise ValueError("No LLM API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env.")
-
-
 def parse_proximity_preferences(proximity_text: str) -> List[ProximityRule]:
     """Parse free-text proximity preferences into a list of ProximityRule using LLM extraction.
 
@@ -59,7 +36,7 @@ def parse_proximity_preferences(proximity_text: str) -> List[ProximityRule]:
     if not proximity_text or not proximity_text.strip():
         return []
 
-    client, model = _make_llm_client()
+    client, model = get_llm_client_and_model()
     try:
         response = client.chat.completions.create(
             model=model,

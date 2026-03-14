@@ -30,6 +30,7 @@ from rental_search_agent.models import (
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
+from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
 from rental_search_agent.viewing_plan import (
     _compute_unused_slots,
     draft_viewing_plan as do_draft_viewing_plan,
@@ -155,6 +156,25 @@ def enrich_listings_with_proximity(
         raise ValueError(f"Invalid geocoded_refs: {e}") from e
     enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
     return {"listings": enriched, "total_count": len(enriched)}
+
+
+@mcp.tool()
+def score_listings_by_preferences(
+    listings: list[dict[str, Any]],
+    preferences_text: str,
+    query_text: Optional[str] = None,
+) -> dict[str, Any]:
+    """Score and rank listings by semantic similarity to the user's qualitative preferences. Pass current listings and preferences_text (from stored qualitative_preferences or user message). Returns { listings: [...], total_count } with each listing having semantic_score, sorted by score descending. Call when qualitative_preferences is set and you have search results to rank. Credentials via API_PROVIDER and the corresponding key (OPENROUTER_API_KEY or OPENAI_API_KEY)."""
+    if not listings or not isinstance(listings, list):
+        raise ValueError("listings is required and must be a non-empty list.")
+    if not (preferences_text and isinstance(preferences_text, str) and preferences_text.strip()):
+        raise ValueError("preferences_text is required and must be a non-empty string.")
+    scored = do_score_listings_by_preferences(
+        listings,
+        preferences_text.strip(),
+        query_text=(query_text or "").strip() or None,
+    )
+    return {"listings": scored, "total_count": len(scored)}
 
 
 def do_simulate_viewing_request(

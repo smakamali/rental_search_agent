@@ -28,6 +28,7 @@ from rental_search_agent.models import (
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
+from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -41,7 +42,7 @@ from rental_search_agent.server import (
 )
 
 # Keys for stored user preferences (same as Streamlit; shared preferences.json)
-PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences")
+PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
 
 
 def _preferences_file() -> Path:
@@ -69,7 +70,8 @@ def _preferences_block(prefs: dict) -> str:
     email = (prefs.get("email") or "").strip()
     phone = (prefs.get("phone") or "").strip()
     proximity = (prefs.get("proximity_preferences") or "").strip()
-    if not viewing and not name and not email and not proximity:
+    qualitative = (prefs.get("qualitative_preferences") or "").strip()
+    if not viewing and not name and not email and not proximity and not qualitative:
         return "No stored user preferences. Ask for viewing preference and for name/email when needed."
     parts = []
     if viewing:
@@ -82,8 +84,10 @@ def _preferences_block(prefs: dict) -> str:
         parts.append(f"phone = {phone!r}")
     if proximity:
         parts.append(f"proximity_preferences = {proximity!r}")
+    if qualitative:
+        parts.append(f"qualitative_preferences = {qualitative!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) before presenting search results."
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) before presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
     return block
 
 
@@ -159,7 +163,7 @@ TOOLS = [
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
                     "rent_min": {"type": "number", "minimum": 0, "description": "Minimum rent (CAD/month)."},
                     "rent_max": {"type": "number", "minimum": 0, "description": "Maximum rent (CAD/month)."},
-                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title). Omit for no sort."},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score). Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
@@ -229,6 +233,22 @@ TOOLS = [
                     "geocoded_refs": {"type": "array", "items": {"type": "object"}, "description": "Refs from geocode_proximity_references."},
                 },
                 "required": ["listings", "rules", "geocoded_refs"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "score_listings_by_preferences",
+            "description": "Score and rank listings by semantic similarity to the user's qualitative preferences (e.g. balcony, parking, gym). Pass current listings and preferences_text (from stored qualitative_preferences or user message). Returns listings with semantic_score added, sorted by score descending. Call when qualitative_preferences is set and you have search results to rank.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "listings": {"type": "array", "items": {"type": "object"}, "description": "Current listing objects (from rental_search, filter_listings, or enrich_listings_with_proximity)."},
+                    "preferences_text": {"type": "string", "description": "User's qualitative/listing preferences (e.g. balcony, parking, gym, pet-friendly). From stored qualitative_preferences or user message."},
+                    "query_text": {"type": "string", "description": "Optional. Additional query context (e.g. user's search message) to include when scoring. Omit to use only preferences_text."},
+                },
+                "required": ["listings", "preferences_text"],
             },
         },
     },
@@ -617,6 +637,22 @@ def run_tool(
             return json.dumps({"listings": enriched, "total_count": len(enriched)})
         except Exception as e:
             return json.dumps({"error": str(e)})
+    if name == "score_listings_by_preferences":
+        listings = current_listings if current_listings is not None else []
+        if not listings:
+            return json.dumps({"error": "No current search results to score. Run a search first."})
+        preferences_text = (arguments.get("preferences_text") or "").strip()
+        if not preferences_text:
+            return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        try:
+            scored = do_score_listings_by_preferences(
+                listings,
+                preferences_text,
+                query_text=(arguments.get("query_text") or "").strip() or None,
+            )
+            return json.dumps({"listings": scored, "total_count": len(scored)})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
     if name == "simulate_viewing_request":
         try:
             resp = do_simulate_viewing_request(
@@ -770,11 +806,6 @@ def prompt_user_for_ask_user(payload: dict) -> str:
     return json.dumps({"answer": line})
 
 
-# OpenRouter: unified API for 400+ models (https://openrouter.ai/docs)
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
-
-
 _DEBUG_LOGGING_SETUP = False
 
 
@@ -811,29 +842,14 @@ def _load_env_file(path: Path) -> None:
 
 
 def _make_llm_client() -> tuple[OpenAI, str]:
-    """Build LLM client and model name. Prefer OpenRouter if OPENROUTER_API_KEY is set."""
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if openrouter_key:
-        model = os.environ.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
-        client = OpenAI(
-            api_key=openrouter_key,
-            base_url=OPENROUTER_BASE_URL,
-            default_headers={
-                "HTTP-Referer": "https://github.com/smakamali/rental_search_agent",
-                "X-Title": "Rental Search Assistant",
-            },
-        )
-        return client, model
-    if openai_key:
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        client = OpenAI(api_key=openai_key)
-        return client, model
-    print(
-        "Set OPENROUTER_API_KEY (recommended, see https://openrouter.ai) or OPENAI_API_KEY to run the client.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    """Build LLM client and model name from unified API config (api_config)."""
+    try:
+        from rental_search_agent.api_config import get_llm_client_and_model
+        return get_llm_client_and_model()
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        print("See https://openrouter.ai for OpenRouter or set OPENAI_API_KEY for OpenAI.", file=sys.stderr)
+        sys.exit(1)
 
 
 logger = logging.getLogger(__name__)
@@ -889,6 +905,8 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     filter_source = enriched_master or master_listings
                 elif name == "summarize_listings":
                     filter_source = current_listings
+                elif name == "score_listings_by_preferences":
+                    filter_source = enriched_master or master_listings
                 else:
                     filter_source = None
                 result = run_tool(
@@ -920,6 +938,15 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         data = json.loads(result)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             current_listings = data["listings"]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name == "score_listings_by_preferences":
+                    try:
+                        data = json.loads(result)
+                        if isinstance(data, dict) and isinstance(data.get("listings"), list):
+                            scored_list = data["listings"]
+                            current_listings = scored_list
+                            enriched_master = scored_list
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):

@@ -17,10 +17,11 @@ except ImportError:
     pdk = None
 
 from rental_search_agent.agent import current_date_context, flow_instructions
+from rental_search_agent.api_config import has_api_credentials
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
 
-# Keys for stored user preferences (viewing time, name, email, phone, proximity)
-PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences")
+# Keys for stored user preferences (viewing time, name, email, phone, proximity, listing preferences)
+PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
 
 
 def _preferences_file() -> Path:
@@ -58,7 +59,8 @@ def _preferences_block(prefs: dict) -> str:
     email = (prefs.get("email") or "").strip()
     phone = (prefs.get("phone") or "").strip()
     proximity = (prefs.get("proximity_preferences") or "").strip()
-    if not viewing and not name and not email and not proximity:
+    qualitative = (prefs.get("qualitative_preferences") or "").strip()
+    if not viewing and not name and not email and not proximity and not qualitative:
         return "No stored user preferences. Ask for viewing preference and for name/email when needed."
     parts = []
     if viewing:
@@ -71,8 +73,10 @@ def _preferences_block(prefs: dict) -> str:
         parts.append(f"phone = {phone!r}")
     if proximity:
         parts.append(f"proximity_preferences = {proximity!r}")
+    if qualitative:
+        parts.append(f"qualitative_preferences = {qualitative!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results."
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
     return block
 
 
@@ -92,7 +96,7 @@ def _get_client_and_model():
     if "llm_client" in st.session_state and "llm_model" in st.session_state:
         return st.session_state["llm_client"], st.session_state["llm_model"]
     _ensure_env_loaded()
-    if not os.environ.get("OPENROUTER_API_KEY", "").strip() and not os.environ.get("OPENAI_API_KEY", "").strip():
+    if not has_api_credentials():
         return None, None
     client, model = _make_llm_client()
     st.session_state["llm_client"] = client
@@ -385,6 +389,12 @@ def _render_preferences_sidebar() -> None:
                 placeholder="e.g. max 30 min drive to downtown, 5 min walk to transit",
                 key="pref_proximity",
             )
+            qualitative = st.text_area(
+                "Listing preferences",
+                value=prefs.get("qualitative_preferences", ""),
+                placeholder="e.g. balcony, parking, gym, pet-friendly",
+                key="pref_qualitative",
+            )
             submitted = st.form_submit_button("Save")
             if submitted:
                 new_prefs = {
@@ -393,6 +403,7 @@ def _render_preferences_sidebar() -> None:
                     "email": (email or "").strip(),
                     "phone": (phone or "").strip(),
                     "proximity_preferences": (proximity or "").strip(),
+                    "qualitative_preferences": (qualitative or "").strip(),
                 }
                 st.session_state["user_preferences"] = new_prefs
                 _save_preferences_to_file(new_prefs)
@@ -433,7 +444,7 @@ def _render_ask_form(pending: dict) -> None:
 
             client, model = _get_client_and_model()
             if client is None or model is None:
-                st.error("Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env or environment.")
+                st.error("Set API_PROVIDER (openrouter or openai) and the corresponding API key (OPENROUTER_API_KEY or OPENAI_API_KEY) in .env.")
                 st.stop()
             # Run step in a loop until no more pending ask (or we get final reply)
             while True:
@@ -456,7 +467,7 @@ def main() -> None:
 
     client, model = _get_client_and_model()
     if client is None or model is None:
-        st.error("Set OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY in .env or environment to run the assistant.")
+        st.error("Set API_PROVIDER (openrouter or openai) and the corresponding API key (OPENROUTER_API_KEY or OPENAI_API_KEY) in .env to run the assistant.")
         st.stop()
 
     col_content, col_chat = st.columns([2, 1], vertical_alignment="bottom")

@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 from rental_search_agent.models import Listing, ListingFilterCriteria, ProximityRule, RentalSearchResponse
 
 # Attributes that can be used for sorting
-SORTABLE_ATTRS = frozenset({"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title"})
+SORTABLE_ATTRS = frozenset({"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score"})
 
 
 def _get_sort_key(listing: Listing | dict, attr: str) -> Any:
@@ -15,10 +15,10 @@ def _get_sort_key(listing: Listing | dict, attr: str) -> Any:
     else:
         val = getattr(listing, attr, None)
     if val is None:
-        if attr in ("price", "bedrooms", "bathrooms", "sqft"):
-            return (1, float("inf"))
+        if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score"):
+            return (1, float("-inf") if attr == "semantic_score" else float("inf"))
         return (1, "")
-    if attr in ("price", "bedrooms", "bathrooms", "sqft"):
+    if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score"):
         return (0, float(val))
     return (0, str(val))
 
