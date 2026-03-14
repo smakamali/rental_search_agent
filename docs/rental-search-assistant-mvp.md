@@ -55,7 +55,7 @@ flowchart TB
 | **Intent parsing** | Parse natural language into structured search criteria (beds, sqft, rent range, location). |
 | **Basic clarification** | At least one required question: **preferred days and times for viewings**. Optionally one geography question (e.g. City of Vancouver vs Metro Vancouver). |
 | **Single search engine** | One `rental_search(filters)` call against one API or one scraped site. |
-| **Shortlist** | Present search results as the shortlist (filtering = whatever the search engine supports). No proximity verification. |
+| **Shortlist** | Present search results as the shortlist. Optional **proximity preferences**: user can set constraints (e.g. max 30 min drive to downtown, 5 min walk to transit); agent parses, geocodes, enriches listings with real distance/drive/transit times via Google APIs, filters by AND semantics; listings without coords shown as "distance unknown". |
 | **User approval** | Ask user which listings they want to request viewings for (multi-select). |
 | **Simulated viewing request** | A tool that "submits" a viewing request by returning a summary or link (e.g. mailto / pre-filled URL). No real form submission or browser automation. |
 | **Calendar integration** | Google Calendar API: list events, get available slots within preferred times, create/update/delete events. Optional; agent can fall back to simulated-only flow if credentials missing. |
@@ -65,7 +65,7 @@ flowchart TB
 
 | Component | Reason |
 |-----------|--------|
-| **Proximity verification** | Geocoding, routing/transit APIs, and config (downtown, skytrain) add significant setup. |
+| ~~Proximity verification~~ | Now in scope: parse_proximity_preferences, geocode_proximity_references, enrich_listings_with_proximity, filter_listings(proximity_rules); Google Geocoding, Directions, Places. |
 | ~~Viewing plan editing~~ | Now in scope: `modify_viewing_plan` allows add/remove/update of entries before approval. |
 | **Viewing request log / double-booking** | No persistent log or slot-dedup; optional in-memory only. |
 | **Real form submission** | No browser automation or platform-specific form adapters; submission is simulated. |
@@ -89,7 +89,7 @@ User says something like:
 | Rent range | 2500–3000 CAD/month     |
 | Location   | Vancouver (or clarified)  |
 
-Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enforced in the MVP; the shortlist is whatever the search engine returns for the above filters.
+**Proximity:** If the user has set proximity preferences (e.g. "max 20 min drive to work"), the agent can parse, geocode, enrich listings with real times, and filter the shortlist by those rules.
 
 ---
 
@@ -136,8 +136,12 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 |-------|------|------|
 | Tool  | `ask_user(prompt, choices[], allow_multiple?)` | Same tool for clarification (single answer) and approval (multi-select). Use `allow_multiple: true` for “which listings?”; false/omitted for viewing times, geography, etc. |
 | Tool  | `rental_search(filters)` | Search one rental engine; return listing list. |
-| Tool  | `filter_listings(filters?, sort_by?, ascending?)` | Narrow and/or sort current search results in-memory. Operates on last rental_search/filter_listings result. |
+| Tool  | `filter_listings(filters?, sort_by?, ascending?, proximity_rules?)` | Narrow and/or sort current search results in-memory. Optional proximity_rules (from parse_proximity_preferences) filter by AND; unknown proximity keeps listing. Operates on last rental_search/filter_listings/enrich_listings_with_proximity result. |
 | Tool  | `summarize_listings()` | Compute statistics (price, bedrooms, bathrooms, size, property types) for current results. Operates on last rental_search/filter_listings result. |
+| Tool  | `parse_proximity_preferences(proximity_text)` | Parse free-text proximity prefs into structured rules. |
+| Tool  | `geocode_location(location)` | Resolve one location to coordinates (Google Geocoding). |
+| Tool  | `geocode_proximity_references(rules)` | Geocode all rule locations (skips "nearest transit station"). |
+| Tool  | `enrich_listings_with_proximity(listings, rules, geocoded_refs)` | Add distance/duration per rule to each listing (Google Directions, Places). |
 | Tool  | `simulate_viewing_request(listing_url, timeslot, user_details)` | "Submit" viewing request (no real form; return summary/link). |
 | Tool  | `calendar_list_events(time_min, time_max, ...)` | List events in time range. |
 | Tool  | `calendar_get_available_slots(preferred_times, date_range_start?, date_range_end?, ...)` | Get available slots. Call before draft_viewing_plan. |
@@ -147,7 +151,7 @@ Proximity constraints (e.g. walk to skytrain, drive to downtown) are **not** enf
 | Tool  | `draft_viewing_plan(listings, available_slots)` | Assign slots to listings; call immediately after calendar_get_available_slots. |
 | Tool  | `modify_viewing_plan(remove?, add?, update?)` | Add, remove, or update plan entries when user wants changes in Step 11. | “Submit” viewing request (no real form; return summary/link). |
 
-**Not in MVP:** `check_proximity`, `get_available_timeslots`, `get_viewing_requests`, `log_viewing_request`, real `submit_viewing_request`, resources like `user_profile://contact` or `config://proximity`.
+**Not in MVP:** `get_available_timeslots`, `get_viewing_requests`, `log_viewing_request`, real `submit_viewing_request`, resources like `user_profile://contact` or `config://proximity`. Proximity is covered by parse_proximity_preferences, geocode_*, enrich_listings_with_proximity, and filter_listings(proximity_rules).
 
 ---
 
@@ -291,7 +295,7 @@ These behaviours keep the conversation coherent and avoid dead ends or confusing
 
 ## Next Steps (From MVP to Full Use Case)
 
-- Add **proximity verification** (`check_proximity` or equivalent) and geocoding/routing.
-- Add **calendar** integration and **viewing request log** for real slot management.
+- ~~Add **proximity verification**~~ — Implemented: parse_proximity_preferences, geocode_*, enrich_listings_with_proximity, filter_listings(proximity_rules).
+- Add **viewing request log** for real slot management.
 - Replace **simulated** submission with real **platform adapters** and browser automation for one or two listing sites.
 - Add a second search engine and richer clarification options.

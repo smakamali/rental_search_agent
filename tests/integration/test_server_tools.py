@@ -110,7 +110,7 @@ class TestFilterListings:
 
     def test_no_criteria_and_no_sort_raises(self):
         listings = [sample_listing().model_dump()]
-        with pytest.raises(ValueError, match="At least one filter criterion or sort_by"):
+        with pytest.raises(ValueError, match="At least one filter criterion"):
             filter_listings(listings, {})
 
 

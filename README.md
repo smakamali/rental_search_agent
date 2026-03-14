@@ -33,6 +33,7 @@ pip install -e .
 | `USE_PROXY` | Optional. Set to `1`, `true`, or `yes` to enable proxy for pyRealtor (e.g. if REALTOR.CA rate-limits). |
 | `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
+| `GOOGLE_MAPS_API_KEY` | Required for **proximity preferences**: geocoding, drive/walk/transit times. Enable Geocoding, Directions, and Places APIs in Google Cloud. |
 | `TIMEZONE` | Optional. Timezone for calendar and date display (default: `America/Vancouver`). |
 
 ## Running
@@ -51,7 +52,7 @@ Or:
 python -m rental_search_agent.server
 ```
 
-The server exposes eleven tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_list_events`, `calendar_get_available_slots`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `draft_viewing_plan`. It uses stdio by default.
+The server exposes tools including `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, and `modify_viewing_plan`. It uses stdio by default.
 
 ### Chat client (CLI)
 
@@ -74,7 +75,7 @@ Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or
 
 ### Streamlit UI
 
-Web chat interface using the same agent and tools. Displays search results in a table and on a map (when coordinates are available). Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
+Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit"); they are stored in `~/.rental_search_agent/preferences.json` and shared with the CLI. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
 
 ```bash
 rental-search-ui
@@ -98,6 +99,10 @@ Calendar tools (`calendar_get_available_slots`, `calendar_create_event`, etc.) u
 4. On first use, a browser will open for OAuth; the token is saved at `.rental_search_agent/token.json`.
 
 Without credentials, calendar tools return an error; the agent can fall back to a simulated-only flow (no events created).
+
+## Proximity preferences (optional)
+
+You can set **geographic proximity** constraints (e.g. "max 30 min drive to downtown", "5 min walk to transit") in the Streamlit sidebar or in `~/.rental_search_agent/preferences.json` (the CLI reads the same file). The agent parses them, geocodes locations, enriches listings with real distance and drive/walk/transit times via Google APIs, and filters by them (AND semantics). Listings without coordinates are kept and shown as "distance unknown". Requires `GOOGLE_MAPS_API_KEY` and enabling **Geocoding**, **Directions**, and **Places** APIs in your Google Cloud project.
 
 ## Testing
 

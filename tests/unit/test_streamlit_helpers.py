@@ -59,6 +59,20 @@ class TestPreferencesBlock:
         assert "name = 'Alice'" in result
         assert "email = 'alice@test.com'" in result
 
+    def test_with_qualitative_preferences(self):
+        prefs = {
+            "viewing_preference": "",
+            "name": "",
+            "email": "",
+            "phone": "",
+            "proximity_preferences": "",
+            "qualitative_preferences": "balcony, parking, gym",
+        }
+        result = _preferences_block(prefs)
+        assert "Stored user preferences" in result
+        assert "qualitative_preferences = 'balcony, parking, gym'" in result
+        assert "score_listings_by_preferences" in result
+
 
 class TestLoadPreferencesFromFile:
     def test_file_missing_returns_default(self):
