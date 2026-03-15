@@ -60,6 +60,8 @@ def _ensure_http_server() -> None:
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
 from rental_search_agent.calendar_service import default_timezone
+from rental_search_agent.chat_summary import summarize_conversation_for_preferences
+from rental_search_agent.listing_analysis import analyze_listing_against_preferences
 from rental_search_agent.client import (
     TOOLS,
     _get_available_slots_from_messages,
@@ -179,6 +181,16 @@ def _init_session_state() -> None:
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
     if "pending_ask" not in st.session_state:
         st.session_state["pending_ask"] = None
+    if "analyze_listing_id" not in st.session_state:
+        st.session_state["analyze_listing_id"] = None
+    if "analyze_listing" not in st.session_state:
+        st.session_state["analyze_listing"] = None
+    if "analysis_result" not in st.session_state:
+        st.session_state["analysis_result"] = {}
+    if "chat_summary" not in st.session_state:
+        st.session_state["chat_summary"] = ""
+    if "chat_summary_message_count" not in st.session_state:
+        st.session_state["chat_summary_message_count"] = None
 
 
 # ---- MCP tool argument mapping and result extraction ----
@@ -268,6 +280,11 @@ def _build_mcp_tool_args(
             "time_max": llm_args.get("time_max", ""),
             "calendar_id": llm_args.get("calendar_id", "primary"),
             "max_results": llm_args.get("max_results", 50),
+        }
+    if name == "analyze_listing_preferences":
+        return {
+            "listing": llm_args.get("listing", {}),
+            "preferences_text": llm_args.get("preferences_text", ""),
         }
     return llm_args
 
@@ -563,25 +580,59 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
 
 
 def _render_results_table(listings: list[dict]) -> None:
-    """Render search results as a dataframe."""
+    """Render search results as custom rows with an Analyze button per listing."""
     if not listings:
         return
-    rows = _listings_to_table_rows(listings)
-    st.dataframe(
-        rows,
-        column_config={
-            "rank": st.column_config.NumberColumn("Rank", format="%d"),
-            "MLS id": st.column_config.TextColumn("MLS id"),
-            "address": st.column_config.TextColumn("Address"),
-            "bed": st.column_config.TextColumn("Bed"),
-            "bath": st.column_config.TextColumn("Bath"),
-            "size": st.column_config.TextColumn("Size (sqft)"),
-            "rent": st.column_config.TextColumn("Rent"),
-            "URL": st.column_config.LinkColumn("URL", display_text="Link"),
-        },
-        width='stretch',
-        hide_index=True,
-    )
+    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Rent, Analyze
+    header_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1])
+    with header_cols[0]:
+        st.caption("Rank")
+    with header_cols[1]:
+        st.caption("MLS id")
+    with header_cols[2]:
+        st.caption("Address")
+    with header_cols[3]:
+        st.caption("Bed")
+    with header_cols[4]:
+        st.caption("Bath")
+    with header_cols[5]:
+        st.caption("Size")
+    with header_cols[6]:
+        st.caption("Rent")
+    with header_cols[7]:
+        st.caption("Analyze")
+    st.divider()
+    for i, listing in enumerate(listings):
+        bath = listing.get("bathrooms")
+        sqft = listing.get("sqft")
+        rent = listing.get("price_display") or (
+            f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
+        )
+        url = listing.get("url") or ""
+        mls_id = listing.get("id") or "—"
+        row_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1])
+        with row_cols[0]:
+            st.write(i + 1)
+        with row_cols[1]:
+            if url:
+                st.link_button(mls_id, url)
+            else:
+                st.write(mls_id)
+        with row_cols[2]:
+            st.write(listing.get("address") or "—")
+        with row_cols[3]:
+            st.write(listing.get("bedrooms") if listing.get("bedrooms") is not None else "—")
+        with row_cols[4]:
+            st.write(f"{float(bath):g}" if bath is not None else "—")
+        with row_cols[5]:
+            st.write(str(int(sqft)) if sqft is not None else "—")
+        with row_cols[6]:
+            st.write(rent)
+        with row_cols[7]:
+            if st.button("Analyze", key=f"analyze_{listing.get('id', i)}"):
+                st.session_state["analyze_listing_id"] = listing.get("id")
+                st.session_state["analyze_listing"] = listing
+                st.rerun()
 
 
 def _listings_cache_key(listings: list[dict]) -> str:
@@ -851,6 +902,82 @@ def main() -> None:
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
+            # Analysis card: when user clicked Analyze, run analysis and show result
+            analyze_listing_id = st.session_state.get("analyze_listing_id")
+            analyze_listing = st.session_state.get("analyze_listing")
+            analysis_result = st.session_state.get("analysis_result", {})
+            if analyze_listing_id and analyze_listing:
+                prefs = st.session_state.get("user_preferences") or {}
+                qualitative = (prefs.get("qualitative_preferences") or "").strip()
+                proximity = (prefs.get("proximity_preferences") or "").strip()
+                preferences_text = qualitative
+                if proximity:
+                    preferences_text = (
+                        f"{preferences_text}\n\nProximity: {proximity}".strip()
+                        if preferences_text
+                        else f"Proximity: {proximity}"
+                    )
+                if not preferences_text:
+                    with st.expander("Analysis result", expanded=True):
+                        st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
+                        if st.button("Clear analysis"):
+                            st.session_state["analyze_listing_id"] = None
+                            st.session_state["analyze_listing"] = None
+                            st.rerun()
+                else:
+                    messages = st.session_state["messages"]
+                    current_count = len(messages)
+                    if st.session_state.get("chat_summary_message_count") != current_count:
+                        with st.spinner("Summarizing conversation..."):
+                            summary = summarize_conversation_for_preferences(messages)
+                            st.session_state["chat_summary"] = summary or ""
+                            st.session_state["chat_summary_message_count"] = current_count
+                            st.session_state["analysis_result"] = {}
+                        st.rerun()
+                    conversation_context = st.session_state.get("chat_summary") or ""
+                    if analyze_listing_id not in analysis_result:
+                        with st.spinner("Analyzing listing..."):
+                            try:
+                                result = analyze_listing_against_preferences(
+                                    analyze_listing,
+                                    preferences_text,
+                                    conversation_context=conversation_context or None,
+                                )
+                                st.session_state.setdefault("analysis_result", {})[
+                                    analyze_listing_id
+                                ] = result
+                            except Exception as e:
+                                st.session_state.setdefault("analysis_result", {})[
+                                    analyze_listing_id
+                                ] = {"error": str(e)}
+                        st.rerun()
+                    result = st.session_state["analysis_result"].get(analyze_listing_id)
+                    if result and isinstance(result, dict):
+                        if "error" in result:
+                            with st.expander("Analysis result", expanded=True):
+                                st.error(result["error"])
+                                if st.button("Clear analysis"):
+                                    st.session_state["analyze_listing_id"] = None
+                                    st.session_state["analyze_listing"] = None
+                                    st.session_state["analysis_result"] = {}
+                                    st.rerun()
+                        else:
+                            addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
+                            with st.expander(f"Analysis: {addr}", expanded=True):
+                                st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
+                                col_matches, col_gaps = st.columns(2)
+                                with col_matches:
+                                    st.subheader("Key matches")
+                                    for m in result.get("key_matches") or []:
+                                        st.markdown(f"- {m}")
+                                with col_gaps:
+                                    st.subheader("Key gaps")
+                                    for g in result.get("key_gaps") or []:
+                                        st.markdown(f"- {g}")
+                                if st.button("Clear analysis"):
+                                    st.session_state["analyze_listing_id"] = None
+                                    st.session_state["analyze_listing"] = None
+                                    st.rerun()
             map_points, center_lat, center_lon = _build_map_data(listings)
             if map_points and center_lat is not None and center_lon is not None:
                 with st.expander("Search results map", expanded=True):

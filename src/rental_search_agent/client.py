@@ -19,6 +19,7 @@ from rental_search_agent.geocoding import (
     geocode_location as do_geocode_location,
     geocode_proximity_references as do_geocode_proximity_references,
 )
+from rental_search_agent.listing_analysis import analyze_listing_against_preferences as do_analyze_listing_against_preferences
 from rental_search_agent.models import (
     GeocodedReference,
     Listing,
@@ -249,6 +250,21 @@ TOOLS = [
                     "query_text": {"type": "string", "description": "Optional. Additional query context (e.g. user's search message) to include when scoring. Omit to use only preferences_text."},
                 },
                 "required": ["listings", "preferences_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_listing_preferences",
+            "description": "Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Pass the full listing object and a single preferences_text string. When the user has set both listing preferences and proximity preferences, combine them in one string (e.g. list qualitative preferences first, then 'Proximity: ...' with their proximity preferences).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "listing": {"type": "object", "description": "Full listing object from current search results (id, title, address, description, etc.)."},
+                    "preferences_text": {"type": "string", "description": "User's preferences as one string: listing/qualitative preferences (e.g. balcony, parking, gym) and optionally proximity (e.g. 'Proximity: max 30 min drive to downtown'). Combine both from stored qualitative_preferences and proximity_preferences when set."},
+                },
+                "required": ["listing", "preferences_text"],
             },
         },
     },
@@ -651,6 +667,20 @@ def run_tool(
                 query_text=(arguments.get("query_text") or "").strip() or None,
             )
             return json.dumps({"listings": scored, "total_count": len(scored)})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+    if name == "analyze_listing_preferences":
+        listing = arguments.get("listing")
+        preferences_text = (arguments.get("preferences_text") or "").strip()
+        if not listing or not isinstance(listing, dict):
+            return json.dumps({"error": "listing is required and must be a non-empty object."})
+        if not preferences_text:
+            return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        try:
+            result = do_analyze_listing_against_preferences(listing, preferences_text)
+            return json.dumps(result)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         except Exception as e:
             return json.dumps({"error": str(e)})
     if name == "simulate_viewing_request":

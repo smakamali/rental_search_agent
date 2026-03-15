@@ -29,6 +29,7 @@ from rental_search_agent.models import (
     UserDetails,
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
+from rental_search_agent.listing_analysis import analyze_listing_against_preferences as do_analyze_listing_against_preferences
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
 from rental_search_agent.viewing_plan import (
@@ -175,6 +176,16 @@ def score_listings_by_preferences(
         query_text=(query_text or "").strip() or None,
     )
     return {"listings": scored, "total_count": len(scored)}
+
+
+@mcp.tool()
+def analyze_listing_preferences(listing: dict[str, Any], preferences_text: str) -> dict[str, Any]:
+    """Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Pass the full listing object and preferences_text: combine listing (qualitative) preferences and proximity preferences in one string when both are set."""
+    if not listing or not isinstance(listing, dict):
+        raise ValueError("listing is required and must be a non-empty object.")
+    if not (preferences_text and isinstance(preferences_text, str) and preferences_text.strip()):
+        raise ValueError("preferences_text is required and must be a non-empty string.")
+    return do_analyze_listing_against_preferences(listing, preferences_text.strip())
 
 
 def do_simulate_viewing_request(
