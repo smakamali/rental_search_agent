@@ -26,7 +26,21 @@ def summarize_conversation_for_preferences(messages: list[dict[str, Any]]) -> st
         role = (msg.get("role") or "").strip().lower()
         if role not in ("user", "assistant"):
             continue
-        content = (msg.get("content") or "").strip()
+        raw = msg.get("content")
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            content = raw.strip()
+        elif isinstance(raw, list):
+            text_bits = []
+            for part in raw:
+                if isinstance(part, dict) and "text" in part:
+                    text_bits.append(str(part["text"]).strip())
+                else:
+                    text_bits.append(str(part).strip())
+            content = " ".join(t for t in text_bits if t)
+        else:
+            content = str(raw).strip()
         if not content:
             continue
         label = "User" if role == "user" else "Assistant"
