@@ -20,7 +20,9 @@ from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
+from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
+from rental_search_agent.proximity_parser import parse_proximity_preferences
 
 # Keys for stored user preferences (viewing time, name, email, phone, proximity, listing preferences)
 PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
@@ -129,26 +131,50 @@ def _init_session_state() -> None:
         st.session_state["chat_summary"] = ""
     if "chat_summary_message_count" not in st.session_state:
         st.session_state["chat_summary_message_count"] = None
+    if "display_list" not in st.session_state:
+        st.session_state["display_list"] = []
+    if "master_list" not in st.session_state:
+        st.session_state["master_list"] = []
+    if "display_source" not in st.session_state:
+        st.session_state["display_source"] = None
 
 
-def _get_latest_search_listings(messages: list[dict]) -> list[dict]:
-    """Extract the most recent rental_search or filter_listings result from message history.
-    Returns the 'listings' array (list of listing dicts) or empty list if none found.
-    """
-    listings = []
-    for msg in reversed(messages):
-        if msg.get("role") != "tool":
-            continue
+def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
+    """When display is from enrich and user has proximity prefs, filter to in-range only. Returns filtered list or original on error."""
+    if not proximity_text or not listings:
+        return listings
+    cache = st.session_state.get("proximity_parsed_rules")
+    if cache is not None and cache[0] == proximity_text and cache[1]:
+        rules = cache[1]
+    else:
         try:
-            data = json.loads(msg.get("content") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(data, dict) and "listings" in data:
-            raw = data.get("listings")
-            if isinstance(raw, list):
-                listings = raw
-            break
-    return listings
+            rules = parse_proximity_preferences(proximity_text)
+            st.session_state["proximity_parsed_rules"] = (proximity_text, rules)
+        except Exception:
+            st.warning("Could not parse proximity preferences; showing results unfiltered.")
+            return listings
+    if not rules:
+        return listings
+    try:
+        resp = do_filter_listings(listings, {}, proximity_rules=rules)
+        return [lst.model_dump() if hasattr(lst, "model_dump") else lst for lst in resp.listings]
+    except Exception:
+        return listings
+
+
+def _min_proximity_minutes(listing: dict) -> float:
+    """Minimum duration_min across all proximity rules for this listing. Returns inf if none."""
+    prox = listing.get("proximity") or {}
+    if not isinstance(prox, dict):
+        return float("inf")
+    minutes = []
+    for val in prox.values():
+        if isinstance(val, dict) and val.get("duration_min") is not None:
+            try:
+                minutes.append(float(val["duration_min"]))
+            except (TypeError, ValueError):
+                pass
+    return min(minutes) if minutes else float("inf")
 
 
 def _format_proximity_display(proximity: dict | None) -> str:
@@ -498,8 +524,17 @@ def _render_ask_form(pending: dict) -> None:
                 st.stop()
             # Run step in a loop until no more pending ask (or we get final reply)
             while True:
-                messages, payload = run_agent_step(client, model, st.session_state["messages"])
+                messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
                 st.session_state["messages"] = messages
+                if listing_state is not None:
+                    if listing_state.get("display_source") is not None:
+                        new_display = listing_state.get("display_list", [])
+                        if new_display:
+                            st.session_state["display_list"] = new_display
+                        st.session_state["display_source"] = listing_state.get("display_source")
+                    new_master = listing_state.get("master_list", [])
+                    if new_master:
+                        st.session_state["master_list"] = new_master
                 if payload is not None:
                     st.session_state["pending_ask"] = payload
                     st.rerun()
@@ -523,7 +558,18 @@ def main() -> None:
     col_content, col_chat = st.columns([2, 1], vertical_alignment="bottom")
 
     with col_content:
-        listings = _get_latest_search_listings(st.session_state["messages"])
+        prefs = st.session_state.get("user_preferences") or {}
+        listings = st.session_state.get("display_list") or []
+        proximity_text = (prefs.get("proximity_preferences") or "").strip()
+        display_source = st.session_state.get("display_source")
+        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally
+        if proximity_text and display_source == "enrich" and listings:
+            listings = _apply_proximity_filter_safeguard(listings, proximity_text)
+        # When proximity prefs are set and listings have proximity data, sort by closest first
+        if proximity_text and any(
+            _min_proximity_minutes(lst) != float("inf") for lst in listings
+        ):
+            listings = sorted(listings, key=_min_proximity_minutes)
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
@@ -630,8 +676,17 @@ def main() -> None:
             return
         if prompt := st.chat_input("Type your search request (e.g. 2 bed in Vancouver under 3000)"):
             st.session_state["messages"].append({"role": "user", "content": prompt})
-            messages, payload = run_agent_step(client, model, st.session_state["messages"])
+            messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
             st.session_state["messages"] = messages
+            if listing_state is not None:
+                if listing_state.get("display_source") is not None:
+                    new_display = listing_state.get("display_list", [])
+                    if new_display:
+                        st.session_state["display_list"] = new_display
+                    st.session_state["display_source"] = listing_state.get("display_source")
+                new_master = listing_state.get("master_list", [])
+                if new_master:
+                    st.session_state["master_list"] = new_master
             if payload is not None:
                 st.session_state["pending_ask"] = payload
             st.rerun()

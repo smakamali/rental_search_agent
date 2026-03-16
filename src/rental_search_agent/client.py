@@ -88,7 +88,7 @@ def _preferences_block(prefs: dict) -> str:
     if qualitative:
         parts.append(f"qualitative_preferences = {qualitative!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) before presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
+    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
     return block
 
 
@@ -164,8 +164,8 @@ TOOLS = [
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
                     "rent_min": {"type": "number", "minimum": 0, "description": "Minimum rent (CAD/month)."},
                     "rent_max": {"type": "number", "minimum": 0, "description": "Maximum rent (CAD/month)."},
-                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score). Omit for no sort."},
-                    "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Omit for no sort."},
+                    "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
             },
@@ -225,15 +225,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "enrich_listings_with_proximity",
-            "description": "Enrich listings with proximity data (distance_km, duration_min) per rule. Pass current listings, rules from parse_proximity_preferences, and refs from geocode_proximity_references. Returns { listings: [...], total_count } with each listing having 'proximity' dict. Call after geocode_proximity_references. Requires GOOGLE_MAPS_API_KEY.",
+            "description": "Enrich listings with proximity data (distance_km, duration_min) per rule. The current listings are inferred from context — do NOT pass them as an argument. Only pass rules (from parse_proximity_preferences) and geocoded_refs (from geocode_proximity_references). Returns { listings: [...], total_count } with each listing having a 'proximity' dict. Call after geocode_proximity_references. Requires GOOGLE_MAPS_API_KEY.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "listings": {"type": "array", "items": {"type": "object"}, "description": "Current listing objects (from rental_search or filter_listings)."},
                     "rules": {"type": "array", "items": {"type": "object"}, "description": "Rules from parse_proximity_preferences."},
                     "geocoded_refs": {"type": "array", "items": {"type": "object"}, "description": "Refs from geocode_proximity_references."},
                 },
-                "required": ["listings", "rules", "geocoded_refs"],
+                "required": ["rules", "geocoded_refs"],
             },
         },
     },
@@ -609,6 +608,18 @@ def run_tool(
         proximity_rules_raw = arguments.get("proximity_rules") or []
         if not criteria_dict and not sort_by and not proximity_rules_raw:
             return json.dumps({"error": "At least one filter criterion, sort_by, or proximity_rules is required."})
+        # Guard: proximity filtering requires enriched listings. If rules are supplied but no
+        # listing has proximity data, the filter will silently pass everything through.
+        if proximity_rules_raw and not any(
+            isinstance(lst, dict) and lst.get("proximity") for lst in listings
+        ):
+            return json.dumps({
+                "error": (
+                    "Listings have not been enriched with proximity data yet. "
+                    "Call enrich_listings_with_proximity(listings, rules, geocoded_refs) first, "
+                    "then retry filter_listings with proximity_rules."
+                )
+            })
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
         proximity_rules = [ProximityRule.model_validate(r) for r in proximity_rules_raw] if proximity_rules_raw else None
         resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=proximity_rules)
@@ -642,11 +653,13 @@ def run_tool(
             return json.dumps({"error": str(e)})
     if name == "enrich_listings_with_proximity":
         try:
-            listings = arguments.get("listings") or []
+            # Prefer in-memory current_listings (passed via run_agent_step) so the LLM
+            # does not need to echo the full listing JSON in its tool call arguments.
+            listings = (current_listings if current_listings is not None else []) or arguments.get("listings") or []
             rules_raw = arguments.get("rules") or []
             refs_raw = arguments.get("geocoded_refs") or []
             if not listings:
-                return json.dumps({"error": "listings is required and must be non-empty."})
+                return json.dumps({"error": "No current listings to enrich. Run a search (or filter) first."})
             rule_objs = [ProximityRule.model_validate(r) for r in rules_raw]
             ref_objs = [GeocodedReference.model_validate(r) for r in refs_raw]
             enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
@@ -885,10 +898,28 @@ def _make_llm_client() -> tuple[OpenAI, str]:
 logger = logging.getLogger(__name__)
 
 
-def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[list[dict], dict | None]:
-    """Run one or more LLM calls and tool executions. Returns (updated_messages, ask_user_payload | None).
-    When ask_user needs input, returns (messages + assistant_msg + tool_results_before_ask, payload) with
-    payload containing tool_call_id, prompt, choices, allow_multiple so the caller can append the user's answer."""
+def _listing_state_from_messages(messages: list[dict]) -> dict | None:
+    """Build listing_state (display_list, master_list, display_source) from message history."""
+    display_list = _get_current_listings_from_messages(messages)
+    master_list = _get_enriched_master_from_messages(messages) or _get_master_listings_from_messages(messages)
+    last_tool = _last_completed_tool_name(messages)
+    display_source = None
+    if last_tool == "rental_search":
+        display_source = "search"
+    elif last_tool == "filter_listings":
+        display_source = "filter"
+    elif last_tool == "enrich_listings_with_proximity":
+        display_source = "enrich"
+    elif last_tool == "score_listings_by_preferences":
+        display_source = "score"
+    return {"display_list": display_list or [], "master_list": master_list or [], "display_source": display_source}
+
+
+def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[list[dict], dict | None, dict | None]:
+    """Run one or more LLM calls and tool executions. Returns (updated_messages, ask_user_payload | None, listing_state | None).
+    listing_state has display_list, master_list, display_source for the UI. When ask_user needs input, returns
+    (messages + assistant_msg + tool_results_before_ask, payload, listing_state)."""
+    last_listing_state: dict | None = None
     while True:
         logger.debug("Calling LLM (model=%s)...", model)
         resp = client.chat.completions.create(
@@ -897,10 +928,13 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             tools=TOOLS,
             tool_choice="auto",
         )
+        if not resp or not resp.choices:
+            logger.warning("LLM returned empty choices (possible API error or context too long); aborting step.")
+            return (messages, None, last_listing_state or _listing_state_from_messages(messages))
         msg = resp.choices[0].message
         logger.debug("LLM responded")
         if not msg:
-            return (messages, None)
+            return (messages, None, _listing_state_from_messages(messages))
         if msg.tool_calls:
             logger.debug("LLM requested %d tool(s): %s", len(msg.tool_calls), [tc.function.name for tc in msg.tool_calls])
             assistant_msg = {
@@ -919,6 +953,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             current_listings = _get_current_listings_from_messages(messages)
             master_listings = _get_master_listings_from_messages(messages)
             enriched_master = _get_enriched_master_from_messages(messages)
+            display_source: str | None = None
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
             for tc in msg.tool_calls:
@@ -937,6 +972,10 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     filter_source = current_listings
                 elif name == "score_listings_by_preferences":
                     filter_source = enriched_master or master_listings
+                elif name == "enrich_listings_with_proximity":
+                    # Use in-memory listings so the LLM doesn't need to pass them as
+                    # arguments, keeping the full listing JSON out of the LLM's output tokens.
+                    filter_source = current_listings
                 else:
                     filter_source = None
                 result = run_tool(
@@ -953,6 +992,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             master_listings = data["listings"]
                             current_listings = master_listings
+                            display_source = "search"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -961,6 +1001,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             enriched_master = data["listings"]
                             current_listings = enriched_master
+                            display_source = "enrich"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "filter_listings":
@@ -968,6 +1009,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         data = json.loads(result)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             current_listings = data["listings"]
+                            display_source = "filter"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "score_listings_by_preferences":
@@ -977,6 +1019,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                             scored_list = data["listings"]
                             current_listings = scored_list
                             enriched_master = scored_list
+                            display_source = "score"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):
@@ -992,6 +1035,11 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                 if name == "ask_user":
                     payload = json.loads(result)
                     if payload.get("request_user_input"):
+                        listing_state = {
+                            "display_list": current_listings or [],
+                            "master_list": enriched_master or master_listings or [],
+                            "display_source": display_source,
+                        }
                         return (
                             messages + [assistant_msg] + tool_results,
                             {
@@ -1000,8 +1048,18 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                                 "choices": payload.get("choices") or [],
                                 "allow_multiple": payload.get("allow_multiple", False),
                             },
+                            listing_state,
                         )
                 tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            last_listing_state = {
+                "display_list": current_listings or [],
+                "master_list": enriched_master or master_listings or [],
+                # Carry forward the display_source from a previous iteration when no
+                # display-changing tool ran in this batch (e.g. summarize_listings after
+                # rental_search), so the streamlit gate still sees the correct source.
+                "display_source": display_source if display_source is not None
+                                  else (last_listing_state.get("display_source") if last_listing_state else None),
+            }
             messages = messages + [assistant_msg] + tool_results
             continue
         # No tool calls: final assistant reply (or enforce draft_viewing_plan after calendar_get_available_slots)
@@ -1033,9 +1091,10 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                 tool_results = [{"role": "tool", "tool_call_id": synthetic_id, "content": result}]
                 messages = messages + [assistant_msg] + tool_results
                 continue
-        # Normal final assistant reply
+        # Normal final assistant reply: use in-memory state from last tool batch if available
         messages = messages + [{"role": "assistant", "content": msg.content or ""}]
-        return (messages, None)
+        listing_state = last_listing_state if last_listing_state is not None else _listing_state_from_messages(messages)
+        return (messages, None, listing_state)
 
 
 def run_agent_loop() -> None:
@@ -1055,7 +1114,7 @@ def run_agent_loop() -> None:
             break
         messages.append({"role": "user", "content": user_line})
         while True:
-            messages, payload = run_agent_step(client, model, messages)
+            messages, payload, _ = run_agent_step(client, model, messages)
             if payload is not None:
                 answer_json = prompt_user_for_ask_user(payload)
                 messages.append({
