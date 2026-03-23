@@ -14,3 +14,6 @@ venv/
 
 # Debug log (created when agent runs)
 rental_search_agent_debug.log
+
+# Zip files
+*.zip
