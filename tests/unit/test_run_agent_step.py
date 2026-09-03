@@ -63,7 +63,7 @@ class TestRunAgentStepFinalReply:
         client, model = _make_client(_make_final_reply("Hello!"))
         messages = _base_messages() + [{"role": "user", "content": "Hi"}]
 
-        updated, payload = run_agent_step(client, model, messages)
+        updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
         assert updated[-1]["role"] == "assistant"
@@ -73,7 +73,7 @@ class TestRunAgentStepFinalReply:
         client, model = _make_client(_make_final_reply("Done."))
         messages = _base_messages() + [{"role": "user", "content": "Search for 2 beds"}]
 
-        updated, _ = run_agent_step(client, model, messages)
+        updated, _, _ = run_agent_step(client, model, messages)
 
         assert len(updated) == len(messages) + 1
         assert updated[-1]["content"] == "Done."
@@ -96,7 +96,7 @@ class TestRunAgentStepToolCall:
         with patch("rental_search_agent.client.search", return_value=sample_resp):
             client, model = _make_client(tool_call, final)
             messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
-            updated, payload = run_agent_step(client, model, messages)
+            updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
         roles = [m["role"] for m in updated]
@@ -117,7 +117,7 @@ class TestRunAgentStepToolCall:
         with patch("rental_search_agent.client.search", return_value=sample_resp):
             client, model = _make_client(tool_call, final)
             messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
-            updated, _ = run_agent_step(client, model, messages)
+            updated, _, _ = run_agent_step(client, model, messages)
 
         tool_msgs = [m for m in updated if m.get("role") == "tool"]
         assert len(tool_msgs) >= 1
@@ -132,7 +132,7 @@ class TestRunAgentStepToolCall:
 
 class TestRunAgentStepAskUser:
     def test_ask_user_returns_payload_and_pauses(self):
-        """When LLM calls ask_user, run_agent_step returns (messages, payload) immediately."""
+        """When LLM calls ask_user, run_agent_step returns (messages, payload, listing_state) immediately."""
         tool_call = _make_tool_call_reply(
             "ask_user",
             {"prompt": "Which listing?", "choices": ["[1] 123 Main", "[2] 456 Oak"], "allow_multiple": False},
@@ -140,7 +140,7 @@ class TestRunAgentStepAskUser:
         client, model = _make_client(tool_call)
         messages = _base_messages() + [{"role": "user", "content": "Show listings"}]
 
-        updated, payload = run_agent_step(client, model, messages)
+        updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is not None
         assert payload["prompt"] == "Which listing?"
@@ -157,7 +157,7 @@ class TestRunAgentStepAskUser:
         client, model = _make_client(tool_call)
         messages = _base_messages() + [{"role": "user", "content": "Go ahead"}]
 
-        _, payload = run_agent_step(client, model, messages)
+        _, payload, _ = run_agent_step(client, model, messages)
 
         assert payload["tool_call_id"] == "call-ask-123"
 
@@ -170,7 +170,7 @@ class TestRunAgentStepAskUser:
         client, model = _make_client(tool_call)
         messages = _base_messages() + [{"role": "user", "content": "help"}]
 
-        updated, payload = run_agent_step(client, model, messages)
+        updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is not None
         # The updated messages should include the assistant message that issued the tool call
@@ -217,7 +217,7 @@ class TestRunAgentStepFilterSource:
         final = _make_final_reply("Filtered.")
 
         client, model = _make_client(tool_call, final)
-        updated, payload = run_agent_step(client, model, messages)
+        updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
         # Find the tool result for filter_listings
@@ -276,7 +276,7 @@ class TestRunAgentStepAutoDraftViewingPlan:
         final = _make_final_reply("I'll help you book viewings.")
 
         client, model = _make_client(final, _make_final_reply("Plan created."))
-        updated, payload = run_agent_step(client, model, messages)
+        updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
         # There should be a tool message whose content contains "entries" (from auto-drafted plan)

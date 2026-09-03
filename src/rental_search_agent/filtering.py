@@ -5,11 +5,35 @@ from typing import Any, List, Optional
 from rental_search_agent.models import Listing, ListingFilterCriteria, ProximityRule, RentalSearchResponse
 
 # Attributes that can be used for sorting
-SORTABLE_ATTRS = frozenset({"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score"})
+SORTABLE_ATTRS = frozenset({"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity"})
+
+
+def _min_proximity_minutes(listing: Listing | dict) -> float:
+    """Return the minimum duration_min across all proximity rules for this listing.
+    Returns inf if no proximity data is present (sorts to end when ascending)."""
+    if isinstance(listing, dict):
+        prox = listing.get("proximity")
+    else:
+        prox = getattr(listing, "proximity", None)
+    if not isinstance(prox, dict):
+        return float("inf")
+    minutes = []
+    for val in prox.values():
+        if isinstance(val, dict) and val.get("duration_min") is not None:
+            try:
+                minutes.append(float(val["duration_min"]))
+            except (TypeError, ValueError):
+                pass
+    return min(minutes) if minutes else float("inf")
 
 
 def _get_sort_key(listing: Listing | dict, attr: str) -> Any:
     """Extract sort key from listing. None/missing values sort to end."""
+    if attr == "proximity":
+        minutes = _min_proximity_minutes(listing)
+        if minutes == float("inf"):
+            return (1, float("inf"))
+        return (0, minutes)
     if isinstance(listing, dict):
         val = listing.get(attr)
     else:
