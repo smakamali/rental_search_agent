@@ -485,9 +485,45 @@ def _get_master_listings_from_messages(messages: list[dict]) -> list[dict]:
     return _get_listings_from_tool(messages, "rental_search")
 
 
+def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | None:
+    """Return the index of the most recent tool result message for tool_name, or None."""
+    id_to_name: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            tc_id = tc.get("id")
+            name = (tc.get("function") or {}).get("name")
+            if tc_id and name:
+                id_to_name[tc_id] = name
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") != "tool":
+            continue
+        if id_to_name.get(msg.get("tool_call_id")) == tool_name:
+            return i
+    return None
+
+
 def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
-    """Return listings from the most recent enrich_listings_with_proximity result."""
-    return _get_listings_from_tool(messages, "enrich_listings_with_proximity")
+    """Return listings from the most recent enrich_listings_with_proximity result.
+
+    Ignores enrich results that predate the latest rental_search so a new search
+    does not keep using proximity data from a previous search.
+    """
+    enrich_idx = _tool_result_message_index(messages, "enrich_listings_with_proximity")
+    if enrich_idx is None:
+        return []
+    search_idx = _tool_result_message_index(messages, "rental_search")
+    if search_idx is not None and search_idx > enrich_idx:
+        return []
+    try:
+        data = json.loads(messages[enrich_idx].get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(data, dict) and isinstance(data.get("listings"), list):
+        return data["listings"]
+    return []
 
 
 def _last_completed_tool_name(messages: list[dict]) -> str | None:
@@ -990,6 +1026,9 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     try:
                         data = json.loads(result)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
+                            # Drop proximity/score master from a previous search so filter/score
+                            # use the new results rather than a stale enriched set.
+                            enriched_master = []
                             master_listings = data["listings"]
                             current_listings = master_listings
                             display_source = "search"

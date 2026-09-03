@@ -528,13 +528,11 @@ def _render_ask_form(pending: dict) -> None:
                 st.session_state["messages"] = messages
                 if listing_state is not None:
                     if listing_state.get("display_source") is not None:
-                        new_display = listing_state.get("display_list", [])
-                        if new_display:
-                            st.session_state["display_list"] = new_display
+                        # Always replace, including empty lists (zero-result search/filter).
+                        st.session_state["display_list"] = listing_state.get("display_list", [])
                         st.session_state["display_source"] = listing_state.get("display_source")
-                    new_master = listing_state.get("master_list", [])
-                    if new_master:
-                        st.session_state["master_list"] = new_master
+                    if "master_list" in listing_state:
+                        st.session_state["master_list"] = listing_state.get("master_list") or []
                 if payload is not None:
                     st.session_state["pending_ask"] = payload
                     st.rerun()
@@ -680,13 +678,11 @@ def main() -> None:
             st.session_state["messages"] = messages
             if listing_state is not None:
                 if listing_state.get("display_source") is not None:
-                    new_display = listing_state.get("display_list", [])
-                    if new_display:
-                        st.session_state["display_list"] = new_display
+                    # Always replace, including empty lists (zero-result search/filter).
+                    st.session_state["display_list"] = listing_state.get("display_list", [])
                     st.session_state["display_source"] = listing_state.get("display_source")
-                new_master = listing_state.get("master_list", [])
-                if new_master:
-                    st.session_state["master_list"] = new_master
+                if "master_list" in listing_state:
+                    st.session_state["master_list"] = listing_state.get("master_list") or []
             if payload is not None:
                 st.session_state["pending_ask"] = payload
             st.rerun()
