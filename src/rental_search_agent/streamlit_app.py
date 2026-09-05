@@ -155,9 +155,23 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
             return listings
     if not rules:
         return listings
+    # Preserve each listing's authoritative 'rank' (assigned by the LLM tool layer in
+    # client.py) across this filter round-trip: filter_listings validates listings through
+    # the Listing model, which silently drops unrecognized fields like 'rank'. Re-attach by
+    # id afterward so the UI keeps labeling listings with the same rank the LLM uses for
+    # "listing N" references, even after this safeguard narrows/reorders the set.
+    rank_by_id = {
+        lst.get("id"): lst.get("rank")
+        for lst in listings
+        if isinstance(lst, dict) and lst.get("id") is not None
+    }
     try:
         resp = do_filter_listings(listings, {}, proximity_rules=rules)
-        return [lst.model_dump() if hasattr(lst, "model_dump") else lst for lst in resp.listings]
+        result = [lst.model_dump() if hasattr(lst, "model_dump") else lst for lst in resp.listings]
+        for lst in result:
+            if isinstance(lst, dict) and lst.get("id") in rank_by_id:
+                lst["rank"] = rank_by_id[lst["id"]]
+        return result
     except Exception:
         return listings
 
@@ -207,7 +221,13 @@ def _format_proximity_display(proximity: dict | None) -> str:
 
 
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, price, Proximity, URL."""
+    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, price, Proximity, URL.
+
+    Uses each listing's 'rank' field (assigned by the LLM tool layer in client.py) rather
+    than its position in this list, so numbering stays correct even when this list has been
+    locally reordered/filtered for display (e.g. the proximity closest-first safeguard),
+    which would otherwise desync the table's numbers from what the LLM calls "listing N".
+    """
     rows = []
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
@@ -216,7 +236,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         rows.append({
-            "rank": i + 1,
+            "rank": listing.get("rank") if listing.get("rank") is not None else i + 1,
             "MLS id": listing.get("id") or "—",
             "address": listing.get("address") or "—",
             "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
@@ -265,7 +285,10 @@ def _render_results_table(listings: list[dict]) -> None:
         prox = _format_proximity_display(listing.get("proximity"))
         row_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
         with row_cols[0]:
-            st.write(i + 1)
+            # Use the listing's authoritative 'rank' (from the LLM tool layer), not this
+            # row's position, so the number matches what the LLM calls "listing N" even
+            # after a local reorder (e.g. the proximity closest-first safeguard above).
+            st.write(listing.get("rank") if listing.get("rank") is not None else i + 1)
         with row_cols[1]:
             if url:
                 st.link_button(mls_id, url)
@@ -330,6 +353,10 @@ def _get_map_html_cached(listings_json: str) -> str | None:
 def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
     """Build list of {lat, lon, label, url} for listings with valid coordinates.
     Returns (map_points, center_lat, center_lon). Center is None if no points.
+
+    Labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
+    rather than position in this list, so map pin numbers stay correct even when this list
+    has been locally reordered for display (e.g. the proximity closest-first safeguard).
     """
     points = []
     lats, lons = [], []
@@ -345,7 +372,8 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         url = listing.get("url") or ""
-        points.append({"lat": lat, "lon": lon, "label": str(i + 1), "url": url})
+        label = str(listing.get("rank")) if listing.get("rank") is not None else str(i + 1)
+        points.append({"lat": lat, "lon": lon, "label": label, "url": url})
         lats.append(lat)
         lons.append(lon)
     if not points:
@@ -356,7 +384,8 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
 
 
 def _render_results_map(map_points: list[dict], center_lat: float, center_lon: float) -> None:
-    """Render a map with points labeled by listing order (1, 2, 3, ...). Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
+    """Render a map with points labeled by each listing's rank (see _build_map_data).
+    Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
     if folium is not None:
         # Folium: markers with DivIcon so all numbers (1–9, 10, 11, ...) render correctly
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)

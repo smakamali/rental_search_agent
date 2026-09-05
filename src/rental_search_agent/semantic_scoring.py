@@ -67,6 +67,7 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     house_category = (_get_listing_attr(listing, "house_category") or "").strip()
     parking_spaces = _get_listing_attr(listing, "parking_spaces")
     parking_type = (_get_listing_attr(listing, "parking_type") or "").strip()
+    listing_type = _get_listing_attr(listing, "listing_type")
 
     structured_parts: List[str] = []
     if bedrooms is not None:
@@ -77,7 +78,13 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     if sqft is not None:
         structured_parts.append(f"{int(sqft)} sqft")
     if price is not None:
-        structured_parts.append(f"${int(price)}/month")
+        # listing_type may be unset on older/hand-built listing dicts; default to rent
+        # phrasing only when we don't know, but always use list-price phrasing for sale
+        # so for-sale properties aren't misrepresented as monthly rentals to the scorer.
+        if listing_type == "for_sale":
+            structured_parts.append(f"${int(price)} list price")
+        else:
+            structured_parts.append(f"${int(price)}/month")
     if parking_spaces is not None:
         parking_desc = f"{int(parking_spaces)} parking space{'s' if int(parking_spaces) != 1 else ''}"
         if parking_type:

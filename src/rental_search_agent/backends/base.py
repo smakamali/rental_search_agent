@@ -26,6 +26,11 @@ def get_search_backend() -> SearchBackend:
         from rental_search_agent.backends.apify_realtor_ca import ApifyRealtorCaBackend
 
         return ApifyRealtorCaBackend()
-    raise ValueError(
+    # Raise SearchBackendError (not a raw ValueError) so a misconfigured SEARCH_MARKET
+    # surfaces as a normal tool error to the LLM/user instead of an uncaught exception —
+    # the rental_search call site in client.py only catches SearchBackendError.
+    from rental_search_agent.backends.errors import SearchBackendError
+
+    raise SearchBackendError(
         f"Unsupported SEARCH_MARKET={market!r}. Only 'ca' is implemented; US support is planned."
     )

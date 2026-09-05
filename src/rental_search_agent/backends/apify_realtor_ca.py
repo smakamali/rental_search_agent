@@ -209,6 +209,7 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
         stories=stories,
         parking_spaces=parking_spaces,
         parking_type=parking_type,
+        listing_type=listing_type if listing_type in ("for_rent", "for_sale") else None,
         postal_code=postal,
     )
 

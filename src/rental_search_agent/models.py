@@ -88,6 +88,9 @@ class Listing(BaseModel):
     postal_code: Optional[str] = Field(None, description="Postal code.")
     parking_spaces: Optional[int] = Field(None, ge=0, description="Total number of parking spaces.")
     parking_type: Optional[str] = Field(None, description="Parking type(s), e.g. 'Garage', 'Underground'.")
+    listing_type: Optional[Literal["for_rent", "for_sale"]] = Field(
+        None, description="Transaction type this listing was fetched as: for_rent or for_sale."
+    )
     proximity: Optional[dict[str, Any]] = Field(
         None,
         description="Per-rule proximity data: keys are rule identifiers, values are { distance_km, duration_min } or null for unknown.",
