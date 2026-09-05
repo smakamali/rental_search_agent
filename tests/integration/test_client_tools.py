@@ -8,6 +8,7 @@ import pytest
 from rental_search_agent.client import (
     _get_current_listings_from_messages,
     _get_viewing_plan_from_messages,
+    _with_display_rank,
     run_tool,
 )
 from rental_search_agent.server import draft_viewing_plan
@@ -18,6 +19,22 @@ from tests.fixtures.sample_data import (
     sample_listings,
     sample_listings_with_coords,
 )
+
+
+class TestWithDisplayRank:
+    def test_assigns_one_based_rank_in_order(self):
+        listings = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        result = _with_display_rank(listings)
+        assert [d["rank"] for d in result] == [1, 2, 3]
+        assert [d["id"] for d in result] == ["a", "b", "c"]
+
+    def test_does_not_mutate_input(self):
+        listings = [{"id": "a"}]
+        _with_display_rank(listings)
+        assert "rank" not in listings[0]
+
+    def test_empty_list(self):
+        assert _with_display_rank([]) == []
 
 
 class TestRunTool:
@@ -41,6 +58,21 @@ class TestRunTool:
         data = json.loads(result)
         assert "listings" in data
         assert len(data["listings"]) == 3
+
+    def test_filter_listings_sets_rank_matching_sorted_order(self):
+        # rank must reflect the *post-sort* order returned to the LLM, not the
+        # pre-sort input order, so "listing 1" always means the first row shown.
+        listings = [l.model_dump() for l in sample_listings(3)]
+        result = run_tool(
+            "filter_listings",
+            {"sort_by": "price", "ascending": False},
+            current_listings=listings,
+        )
+        data = json.loads(result)
+        ranks = [lst["rank"] for lst in data["listings"]]
+        assert ranks == [1, 2, 3]
+        prices = [lst["price"] for lst in data["listings"]]
+        assert prices == sorted(prices, reverse=True)
 
     def test_filter_listings_without_listings_returns_error(self):
         result = run_tool("filter_listings", {"sort_by": "price"})
@@ -95,6 +127,7 @@ class TestRunTool:
             data = json.loads(result)
             assert data["total_count"] == 1
             assert len(data["listings"]) == 1
+            assert data["listings"][0]["rank"] == 1
 
     def test_unknown_tool_returns_error(self):
         result = run_tool("unknown_tool", {})

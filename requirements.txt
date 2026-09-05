@@ -1,8 +1,8 @@
-# Rental Search Assistant MVP — dependencies
+# Property Search Assistant MVP — dependencies
 # Use conda env realtor_agent; install with: pip install -r requirements.txt
 
-# Backend: REALTOR.CA via pyRealtor
-pyRealtor>=0.2.6
+# Backend: REALTOR.CA via Apify (igolaizola/realtor-canada-scraper-ppe)
+apify-client>=1.8.0
 
 # MCP server
 mcp>=1.0.0

@@ -14,6 +14,18 @@ venv/
 
 # Debug log (created when agent runs)
 rental_search_agent_debug.log
+*.log
 
 # Zip files
 *.zip
+
+# Test/coverage artifacts
+.coverage
+.pytest_cache/
+
+# Ad-hoc local inspection/debug output (not part of the project)
+.pyrealtor_inspect_tmp/
+all_cols.txt
+
+# Cursor IDE local project data
+.cursor/

@@ -85,7 +85,7 @@ class TestFlowInstructions:
 
     def test_contains_key_phrases(self):
         instructions = flow_instructions()
-        assert "rental search assistant" in instructions.lower()
+        assert "property search assistant" in instructions.lower()
         assert "rental_search" in instructions or "rental search" in instructions
         assert "draft_viewing_plan" in instructions
         assert "calendar_get_available_slots" in instructions

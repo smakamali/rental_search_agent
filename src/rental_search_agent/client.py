@@ -46,6 +46,22 @@ from rental_search_agent.server import (
 PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
 
 
+def _with_display_rank(listings: list[dict]) -> list[dict]:
+    """Attach an explicit 1-based 'rank' to each listing dict, matching the exact array
+    order the UI renders (see streamlit_app._listings_to_table_rows, which numbers rows
+    by position in this same array). Without an explicit field, the LLM has to infer
+    'listing N' by counting position in a large embedded JSON blob — which smaller/faster
+    models can get wrong (e.g. answering about listing 10 when asked about listing 1).
+    Recomputed fresh on every tool result, since filtering/sorting/enrichment changes order.
+    """
+    out = []
+    for i, listing in enumerate(listings):
+        d = dict(listing) if isinstance(listing, dict) else listing
+        d["rank"] = i + 1
+        out.append(d)
+    return out
+
+
 def _preferences_file() -> Path:
     """Path to optional JSON file for persisting preferences (shared with Streamlit)."""
     return Path.home() / ".rental_search_agent" / "preferences.json"
@@ -122,13 +138,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "rental_search",
-            "description": "Run a single rental search. Requires min_bedrooms and location in filters.",
+            "description": "Run a single property search on Realtor.ca (Canada). Supports for_rent and for_sale. Requires min_bedrooms and location in filters.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filters": {
                         "type": "object",
-                        "description": "Rental search filters: min_bedrooms (int), location (str) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, rent_min, rent_max, listing_type. For exact bedroom count (e.g. '2 bed'), set both min_bedrooms and max_bedrooms. For 'at least N', set only min_bedrooms.",
+                        "description": "Search filters: min_bedrooms (int), location (str) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, price_min, price_max (price bounds: monthly rent for for_rent, list price for for_sale), listing_type (for_rent or for_sale). For exact bedroom count (e.g. '2 bed'), set both min_bedrooms and max_bedrooms. For 'at least N', set only min_bedrooms. Prefer location as 'City, Province' when known (e.g. Vancouver, BC).",
                         "properties": {
                             "min_bedrooms": {"type": "integer", "minimum": 0},
                             "max_bedrooms": {"type": "integer", "minimum": 0},
@@ -136,10 +152,10 @@ TOOLS = [
                             "max_bathrooms": {"type": "integer", "minimum": 0},
                             "min_sqft": {"type": "integer", "minimum": 0},
                             "max_sqft": {"type": "integer", "minimum": 0},
-                            "rent_min": {"type": "number", "minimum": 0},
-                            "rent_max": {"type": "number", "minimum": 0},
+                            "price_min": {"type": "number", "minimum": 0},
+                            "price_max": {"type": "number", "minimum": 0},
                             "location": {"type": "string"},
-                            "listing_type": {"type": "string", "enum": ["for_rent", "for_sale", "for_sale_or_rent"]},
+                            "listing_type": {"type": "string", "enum": ["for_rent", "for_sale"]},
                         },
                         "required": ["min_bedrooms", "location"],
                     },
@@ -162,8 +178,8 @@ TOOLS = [
                     "max_bedrooms": {"type": "integer", "minimum": 0, "description": "Maximum number of bedrooms."},
                     "min_sqft": {"type": "integer", "minimum": 0, "description": "Minimum square footage."},
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
-                    "rent_min": {"type": "number", "minimum": 0, "description": "Minimum rent (CAD/month)."},
-                    "rent_max": {"type": "number", "minimum": 0, "description": "Maximum rent (CAD/month)."},
+                    "price_min": {"type": "number", "minimum": 0, "description": "Minimum price (CAD/month for rent; list price for sale)."},
+                    "price_max": {"type": "number", "minimum": 0, "description": "Maximum price (CAD/month for rent; list price for sale)."},
                     "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
@@ -370,7 +386,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "summary": {"type": "string", "description": "Event title (e.g. Rental viewing: 123 Main St)."},
+                    "summary": {"type": "string", "description": "Event title (e.g. Property viewing: 123 Main St)."},
                     "start_datetime": {"type": "string", "description": "ISO datetime for start (e.g. 2026-03-02T18:00:00) from plan entry."},
                     "end_datetime": {"type": "string", "description": "ISO datetime for end (e.g. 2026-03-02T19:00:00) from plan entry."},
                     "description": {"type": "string", "description": "Optional description."},
@@ -628,18 +644,19 @@ def run_tool(
         except Exception as e:
             return json.dumps({"error": f"Invalid filters: {e}"})
         try:
-            use_proxy = os.environ.get("USE_PROXY", "").strip().lower() in ("1", "true", "yes")
-            resp = search(f, use_proxy=use_proxy)
+            resp = search(f)
         except SearchBackendError as e:
             return json.dumps({"error": str(e)})
-        return resp.model_dump_json()
+        data = resp.model_dump()
+        data["listings"] = _with_display_rank(data["listings"])
+        return json.dumps(data)
     if name == "filter_listings":
         listings = current_listings if current_listings is not None else []
         if not listings:
             return json.dumps({"error": "No current search results to filter or sort. Run a search first."})
         sort_by = arguments.get("sort_by")
         ascending = arguments.get("ascending", True)
-        criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "rent_min", "rent_max"}
+        criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "price_min", "price_max"}
         criteria_dict = {k: v for k, v in arguments.items() if k in criteria_keys and v is not None}
         proximity_rules_raw = arguments.get("proximity_rules") or []
         if not criteria_dict and not sort_by and not proximity_rules_raw:
@@ -659,7 +676,9 @@ def run_tool(
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
         proximity_rules = [ProximityRule.model_validate(r) for r in proximity_rules_raw] if proximity_rules_raw else None
         resp = do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=proximity_rules)
-        return resp.model_dump_json()
+        data = resp.model_dump()
+        data["listings"] = _with_display_rank(data["listings"])
+        return json.dumps(data)
     if name == "summarize_listings":
         listings = current_listings if current_listings is not None else []
         if not listings:
@@ -699,7 +718,7 @@ def run_tool(
             rule_objs = [ProximityRule.model_validate(r) for r in rules_raw]
             ref_objs = [GeocodedReference.model_validate(r) for r in refs_raw]
             enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
-            return json.dumps({"listings": enriched, "total_count": len(enriched)})
+            return json.dumps({"listings": _with_display_rank(enriched), "total_count": len(enriched)})
         except Exception as e:
             return json.dumps({"error": str(e)})
     if name == "score_listings_by_preferences":
@@ -715,7 +734,7 @@ def run_tool(
                 preferences_text,
                 query_text=(arguments.get("query_text") or "").strip() or None,
             )
-            return json.dumps({"listings": scored, "total_count": len(scored)})
+            return json.dumps({"listings": _with_display_rank(scored), "total_count": len(scored)})
         except Exception as e:
             return json.dumps({"error": str(e)})
     if name == "analyze_listing_preferences":
@@ -807,7 +826,7 @@ def run_tool(
                 })
             logger.debug("calendar_create_event: %s at %s", (arguments.get("summary") or "")[:40], start_dt)
             result = calendar_create_event(
-                summary=arguments.get("summary") or "Rental viewing",
+                summary=arguments.get("summary") or "Property viewing",
                 start_datetime=start_dt,
                 end_datetime=end_dt,
                 description=arguments.get("description"),
@@ -1146,7 +1165,7 @@ def run_agent_loop() -> None:
     messages: list[dict] = [
         {"role": "system", "content": system_content},
     ]
-    print("Rental Search Assistant (CLI). Type your search request (e.g. '2 bed in Vancouver under 3000'). Empty line to quit.\n")
+    print("Property Search Assistant (CLI). Type your search request (e.g. '2 bed rental in Vancouver under 3000' or 'condo for sale in Toronto under 900k'). Empty line to quit.\n")
     while True:
         user_line = (input("You: ").strip() if sys.stdin.isatty() else (sys.stdin.readline() or "").strip())
         if not user_line:

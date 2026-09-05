@@ -78,11 +78,11 @@ def _listing_matches(listing: Listing | dict, criteria: ListingFilterCriteria) -
     if criteria.max_sqft is not None:
         if sqft is None or sqft > criteria.max_sqft:
             return False
-    if criteria.rent_min is not None:
-        if price is None or price < criteria.rent_min:
+    if criteria.price_min is not None:
+        if price is None or price < criteria.price_min:
             return False
-    if criteria.rent_max is not None:
-        if price is None or price > criteria.rent_max:
+    if criteria.price_max is not None:
+        if price is None or price > criteria.price_max:
             return False
     return True
 

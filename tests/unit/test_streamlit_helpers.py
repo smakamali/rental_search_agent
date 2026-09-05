@@ -9,7 +9,6 @@ import pytest
 
 from rental_search_agent.streamlit_app import (
     PREF_KEYS,
-    _get_latest_search_listings,
     _load_preferences_from_file,
     _preferences_block,
     _preferences_file,
@@ -135,47 +134,7 @@ class TestSavePreferencesToFile:
                     _save_preferences_to_file({"name": "X", "email": "x@x.com"})
                 assert not path.exists()
 
-
-class TestGetLatestSearchListings:
-    def test_empty_messages(self):
-        assert _get_latest_search_listings([]) == []
-
-    def test_no_tool_messages(self):
-        messages = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
-        ]
-        assert _get_latest_search_listings(messages) == []
-
-    def test_tool_message_with_listings(self):
-        listings = [{"id": "1", "address": "123 Main St", "price": 2500}]
-        messages = [
-            {"role": "tool", "content": json.dumps({"listings": listings})},
-        ]
-        result = _get_latest_search_listings(messages)
-        assert result == listings
-
-    def test_most_recent_wins(self):
-        old_listings = [{"id": "old"}]
-        new_listings = [{"id": "new"}]
-        messages = [
-            {"role": "tool", "content": json.dumps({"listings": old_listings})},
-            {"role": "assistant", "content": "x"},
-            {"role": "tool", "content": json.dumps({"listings": new_listings})},
-        ]
-        result = _get_latest_search_listings(messages)
-        assert result == new_listings
-
-    def test_malformed_json_skipped(self):
-        messages = [
-            {"role": "tool", "content": "not json"},
-            {"role": "tool", "content": json.dumps({"listings": [{"id": "1"}]})},
-        ]
-        result = _get_latest_search_listings(messages)
-        assert result == [{"id": "1"}]
-
-    def test_message_without_listings_skipped(self):
-        messages = [
-            {"role": "tool", "content": json.dumps({"answer": "yes"})},
-        ]
-        assert _get_latest_search_listings(messages) == []
+# Note: TestGetLatestSearchListings was removed — _get_latest_search_listings()
+# (parsing listings out of message history after the fact) was superseded by the
+# session-state-based display_list/master_list tracking introduced in the
+# proximity-handling work, and no longer exists in streamlit_app.py.

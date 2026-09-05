@@ -2,11 +2,34 @@
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+# (min_field, max_field) pairs that must satisfy min <= max when both are set.
+# Shared by RentalSearchFilters and ListingFilterCriteria, which mirror these bounds.
+_MIN_MAX_FIELD_PAIRS = (
+    ("min_bedrooms", "max_bedrooms"),
+    ("min_bathrooms", "max_bathrooms"),
+    ("min_sqft", "max_sqft"),
+    ("price_min", "price_max"),
+)
+
+
+def _check_min_max_pairs(model: BaseModel) -> None:
+    """Raise ValueError if any min bound exceeds its paired max bound.
+
+    Without this, an inverted range (e.g. price_min > price_max) silently produces
+    zero results with no explanation, since both bounds get pushed to the backend
+    and/or the post-filter as valid-looking but contradictory constraints.
+    """
+    for min_field, max_field in _MIN_MAX_FIELD_PAIRS:
+        min_val = getattr(model, min_field, None)
+        max_val = getattr(model, max_field, None)
+        if min_val is not None and max_val is not None and min_val > max_val:
+            raise ValueError(f"{min_field} ({min_val}) must not exceed {max_field} ({max_val}).")
 
 
 class RentalSearchFilters(BaseModel):
-    """§4.1 Rental search filters (input to rental_search)."""
+    """§4.1 Search filters (input to rental_search). Supports for_rent and for_sale."""
 
     min_bedrooms: int = Field(..., ge=0, description="Minimum number of bedrooms.")
     max_bedrooms: Optional[int] = Field(None, ge=0, description="Maximum number of bedrooms.")
@@ -14,13 +37,30 @@ class RentalSearchFilters(BaseModel):
     max_bathrooms: Optional[int] = Field(None, ge=0, description="Maximum number of bathrooms.")
     min_sqft: Optional[int] = Field(None, ge=0, description="Minimum square footage.")
     max_sqft: Optional[int] = Field(None, ge=0, description="Maximum square footage.")
-    rent_min: Optional[float] = Field(None, ge=0, description="Minimum rent (CAD/month).")
-    rent_max: Optional[float] = Field(None, ge=0, description="Maximum rent (CAD/month).")
-    location: str = Field(..., min_length=1, description="Location string (e.g. city or area name).")
-    listing_type: Optional[Literal["for_rent", "for_sale", "for_sale_or_rent"]] = Field(
-        default="for_rent",
-        description="Transaction type.",
+    price_min: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Minimum price (CAD/month when for_rent; list price CAD when for_sale).",
     )
+    price_max: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Maximum price (CAD/month when for_rent; list price CAD when for_sale).",
+    )
+    location: str = Field(
+        ...,
+        min_length=1,
+        description="Location string (city or 'City, Province', e.g. Vancouver or Vancouver, BC).",
+    )
+    listing_type: Optional[Literal["for_rent", "for_sale"]] = Field(
+        default="for_rent",
+        description="Transaction type: for_rent or for_sale.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_min_max(self) -> "RentalSearchFilters":
+        _check_min_max_pairs(self)
+        return self
 
 
 class Listing(BaseModel):
@@ -46,6 +86,8 @@ class Listing(BaseModel):
     open_house: Optional[str] = Field(None, description="Open house date/time text.")
     stories: Optional[float] = Field(None, ge=0, description="Number of stories.")
     postal_code: Optional[str] = Field(None, description="Postal code.")
+    parking_spaces: Optional[int] = Field(None, ge=0, description="Total number of parking spaces.")
+    parking_type: Optional[str] = Field(None, description="Parking type(s), e.g. 'Garage', 'Underground'.")
     proximity: Optional[dict[str, Any]] = Field(
         None,
         description="Per-rule proximity data: keys are rule identifiers, values are { distance_km, duration_min } or null for unknown.",
@@ -54,8 +96,8 @@ class Listing(BaseModel):
     def to_short_label(self, index: Optional[int] = None) -> str:
         """Short label for approval choices, e.g. '[1] 123 Main St — $2,800/month'."""
         prefix = f"[{index}] " if index is not None else ""
-        rent_str = self.price_display if self.price_display else f"${int(self.price):,}"
-        return f"{prefix}{self.address} — {rent_str}"
+        price_str = self.price_display if self.price_display else f"${int(self.price):,}"
+        return f"{prefix}{self.address} — {price_str}"
 
 
 class ProximityRule(BaseModel):
@@ -93,8 +135,17 @@ class ListingFilterCriteria(BaseModel):
     max_bedrooms: Optional[int] = Field(None, ge=0, description="Maximum number of bedrooms.")
     min_sqft: Optional[int] = Field(None, ge=0, description="Minimum square footage.")
     max_sqft: Optional[int] = Field(None, ge=0, description="Maximum square footage.")
-    rent_min: Optional[float] = Field(None, ge=0, description="Minimum rent (CAD/month).")
-    rent_max: Optional[float] = Field(None, ge=0, description="Maximum rent (CAD/month).")
+    price_min: Optional[float] = Field(
+        None, ge=0, description="Minimum price (CAD/month for rent; list price for sale)."
+    )
+    price_max: Optional[float] = Field(
+        None, ge=0, description="Maximum price (CAD/month for rent; list price for sale)."
+    )
+
+    @model_validator(mode="after")
+    def _validate_min_max(self) -> "ListingFilterCriteria":
+        _check_min_max_pairs(self)
+        return self
 
 
 class RentalSearchResponse(BaseModel):

@@ -65,6 +65,8 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     ammenities = (_get_listing_attr(listing, "ammenities") or "").strip()
     nearby_ammenities = (_get_listing_attr(listing, "nearby_ammenities") or "").strip()
     house_category = (_get_listing_attr(listing, "house_category") or "").strip()
+    parking_spaces = _get_listing_attr(listing, "parking_spaces")
+    parking_type = (_get_listing_attr(listing, "parking_type") or "").strip()
 
     structured_parts: List[str] = []
     if bedrooms is not None:
@@ -76,6 +78,11 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
         structured_parts.append(f"{int(sqft)} sqft")
     if price is not None:
         structured_parts.append(f"${int(price)}/month")
+    if parking_spaces is not None:
+        parking_desc = f"{int(parking_spaces)} parking space{'s' if int(parking_spaces) != 1 else ''}"
+        if parking_type:
+            parking_desc += f" ({parking_type})"
+        structured_parts.append(parking_desc)
     structured_line = ", ".join(structured_parts) if structured_parts else ""
 
     proximity = _get_listing_attr(listing, "proximity")

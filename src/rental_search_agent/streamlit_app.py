@@ -207,12 +207,12 @@ def _format_proximity_display(proximity: dict | None) -> str:
 
 
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, rent, Proximity, URL."""
+    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, price, Proximity, URL."""
     rows = []
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        rent = listing.get("price_display") or (
+        price = listing.get("price_display") or (
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         rows.append({
@@ -222,7 +222,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
-            "rent": rent,
+            "price": price,
             "Proximity": _format_proximity_display(listing.get("proximity")),
             "URL": listing.get("url") or "",
         })
@@ -233,7 +233,7 @@ def _render_results_table(listings: list[dict]) -> None:
     """Render search results as custom rows with an Analyze button per listing."""
     if not listings:
         return
-    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Rent, Proximity, Analyze
+    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Price, Proximity, Analyze
     header_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
     with header_cols[0]:
         st.caption("Rank")
@@ -248,7 +248,7 @@ def _render_results_table(listings: list[dict]) -> None:
     with header_cols[5]:
         st.caption("Size")
     with header_cols[6]:
-        st.caption("Rent")
+        st.caption("Price")
     with header_cols[7]:
         st.caption("Proximity")
     with header_cols[8]:
@@ -257,7 +257,7 @@ def _render_results_table(listings: list[dict]) -> None:
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        rent = listing.get("price_display") or (
+        price = listing.get("price_display") or (
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         url = listing.get("url") or ""
@@ -280,7 +280,7 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[5]:
             st.write(str(int(sqft)) if sqft is not None else "—")
         with row_cols[6]:
-            st.write(rent)
+            st.write(price)
         with row_cols[7]:
             st.caption(prox)
         with row_cols[8]:
@@ -541,8 +541,8 @@ def _render_ask_form(pending: dict) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Rental Search Assistant", page_icon="🏠", layout="wide")
-    st.title("Rental Search Assistant")
+    st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
+    st.title("Property Search Assistant")
 
     _ensure_env_loaded()
     _init_session_state()
@@ -672,7 +672,7 @@ def main() -> None:
             with st.chat_message("assistant"):
                 _render_ask_form(pending)
             return
-        if prompt := st.chat_input("Type your search request (e.g. 2 bed in Vancouver under 3000)"):
+        if prompt := st.chat_input("e.g. 2 bed rental in Vancouver under 3000, or condo for sale in Toronto under 900k"):
             st.session_state["messages"].append({"role": "user", "content": prompt})
             messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
             st.session_state["messages"] = messages

@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rental-search-agent"
 version = "0.1.0"
-description = "Rental Search Assistant MVP — MCP server, pyRealtor adapter, LLM agent, Chat UI"
+description = "Property Search Assistant MVP — MCP server, Apify Realtor.ca adapter, LLM agent, Chat UI"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pyRealtor>=0.2.6",
+    "apify-client>=1.8.0",
     "mcp>=1.0.0",
     "pydantic>=2.0.0",
     "openai>=1.0.0",

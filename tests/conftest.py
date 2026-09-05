@@ -3,7 +3,7 @@
 import pytest
 
 from tests.fixtures.sample_data import (
-    mock_pyRealtor_row,
+    mock_apify_item,
     sample_filter_criteria,
     sample_listing,
     sample_listings,
@@ -36,6 +36,6 @@ def filter_criteria():
 
 
 @pytest.fixture
-def pyrealtor_row():
-    """Mock pyRealtor DataFrame row."""
-    return mock_pyRealtor_row()
+def apify_item():
+    """Mock Apify Realtor.ca dataset item."""
+    return mock_apify_item()
