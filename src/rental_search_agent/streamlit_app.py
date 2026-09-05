@@ -176,21 +176,6 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
         return listings
 
 
-def _min_proximity_minutes(listing: dict) -> float:
-    """Minimum duration_min across all proximity rules for this listing. Returns inf if none."""
-    prox = listing.get("proximity") or {}
-    if not isinstance(prox, dict):
-        return float("inf")
-    minutes = []
-    for val in prox.values():
-        if isinstance(val, dict) and val.get("duration_min") is not None:
-            try:
-                minutes.append(float(val["duration_min"]))
-            except (TypeError, ValueError):
-                pass
-    return min(minutes) if minutes else float("inf")
-
-
 def _format_proximity_display(proximity: dict | None) -> str:
     """Format listing.proximity for table display: short summary or 'Distance unknown'."""
     if not proximity or not isinstance(proximity, dict):
@@ -589,14 +574,16 @@ def main() -> None:
         listings = st.session_state.get("display_list") or []
         proximity_text = (prefs.get("proximity_preferences") or "").strip()
         display_source = st.session_state.get("display_source")
-        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally
+        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally.
+        # Note: this must NOT independently re-sort listings (e.g. "closest first") — the
+        # LLM is instructed (agent.py step 4p) to sort_by="proximity" itself as part of its
+        # post-enrich filter_listings call, so its canonical order (and each listing's
+        # 'rank', which the LLM uses for "listing N" references) is already nearest-first.
+        # A separate local sort here would visually reorder rows without renumbering rank,
+        # making the Rank column look unsorted even though it's still correctly identifying
+        # each listing.
         if proximity_text and display_source == "enrich" and listings:
             listings = _apply_proximity_filter_safeguard(listings, proximity_text)
-        # When proximity prefs are set and listings have proximity data, sort by closest first
-        if proximity_text and any(
-            _min_proximity_minutes(lst) != float("inf") for lst in listings
-        ):
-            listings = sorted(listings, key=_min_proximity_minutes)
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
