@@ -6,8 +6,14 @@ from unittest.mock import patch
 import pytest
 
 from rental_search_agent.client import (
+    TOOLS,
+    _get_active_search_criteria_from_messages,
     _get_current_listings_from_messages,
+    _get_enriched_master_from_messages,
+    _get_parsed_proximity_rules_from_messages,
     _get_viewing_plan_from_messages,
+    _infer_last_sort_by,
+    _listing_state_from_messages,
     _with_display_rank,
     run_tool,
 )
@@ -19,6 +25,71 @@ from tests.fixtures.sample_data import (
     sample_listings,
     sample_listings_with_coords,
 )
+
+
+def _assistant_tool_call_msg(name: str, arguments: dict | None = None, tc_id: str = "call_1") -> dict:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": tc_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments or {})}}
+        ],
+    }
+
+
+class TestInferLastSortBy:
+    """Regression tests for the Bugbot finding that the UI's default match-score sort
+    was silently overriding an agent's explicit non-score sort_by (e.g. price/proximity),
+    since the UI had no signal for whether an explicit sort was already active."""
+
+    def test_no_tool_calls_returns_none(self):
+        assert _infer_last_sort_by([{"role": "user", "content": "hi"}]) is None
+
+    def test_filter_listings_sort_by_is_tracked(self):
+        messages = [_assistant_tool_call_msg("filter_listings", {"sort_by": "price"})]
+        assert _infer_last_sort_by(messages) == "price"
+
+    def test_filter_listings_without_sort_by_resets_to_none(self):
+        messages = [
+            _assistant_tool_call_msg("filter_listings", {"sort_by": "price"}),
+            _assistant_tool_call_msg("filter_listings", {"min_bedrooms": 2}),
+        ]
+        assert _infer_last_sort_by(messages) is None
+
+    def test_score_listings_by_preferences_implies_semantic_score(self):
+        messages = [_assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"})]
+        assert _infer_last_sort_by(messages) == "semantic_score"
+
+    def test_rental_search_resets_to_none(self):
+        messages = [
+            _assistant_tool_call_msg("filter_listings", {"sort_by": "price"}),
+            _assistant_tool_call_msg("rental_search", {"min_bedrooms": 2, "location": "Vancouver"}),
+        ]
+        assert _infer_last_sort_by(messages) is None
+
+    def test_enrich_does_not_change_sort(self):
+        # enrich_listings_with_proximity does not reorder listings, so it must not
+        # clobber a previously-active explicit sort.
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}),
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {"rules": [], "geocoded_refs": []}),
+        ]
+        assert _infer_last_sort_by(messages) == "semantic_score"
+
+    def test_listing_state_from_messages_includes_last_sort_by(self):
+        messages = [_assistant_tool_call_msg("filter_listings", {"sort_by": "proximity"})]
+        state = _listing_state_from_messages(messages)
+        assert state["last_sort_by"] == "proximity"
+
+
+class TestFilterListingsToolSchema:
+    def test_sort_by_enum_includes_listing_age_hours(self):
+        # Regression test (Bugbot finding): flow instructions and filtering.SORTABLE_ATTRS
+        # both support sorting by listing_age_hours, but the tool schema exposed to the
+        # LLM previously omitted it from the enum, making the documented sort unreachable.
+        filter_tool = next(t for t in TOOLS if t["function"]["name"] == "filter_listings")
+        sort_by_enum = filter_tool["function"]["parameters"]["properties"]["sort_by"]["enum"]
+        assert "listing_age_hours" in sort_by_enum
 
 
 class TestWithDisplayRank:
@@ -349,6 +420,319 @@ class TestGetCurrentListingsFromMessages:
         ]
         result = _get_current_listings_from_messages(messages)
         assert result == listings
+
+
+def _tool_result_msg(tc_id: str, content: dict) -> dict:
+    return {"role": "tool", "tool_call_id": tc_id, "content": json.dumps(content)}
+
+
+class TestGetEnrichedMasterFromMessages:
+    """Regression tests for the bug where match scores disappeared after filtering/sorting
+    in a later LLM round-trip: _get_enriched_master_from_messages previously only looked at
+    the most recent enrich_listings_with_proximity result, ignoring score_listings_by_preferences.
+    When score ran in one LLM round-trip and filter_listings (or another score/filter) ran in a
+    *later* round-trip, this function recomputes "enriched_master" purely from message history
+    (see run_agent_step_events / _listing_state_from_messages) and must treat
+    score_listings_by_preferences as an equally valid master source, or the recomputed master
+    reverts to the pre-scoring enrich result and silently drops every semantic_score.
+    """
+
+    def test_returns_enrich_result_when_only_enrich_ran(self):
+        enriched = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}}]
+        messages = [
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == enriched
+
+    def test_returns_score_result_when_only_score_ran(self):
+        scored = [{"id": "a", "semantic_score": 0.8}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == scored
+
+    def test_score_after_enrich_in_separate_round_trip_wins(self):
+        """Core regression: enrich then score in a LATER round-trip. Previously this
+        returned the stale pre-score enrich listings (semantic_score=None); it must now
+        return the scored listings."""
+        enriched = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}, "semantic_score": None}]
+        scored = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}, "semantic_score": 0.75}]
+        messages = [
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+        ]
+        result = _get_enriched_master_from_messages(messages)
+        assert result == scored
+        assert result[0]["semantic_score"] == 0.75
+
+    def test_enrich_after_score_in_separate_round_trip_wins(self):
+        """Reverse order: score then enrich later must return the enrich result (which, in
+        the real system, inherits semantic_score via the Listing model round-trip)."""
+        scored = [{"id": "a", "semantic_score": 0.75}]
+        enriched = [{"id": "a", "semantic_score": 0.75, "proximity": {"transit|walk": {"duration_min": 3}}}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == enriched
+
+    def test_new_rental_search_resets_master(self):
+        scored = [{"id": "a", "semantic_score": 0.75}]
+        new_search = [{"id": "b"}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+            _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": new_search}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == []
+
+    def test_no_enrich_or_score_returns_empty(self):
+        messages = [
+            _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": [{"id": "a"}]}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == []
+
+
+class TestGetActiveSearchCriteriaFromMessages:
+    """Regression/feature tests for the search_criteria_to_text_blob wiring: the query used
+    for score_listings_by_preferences / analyze_listing_preferences should mirror the
+    listing_to_text_blob structure (bed/bath/sqft/price/location), reconstructed
+    deterministically from message history rather than relying on the LLM to re-supply it."""
+
+    def test_only_rental_search_ran(self):
+        messages = [
+            _assistant_tool_call_msg(
+                "rental_search",
+                {
+                    "filters": {
+                        "min_bedrooms": 3,
+                        "max_bedrooms": 3,
+                        "location": "Metrotown, Burnaby, BC",
+                        "listing_type": "for_sale",
+                        "price_max": 1000000,
+                    }
+                },
+            )
+        ]
+        criteria = _get_active_search_criteria_from_messages(messages)
+        assert criteria["location"] == "Metrotown, Burnaby, BC"
+        assert criteria["listing_type"] == "for_sale"
+        assert criteria["min_bedrooms"] == 3
+        assert criteria["max_bedrooms"] == 3
+        assert criteria["price_max"] == 1000000
+        assert criteria["price_min"] is None
+
+    def test_filter_listings_after_search_overrides_structural_criteria_only(self):
+        messages = [
+            _assistant_tool_call_msg(
+                "rental_search",
+                {"filters": {"min_bedrooms": 3, "location": "Burnaby, BC", "price_max": 1000000}},
+                tc_id="s1",
+            ),
+            _assistant_tool_call_msg(
+                "filter_listings", {"price_max": 900000, "min_bedrooms": 3, "max_bedrooms": 3}, tc_id="f1"
+            ),
+        ]
+        criteria = _get_active_search_criteria_from_messages(messages)
+        # location/listing_type only ever come from rental_search (filter_listings has no such args).
+        assert criteria["location"] == "Burnaby, BC"
+        # Structural criteria come from the later, more specific filter_listings call.
+        assert criteria["price_max"] == 900000
+        assert criteria["max_bedrooms"] == 3
+
+    def test_new_rental_search_resets_prior_filter_narrowing(self):
+        messages = [
+            _assistant_tool_call_msg("rental_search", {"filters": {"min_bedrooms": 3, "location": "Burnaby, BC"}}, tc_id="s1"),
+            _assistant_tool_call_msg("filter_listings", {"price_max": 900000}, tc_id="f1"),
+            _assistant_tool_call_msg("rental_search", {"filters": {"min_bedrooms": 2, "location": "Vancouver, BC"}}, tc_id="s2"),
+        ]
+        criteria = _get_active_search_criteria_from_messages(messages)
+        assert criteria["location"] == "Vancouver, BC"
+        assert criteria["min_bedrooms"] == 2
+        assert criteria["price_max"] is None
+
+    def test_no_tool_calls_returns_all_none(self):
+        criteria = _get_active_search_criteria_from_messages([])
+        assert criteria["location"] is None
+        assert criteria["listing_type"] is None
+        for key in ("min_bedrooms", "max_bedrooms", "min_bathrooms", "max_bathrooms", "min_sqft", "max_sqft", "price_min", "price_max"):
+            assert criteria[key] is None
+
+    def test_proximity_only_filter_listings_call_does_not_blank_out_earlier_structural_criteria(self):
+        """Regression: when 3b (structural narrow) is skipped because rental_search already
+        covers everything, the first filter_listings call may be step 4p's proximity-only call
+        (proximity_rules + sort_by="proximity", no bed/bath/price args at all). Treating that
+        call as wholesale-authoritative for structural criteria would wrongly blank out the
+        bedrooms/price already established by rental_search — verified live via a traced CLI
+        run where the resulting embedding query was missing "3 bedrooms"/"$1000000" entirely."""
+        messages = [
+            _assistant_tool_call_msg(
+                "rental_search",
+                {
+                    "filters": {
+                        "min_bedrooms": 3,
+                        "max_bedrooms": 3,
+                        "location": "Metrotown, Burnaby, BC",
+                        "listing_type": "for_sale",
+                        "price_max": 1000000,
+                    }
+                },
+                tc_id="s1",
+            ),
+            _assistant_tool_call_msg(
+                "filter_listings",
+                {
+                    "proximity_rules": [{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
+                    "sort_by": "proximity",
+                    "ascending": True,
+                },
+                tc_id="f1",
+            ),
+        ]
+        criteria = _get_active_search_criteria_from_messages(messages)
+        assert criteria["min_bedrooms"] == 3
+        assert criteria["max_bedrooms"] == 3
+        assert criteria["price_max"] == 1000000
+        assert criteria["location"] == "Metrotown, Burnaby, BC"
+
+
+class TestGetParsedProximityRulesFromMessages:
+    def test_no_parse_call_returns_empty(self):
+        assert _get_parsed_proximity_rules_from_messages([]) == []
+
+    def test_returns_rules_from_call_result(self):
+        rules = [{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}]
+        messages = [
+            _assistant_tool_call_msg("parse_proximity_preferences", {"proximity_text": "5 min walk to transit"}, tc_id="p1"),
+            _tool_result_msg("p1", {"rules": rules}),
+        ]
+        assert _get_parsed_proximity_rules_from_messages(messages) == rules
+
+    def test_most_recent_call_wins(self):
+        messages = [
+            _assistant_tool_call_msg("parse_proximity_preferences", {}, tc_id="p1"),
+            _tool_result_msg("p1", {"rules": [{"location": "old", "mode": "walk", "max_minutes": 10}]}),
+            _assistant_tool_call_msg("parse_proximity_preferences", {}, tc_id="p2"),
+            _tool_result_msg("p2", {"rules": [{"location": "new", "mode": "drive", "max_minutes": 15}]}),
+        ]
+        rules = _get_parsed_proximity_rules_from_messages(messages)
+        assert rules == [{"location": "new", "mode": "drive", "max_minutes": 15}]
+
+    def test_not_reset_by_a_new_rental_search(self):
+        # Proximity preferences are user-level, not tied to a particular search.
+        rules = [{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}]
+        messages = [
+            _assistant_tool_call_msg("parse_proximity_preferences", {}, tc_id="p1"),
+            _tool_result_msg("p1", {"rules": rules}),
+            _assistant_tool_call_msg("rental_search", {"filters": {"min_bedrooms": 2, "location": "Toronto, ON"}}, tc_id="s1"),
+        ]
+        assert _get_parsed_proximity_rules_from_messages(messages) == rules
+
+
+class TestRunToolScoreListingsByPreferencesQueryBlob:
+    """The embedding query for score_listings_by_preferences must be built via
+    search_criteria_to_text_blob (mirroring listing_to_text_blob's shape) rather than the
+    bare preferences_text, using the search_criteria/proximity_rules_for_query kwargs
+    threaded in from run_agent_step_events."""
+
+    def test_uses_search_criteria_and_proximity_in_embedding_query(self):
+        listings = [sample_listing()]
+        captured = {}
+
+        def fake_score(listings_arg, query_text_arg):
+            captured["query"] = query_text_arg
+            return [dict(listings_arg[0], semantic_score=0.5)]
+
+        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
+            run_tool(
+                "score_listings_by_preferences",
+                {"preferences_text": "must have balcony"},
+                current_listings=listings,
+                search_criteria={
+                    "location": "Metrotown, Burnaby, BC",
+                    "min_bedrooms": 3,
+                    "max_bedrooms": 3,
+                    "listing_type": "for_sale",
+                    "price_max": 1000000,
+                },
+                proximity_rules_for_query=[{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
+            )
+
+        assert captured["query"] == (
+            "Metrotown, Burnaby, BC 3 bedrooms, up to $1000000 list price must have balcony "
+            "5 min walk to nearest transit station"
+        )
+
+    def test_appends_llm_supplied_query_text_as_extra_context(self):
+        listings = [sample_listing()]
+        captured = {}
+
+        def fake_score(listings_arg, query_text_arg):
+            captured["query"] = query_text_arg
+            return listings_arg
+
+        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
+            run_tool(
+                "score_listings_by_preferences",
+                {"preferences_text": "must have balcony", "query_text": "near parks"},
+                current_listings=listings,
+                search_criteria={"location": "Burnaby, BC"},
+            )
+
+        assert captured["query"] == "Burnaby, BC must have balcony near parks"
+
+    def test_falls_back_to_bare_preferences_when_no_search_criteria_given(self):
+        listings = [sample_listing()]
+        captured = {}
+
+        def fake_score(listings_arg, query_text_arg):
+            captured["query"] = query_text_arg
+            return listings_arg
+
+        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
+            run_tool(
+                "score_listings_by_preferences",
+                {"preferences_text": "must have balcony"},
+                current_listings=listings,
+            )
+
+        assert captured["query"] == "must have balcony"
+
+
+class TestRunToolAnalyzeListingPreferencesQueryBlob:
+    def test_score_query_text_enriched_but_narrative_preferences_text_unchanged(self):
+        captured = {}
+
+        def fake_analyze(listing, preferences_text, conversation_context=None, score_query_text=None):
+            captured["preferences_text"] = preferences_text
+            captured["score_query_text"] = score_query_text
+            return {"match_score_pct": 50, "key_matches": [], "key_gaps": []}
+
+        combined_preferences = "must have balcony\n\nProximity: 5 min walk to transit"
+        with patch("rental_search_agent.client.do_analyze_listing_against_preferences", side_effect=fake_analyze):
+            run_tool(
+                "analyze_listing_preferences",
+                {"listing": {"id": "a"}, "preferences_text": combined_preferences},
+                search_criteria={"location": "Burnaby, BC", "min_bedrooms": 3, "max_bedrooms": 3, "listing_type": "for_sale"},
+                # Deliberately also pass proximity rules to prove they are NOT re-added here
+                # (preferences_text may already contain "Proximity: ..." per this tool's
+                # existing contract, so doubling it up would skew the score).
+                proximity_rules_for_query=[{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
+            )
+
+        # Narrative text is passed through untouched.
+        assert captured["preferences_text"] == combined_preferences
+        # Score query folds in structural criteria but does not duplicate proximity text.
+        assert captured["score_query_text"] == "Burnaby, BC 3 bedrooms must have balcony\n\nProximity: 5 min walk to transit"
+        assert "5 min walk to nearest transit station" not in captured["score_query_text"]
 
 
 class TestGetViewingPlanFromMessages:

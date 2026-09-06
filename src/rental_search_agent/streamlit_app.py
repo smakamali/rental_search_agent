@@ -18,11 +18,18 @@ except ImportError:
 
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
-from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step_events
+from rental_search_agent.client import (
+    _get_active_search_criteria_from_messages,
+    _get_parsed_proximity_rules_from_messages,
+    _load_env_file,
+    _make_llm_client,
+    run_agent_step_events,
+)
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
 from rental_search_agent.proximity_parser import parse_proximity_preferences
+from rental_search_agent.semantic_scoring import search_criteria_to_text_blob
 
 # Keys for stored user preferences (viewing time, name, email, phone, proximity, listing preferences)
 PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
@@ -137,6 +144,8 @@ def _init_session_state() -> None:
         st.session_state["master_list"] = []
     if "display_source" not in st.session_state:
         st.session_state["display_source"] = None
+    if "last_sort_by" not in st.session_state:
+        st.session_state["last_sort_by"] = None
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
@@ -205,13 +214,122 @@ def _format_proximity_display(proximity: dict | None) -> str:
     return "; ".join(parts) if parts else "—"
 
 
+_TABLE_COL_WIDTHS = [0.5, 0.6, 1.8, 0.8, 0.4, 0.4, 0.6, 0.8, 0.8, 0.8, 1.0, 1.1, 0.8]
+
+
+def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
+    """Display-only: sort by semantic_score desc when at least one listing has one,
+    else leave order as-is (nothing to sort by, e.g. no qualitative preferences set yet).
+
+    This is a pure Python list sort (no filter_listings/model_dump round-trip), so it
+    does not touch each listing's 'rank' field — displayed order changes, but 'rank'
+    still correctly identifies each listing for "listing N" references, same guarantee
+    the existing proximity closest-first safeguard (_apply_proximity_filter_safeguard)
+    provides for that case.
+    """
+    if not any(isinstance(item, dict) and item.get("semantic_score") is not None for item in listings):
+        return listings
+    return sorted(
+        listings,
+        key=lambda item: item.get("semantic_score") if isinstance(item, dict) and item.get("semantic_score") is not None else -1,
+        reverse=True,
+    )
+
+
+def _escape_markdown_link_text(text: str) -> str:
+    """Escape characters that would let untrusted text break out of a markdown link
+    label — e.g. "[label](url)" — and inject a second, attacker-controlled link.
+
+    Security-review/Bugbot finding: the Analyze expander builds a markdown link whose
+    *label* is the listing's scraped MLS id (f"[{id}]({url})"); a crafted id containing
+    "](attacker-url)[" would close the intended label early and open a new link, so the
+    text a user sees as the MLS number could actually navigate elsewhere. Backslash-
+    escaping "[", "]", and "\\" itself (the characters CommonMark treats as link-label
+    delimiters) neutralizes this while leaving normal MLS ids (plain alphanumeric)
+    unchanged.
+    """
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _render_clickable_photo(photo_url: str, listing_url: str, width: int) -> None:
+    """Render the listing photo as a clickable link to the listing (st.image can't be
+    wrapped as a link directly, so this uses escaped raw HTML — same escaping pattern as
+    the existing folium map marker links). Falls back to a plain "View" link button when
+    there's no photo, so every row/card keeps some click-through to the listing even
+    without a photo (this is the table's only click-through now that MLS id is removed)."""
+    if photo_url:
+        st.markdown(
+            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener">'
+            f'<img src="{html.escape(photo_url)}" width="{width}"></a>',
+            unsafe_allow_html=True,
+        )
+    elif listing_url:
+        st.link_button("View", listing_url)
+    else:
+        st.write("—")
+
+
+def _format_tags(listing: dict) -> str:
+    """Badges for freshness/open-house/price-drop signals; empty string when none apply."""
+    badges = []
+    age_hours = listing.get("listing_age_hours")
+    if age_hours is not None:
+        try:
+            if float(age_hours) <= 48:
+                badges.append("🆕 New")
+        except (TypeError, ValueError):
+            pass
+    if listing.get("open_house"):
+        badges.append("🏠 Open house")
+    if listing.get("price_change_display"):
+        badges.append("↓ Reduced")
+    return " · ".join(badges)
+
+
+def _format_days_on_market(listing: dict) -> str:
+    """'Days on Market', approximated from listing_age_hours (parsed from the actor's
+    relative freshness text, e.g. '18 hours ago') — the actor has no exact DOM field."""
+    age_hours = listing.get("listing_age_hours")
+    if age_hours is None:
+        return "—"
+    try:
+        return f"{round(float(age_hours) / 24)}d"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _format_bedrooms(listing: dict) -> str:
+    """Bedroom count for display, preserving the source's den notation (e.g. '2 + 1' for 2
+    bedrooms + a den) when bedrooms_display is set, so the den isn't silently dropped from
+    the UI even though it's excluded from the numeric bedrooms count used for filtering."""
+    display = listing.get("bedrooms_display")
+    if display:
+        return str(display)
+    bedrooms = listing.get("bedrooms")
+    return str(bedrooms) if bedrooms is not None else "—"
+
+
+def _format_match_score(listing: dict) -> str:
+    """Match score display: semantic_score (0-1) as a whole percentage, or '—' when
+    scoring hasn't run yet (e.g. no qualitative preferences set)."""
+    score = listing.get("semantic_score")
+    if score is None:
+        return "—"
+    try:
+        return f"{round(float(score) * 100)}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, price, Proximity, URL.
+    """Build table-friendly rows: rank, photo, address, type, bed, bath, size, price,
+    days on market, match score, tags, Proximity, URL.
 
     Uses each listing's 'rank' field (assigned by the LLM tool layer in client.py) rather
     than its position in this list, so numbering stays correct even when this list has been
-    locally reordered/filtered for display (e.g. the proximity closest-first safeguard),
-    which would otherwise desync the table's numbers from what the LLM calls "listing N".
+    locally reordered/filtered for display (e.g. the proximity closest-first safeguard,
+    or the default match-score sort), which would otherwise desync the table's numbers
+    from what the LLM calls "listing N".
     """
     rows = []
     for i, listing in enumerate(listings):
@@ -222,12 +340,16 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
         )
         rows.append({
             "rank": listing.get("rank") if listing.get("rank") is not None else i + 1,
-            "MLS id": listing.get("id") or "—",
+            "photo": listing.get("photo_url") or "",
             "address": listing.get("address") or "—",
-            "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
+            "type": listing.get("house_category") or "—",
+            "bed": _format_bedrooms(listing),
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
             "price": price,
+            "days_on_market": _format_days_on_market(listing),
+            "match_score": _format_match_score(listing),
+            "tags": _format_tags(listing),
             "Proximity": _format_proximity_display(listing.get("proximity")),
             "URL": listing.get("url") or "",
         })
@@ -238,26 +360,16 @@ def _render_results_table(listings: list[dict]) -> None:
     """Render search results as custom rows with an Analyze button per listing."""
     if not listings:
         return
-    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Price, Proximity, Analyze
-    header_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
-    with header_cols[0]:
-        st.caption("Rank")
-    with header_cols[1]:
-        st.caption("MLS id")
-    with header_cols[2]:
-        st.caption("Address")
-    with header_cols[3]:
-        st.caption("Bed")
-    with header_cols[4]:
-        st.caption("Bath")
-    with header_cols[5]:
-        st.caption("Size")
-    with header_cols[6]:
-        st.caption("Price")
-    with header_cols[7]:
-        st.caption("Proximity")
-    with header_cols[8]:
-        st.caption("Analyze")
+    # Header row: Rank, Photo, Address, Type, Bed, Bath, Size, Price, Days on Market,
+    # Match score, Tags, Proximity, Analyze
+    header_cols = st.columns(_TABLE_COL_WIDTHS)
+    headers = [
+        "Rank", "Photo", "Address", "Type", "Bed", "Bath", "Size", "Price",
+        "Days on Market", "Match score", "Tags", "Proximity", "Analyze",
+    ]
+    for col, label in zip(header_cols, headers):
+        with col:
+            st.caption(label)
     st.divider()
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
@@ -266,32 +378,39 @@ def _render_results_table(listings: list[dict]) -> None:
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         url = listing.get("url") or ""
-        mls_id = listing.get("id") or "—"
+        photo_url = listing.get("photo_url") or ""
         prox = _format_proximity_display(listing.get("proximity"))
-        row_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
+        tags = _format_tags(listing)
+        row_cols = st.columns(_TABLE_COL_WIDTHS)
         with row_cols[0]:
             # Use the listing's authoritative 'rank' (from the LLM tool layer), not this
             # row's position, so the number matches what the LLM calls "listing N" even
-            # after a local reorder (e.g. the proximity closest-first safeguard above).
+            # after a local reorder (e.g. the proximity closest-first safeguard, or the
+            # default match-score sort, above).
             st.write(listing.get("rank") if listing.get("rank") is not None else i + 1)
         with row_cols[1]:
-            if url:
-                st.link_button(mls_id, url)
-            else:
-                st.write(mls_id)
+            _render_clickable_photo(photo_url, url, width=56)
         with row_cols[2]:
             st.write(listing.get("address") or "—")
         with row_cols[3]:
-            st.write(listing.get("bedrooms") if listing.get("bedrooms") is not None else "—")
+            st.write(listing.get("house_category") or "—")
         with row_cols[4]:
-            st.write(f"{float(bath):g}" if bath is not None else "—")
+            st.write(_format_bedrooms(listing))
         with row_cols[5]:
-            st.write(str(int(sqft)) if sqft is not None else "—")
+            st.write(f"{float(bath):g}" if bath is not None else "—")
         with row_cols[6]:
-            st.write(price)
+            st.write(str(int(sqft)) if sqft is not None else "—")
         with row_cols[7]:
-            st.caption(prox)
+            st.write(price)
         with row_cols[8]:
+            st.write(_format_days_on_market(listing))
+        with row_cols[9]:
+            st.write(_format_match_score(listing))
+        with row_cols[10]:
+            st.caption(tags or "—")
+        with row_cols[11]:
+            st.caption(prox)
+        with row_cols[12]:
             if st.button("Analyze", key=f"analyze_{listing.get('id', i)}"):
                 st.session_state["analyze_listing_id"] = listing.get("id")
                 st.session_state["analyze_listing"] = listing
@@ -593,6 +712,7 @@ def _render_ask_form(pending: dict) -> None:
                         # Always replace, including empty lists (zero-result search/filter).
                         st.session_state["display_list"] = listing_state.get("display_list", [])
                         st.session_state["display_source"] = listing_state.get("display_source")
+                        st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
                     if "master_list" in listing_state:
                         st.session_state["master_list"] = listing_state.get("master_list") or []
                 if payload is not None:
@@ -632,6 +752,16 @@ def main() -> None:
         # each listing.
         if proximity_text and display_source == "enrich" and listings:
             listings = _apply_proximity_filter_safeguard(listings, proximity_text)
+        # Default display sort: rank by match score (semantic_score) when available, so
+        # the best qualitative matches surface first in both the table and the map. This
+        # is display-only (see _apply_default_match_score_sort docstring re: 'rank').
+        # Bugbot regression guard: only apply this fallback when no *explicit* non-score
+        # sort is currently active (e.g. the agent just ran filter_listings with
+        # sort_by="price"/"proximity"/etc.) — otherwise this would silently clobber that
+        # explicit sort and desync the table from what the agent told the user it did.
+        last_sort_by = st.session_state.get("last_sort_by")
+        if last_sort_by is None or last_sort_by == "semantic_score":
+            listings = _apply_default_match_score_sort(listings)
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
@@ -671,10 +801,25 @@ def main() -> None:
                     if analyze_listing_id not in analysis_result:
                         with st.spinner("Analyzing listing..."):
                             try:
+                                # Build the same listing-blob-shaped embedding query
+                                # score_listings_by_preferences uses for the table's
+                                # semantic_score/"Match score" column (bed/bath/sqft/price/
+                                # location + qualitative preferences + proximity), reusing the
+                                # same message-history reconstruction so both surfaces stay
+                                # consistent for the same listing/preferences. preferences_text
+                                # above (which also folds in proximity) still drives the
+                                # narrative key_matches/key_gaps, unaffected by this override.
+                                chat_messages = st.session_state.get("messages") or []
+                                search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                                proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                                score_query_text = search_criteria_to_text_blob(
+                                    search_criteria, qualitative, proximity_rules
+                                )
                                 result = analyze_listing_against_preferences(
                                     analyze_listing,
                                     preferences_text,
                                     conversation_context=conversation_context or None,
+                                    score_query_text=score_query_text or None,
                                 )
                                 st.session_state.setdefault("analysis_result", {})[
                                     analyze_listing_id
@@ -697,6 +842,33 @@ def main() -> None:
                         else:
                             addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
                             with st.expander(f"Analysis: {addr}", expanded=True):
+                                photo_url = analyze_listing.get("photo_url") or ""
+                                _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
+                                detail_bits = []
+                                if analyze_listing.get("id") and analyze_listing.get("url"):
+                                    mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
+                                    detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
+                                if analyze_listing.get("property_category"):
+                                    detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
+                                if analyze_listing.get("lot_size"):
+                                    detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
+                                if analyze_listing.get("listing_age_display"):
+                                    detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
+                                if analyze_listing.get("price_change_display"):
+                                    detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
+                                if analyze_listing.get("open_house"):
+                                    detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
+                                if analyze_listing.get("agent_name"):
+                                    agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
+                                    if analyze_listing.get("agent_phone"):
+                                        agent_bit += f" ({analyze_listing['agent_phone']})"
+                                    detail_bits.append(agent_bit)
+                                if analyze_listing.get("brokerage_name"):
+                                    detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
+                                if analyze_listing.get("video_url"):
+                                    detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
+                                if detail_bits:
+                                    st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
                                 st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
                                 col_matches, col_gaps = st.columns(2)
                                 with col_matches:
@@ -746,6 +918,7 @@ def main() -> None:
                     # Always replace, including empty lists (zero-result search/filter).
                     st.session_state["display_list"] = listing_state.get("display_list", [])
                     st.session_state["display_source"] = listing_state.get("display_source")
+                    st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
                 if "master_list" in listing_state:
                     st.session_state["master_list"] = listing_state.get("master_list") or []
             if payload is not None:

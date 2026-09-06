@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import timedelta
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -29,6 +30,10 @@ ACTOR_CALL_WAIT_DURATION = timedelta(minutes=2)
 # scraped) dataset falls back to an MLS-based realtor.ca URL to avoid propagating
 # attacker-controlled off-site links into the UI/calendar.
 _ALLOWED_URL_HOSTS = {"realtor.ca", "www.realtor.ca"}
+# photo_url is rendered as a raw <img src=...> in the UI (to make it clickable), so it
+# gets the same third-party-data host allowlist treatment as _ALLOWED_URL_HOSTS above,
+# restricted to Realtor.ca's own image CDN.
+_ALLOWED_PHOTO_HOSTS = {"cdn.realtor.ca"}
 
 
 def _call_actor(actor_client: Any, run_input: dict[str, Any], wait: timedelta) -> Any:
@@ -44,6 +49,64 @@ def _call_actor(actor_client: Any, run_input: dict[str, Any], wait: timedelta) -
         return actor_client.call(run_input=run_input, wait_duration=wait)
     except TypeError:
         return actor_client.call(run_input=run_input, wait_secs=int(wait.total_seconds()))
+
+
+_RELATIVE_AGE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(minute|hour|day|week|month|year)s?\s*ago", re.IGNORECASE
+)
+_HOURS_PER_UNIT = {
+    "minute": 1 / 60,
+    "hour": 1.0,
+    "day": 24.0,
+    "week": 24.0 * 7,
+    "month": 24.0 * 30.44,
+    "year": 24.0 * 365.25,
+}
+
+
+def _parse_relative_age_hours(text: Optional[str]) -> Optional[float]:
+    """Parse a relative-time string like '18 hours ago' or '2 days ago' into hours.
+
+    The actor reports listing freshness as this kind of human-normalized text (not a
+    real timestamp), so this is an approximation good enough for "roughly how new is
+    this listing" display/sorting, not precise scheduling.
+    """
+    if not text:
+        return None
+    match = _RELATIVE_AGE_RE.search(str(text))
+    if not match:
+        return None
+    try:
+        quantity = float(match.group(1))
+    except ValueError:
+        return None
+    hours_per_unit = _HOURS_PER_UNIT.get(match.group(2).lower())
+    if hours_per_unit is None:
+        return None
+    return round(quantity * hours_per_unit, 1)
+
+
+# The actor reports a den by joining it onto the bedroom count as e.g. "1 + 1" or "2 + 1"
+# (primary bedrooms + den), rather than a separate structured field — confirmed live: the
+# same "N + M" notation realtor.ca itself shows as "Bedrooms Above Grade: N" / "Below Grade:
+# M". Naively coercing a string like "1 + 1" straight to int (stripping non-digit chars)
+# silently mangles it to 11 bedrooms, so this must be parsed before any numeric coercion.
+_DEN_BEDROOMS_RE = re.compile(r"^\s*(\d+)\s*\+\s*(\d+)\s*$")
+
+
+def _parse_bedrooms(raw: Any) -> tuple[int, int]:
+    """Parse the actor's raw Bedrooms value into (bedrooms, den_count).
+
+    bedrooms is the PRIMARY bedroom count only — a den is a flex room, not a real bedroom,
+    and must not inflate the numeric count used for display-sort/filtering by bedrooms.
+    den_count is the extra "+N" room count reported alongside it (typically 1), or 0 when
+    the source just reports a plain number with no den.
+    """
+    text = str(raw or "").strip()
+    match = _DEN_BEDROOMS_RE.match(text)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return _coerce_int(raw, default=0), 0
 
 
 def _run_field(run: Any, snake_name: str, camel_name: str) -> Any:
@@ -155,13 +218,14 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
     )
     price_display = _format_price_display(price_raw, price, listing_type)
 
-    bedrooms = _coerce_int(
+    bedrooms, den_count = _parse_bedrooms(
         building.get("Bedrooms")
         or building.get("BedroomsTotal")
         or item.get("Bedrooms")
-        or item.get("BedroomsTotal"),
-        default=0,
+        or item.get("BedroomsTotal")
     )
+    has_den = den_count > 0
+    bedrooms_display = f"{bedrooms} + {den_count}" if has_den else None
     bathrooms = _coerce_float(
         building.get("BathroomTotal")
         or building.get("Bathrooms")
@@ -190,6 +254,85 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
     )
     ownership = str(item.get("OwnershipType") or prop.get("OwnershipType") or "").strip() or None
 
+    # Ammenities/AmmenitiesNearBy: fetched from the raw payload but never mapped onto
+    # Listing previously, so this real (if often sparse) data was silently dropped.
+    ammenities = str(building.get("Ammenities") or item.get("Ammenities") or "").strip() or None
+    nearby_ammenities = str(prop.get("AmmenitiesNearBy") or item.get("AmmenitiesNearBy") or "").strip() or None
+
+    # OpenHouse is a list of events; join multiple into one display string.
+    open_house_events = item.get("OpenHouse")
+    open_house = None
+    if isinstance(open_house_events, list) and open_house_events:
+        labels = [
+            str(ev.get("FormattedDateTime") or "").strip()
+            for ev in open_house_events
+            if isinstance(ev, dict) and ev.get("FormattedDateTime")
+        ]
+        open_house = "; ".join(labels) or None
+
+    # Property.Type is a broader category (e.g. "Single Family", "Vacant Land") distinct
+    # from Building.Type (specific building format, e.g. "Apartment") already used above.
+    property_category = str(prop.get("Type") or item.get("PropertyType") or "").strip() or None
+
+    # Land lives at the item root (not under Property); "0"/empty means no land data,
+    # which is the common case for condos/apartments — treat as absent, not a real 0 lot.
+    land = item.get("Land") if isinstance(item.get("Land"), dict) else {}
+    lot_size_raw = str(land.get("SizeTotal") or "").strip()
+    lot_size = lot_size_raw if lot_size_raw and lot_size_raw != "0" else None
+
+    # TimeOnRealtor/Tags carry a human-normalized relative-freshness string (not a real
+    # timestamp); parse an approximate hour count for sorting alongside the display text.
+    age_display = str(item.get("TimeOnRealtor") or "").strip() or None
+    if not age_display:
+        tags = item.get("Tags")
+        if isinstance(tags, list) and tags and isinstance(tags[0], dict):
+            age_display = str(tags[0].get("Label") or "").strip() or None
+    age_hours = _parse_relative_age_hours(age_display)
+
+    # First listing photo (medium resolution as a reasonable thumbnail/detail size).
+    photos = prop.get("Photo")
+    photo_url = None
+    if isinstance(photos, list) and photos and isinstance(photos[0], dict):
+        photo_url = str(
+            photos[0].get("MedResPath") or photos[0].get("HighResPath") or photos[0].get("LowResPath") or ""
+        ).strip() or None
+        # Only trust photo URLs on Realtor.ca's own CDN; the actor dataset is third-party
+        # scraped data and this value gets rendered as a raw <img src> in the UI.
+        if photo_url and (urlparse(photo_url).hostname or "").lower() not in _ALLOWED_PHOTO_HOSTS:
+            photo_url = None
+
+    alt_url = item.get("AlternateURL")
+    video_url = str(alt_url.get("VideoLink") or "").strip() or None if isinstance(alt_url, dict) else None
+    # Video/virtual-tour links can legitimately point at various third-party providers
+    # (unlike photo_url/url, there's no single trusted host to allowlist here), so instead
+    # require a well-formed https:// URL with a real hostname — this is scraped, third-party
+    # data rendered as a clickable markdown link in the UI, and must not allow dangerous
+    # schemes (e.g. "javascript:", "data:") or malformed values through.
+    if video_url:
+        parsed_video = urlparse(video_url)
+        if parsed_video.scheme != "https" or not parsed_video.hostname:
+            video_url = None
+
+    # Individual is a list of listing agents (sometimes co-listed); take the first as the
+    # primary contact. No usable email is present in this payload — only an internal
+    # ContactId reference used by realtor.ca's own contact form, not a real address.
+    agents = item.get("Individual")
+    agent_name = agent_phone = brokerage_name = None
+    if isinstance(agents, list) and agents and isinstance(agents[0], dict):
+        primary = agents[0]
+        agent_name = str(primary.get("Name") or "").strip() or None
+        phones = primary.get("Phones")
+        if isinstance(phones, list) and phones and isinstance(phones[0], dict):
+            area = str(phones[0].get("AreaCode") or "").strip()
+            number = str(phones[0].get("PhoneNumber") or "").strip()
+            agent_phone = f"{area}-{number}" if area and number else (number or None)
+        org = primary.get("Organization")
+        if isinstance(org, dict):
+            brokerage_name = str(org.get("Name") or "").strip() or None
+
+    # Often empty; only a real signal when the source actually reports a price change.
+    price_change_display = str(prop.get("PriceChangeTimeOnRealtor") or "").strip() or None
+
     return Listing(
         id=mls or str(item.get("Id") or ""),
         title=title,
@@ -198,6 +341,8 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
         price=price,
         price_display=price_display,
         bedrooms=bedrooms,
+        has_den=has_den,
+        bedrooms_display=bedrooms_display,
         sqft=sqft,
         source="Realtor.ca",
         bathrooms=bathrooms,
@@ -211,6 +356,19 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
         parking_type=parking_type,
         listing_type=listing_type if listing_type in ("for_rent", "for_sale") else None,
         postal_code=postal,
+        ammenities=ammenities,
+        nearby_ammenities=nearby_ammenities,
+        open_house=open_house,
+        property_category=property_category,
+        lot_size=lot_size,
+        listing_age_display=age_display,
+        listing_age_hours=age_hours,
+        photo_url=photo_url,
+        video_url=video_url,
+        agent_name=agent_name,
+        agent_phone=agent_phone,
+        brokerage_name=brokerage_name,
+        price_change_display=price_change_display,
     )
 
 

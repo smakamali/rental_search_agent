@@ -177,6 +177,44 @@ class TestRunAgentStepAskUser:
         assistant_msgs = [m for m in updated if m.get("role") == "assistant" and m.get("tool_calls")]
         assert len(assistant_msgs) == 1
 
+    def test_ask_user_alone_in_its_turn_preserves_display_source_from_earlier_turn(self):
+        """Regression test: models that never batch more than one tool call per LLM turn (e.g.
+        gemini-3.8-flash) pause on ask_user as the *sole* tool call of a fresh run_agent_step
+        invocation, in a later turn than the filter/score/search call that actually set the
+        displayed listings. Before the fix, listing_state["display_source"] was built from a
+        round-local variable that resets to None every turn, so it went None as soon as any
+        non-display tool (like ask_user) became the most recent call — causing the Streamlit UI
+        to skip updating (and eventually show no) results table/map after the agent asked to
+        proceed with booking. display_source must instead be reconstructed from the full message
+        history so it still reports the last display-setting tool ("filter" here)."""
+        listings = [l.model_dump() for l in sample_listings(2)]
+
+        # History from an *earlier*, already-completed run_agent_step call: a filter_listings
+        # result is the most recent display-setting tool in history.
+        history = _base_messages() + [
+            {"role": "user", "content": "2 bed in Vancouver"},
+            {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "tc-filter", "type": "function", "function": {"name": "filter_listings", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "tc-filter", "content": json.dumps({"listings": listings, "total_count": 2})},
+        ]
+
+        # A *new* run_agent_step invocation (e.g. after the user answered a previous ask_user
+        # form) whose first and only LLM tool call this turn is ask_user.
+        tool_call = _make_tool_call_reply(
+            "ask_user",
+            {"prompt": "Book a viewing?", "choices": ["Yes", "No"], "allow_multiple": False},
+        )
+        client, model = _make_client(tool_call)
+
+        _, payload, listing_state = run_agent_step(client, model, history)
+
+        assert payload is not None
+        assert listing_state is not None
+        assert listing_state["display_source"] == "filter"
+        assert listing_state["display_list"] == listings
+
 
 # ---------------------------------------------------------------------------
 # Tests: filter_listings uses enriched master when available

@@ -36,6 +36,7 @@ from rental_search_agent.models import (
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
+from rental_search_agent.semantic_scoring import search_criteria_to_text_blob as do_search_criteria_to_text_blob
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -186,7 +187,7 @@ TOOLS = [
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
                     "price_min": {"type": "number", "minimum": 0, "description": "Minimum price (CAD/month for rent; list price for sale)."},
                     "price_max": {"type": "number", "minimum": 0, "description": "Maximum price (CAD/month for rent; list price for sale)."},
-                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Omit for no sort."},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity, listing_age_hours). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Use 'listing_age_hours' with ascending=true to show newest first. Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
@@ -507,6 +508,82 @@ def _get_master_listings_from_messages(messages: list[dict]) -> list[dict]:
     return _get_listings_from_tool(messages, "rental_search")
 
 
+_STRUCTURAL_CRITERIA_KEYS = (
+    "min_bedrooms",
+    "max_bedrooms",
+    "min_bathrooms",
+    "max_bathrooms",
+    "min_sqft",
+    "max_sqft",
+    "price_min",
+    "price_max",
+)
+
+
+def _get_active_search_criteria_from_messages(messages: list[dict]) -> dict:
+    """Reconstruct the structural search criteria currently in effect, for building the
+    search_criteria_to_text_blob() query used by score_listings_by_preferences /
+    analyze_listing_preferences.
+
+    location and listing_type always come from the most recent rental_search call, since
+    filter_listings never carries either (it only narrows bed/bath/sqft/price). Bed/bath/sqft/
+    price start from that same rental_search call's own filters, then get overlaid — per
+    field, not wholesale — by any later filter_listings call(s) that explicitly supply that
+    field.
+
+    This is a field-level merge rather than "the latest filter_listings call is fully
+    authoritative", because not every filter_listings call re-supplies every structural
+    criterion: e.g. the proximity step (4p) calls filter_listings with only proximity_rules/
+    sort_by, no bed/bath/price args at all. Treating that call as wholesale-authoritative
+    would wrongly drop the original search's bedrooms/price from the reconstructed criteria
+    (and thus from the query blob) even though the underlying listings are still bounded by
+    them. A field only changes when a later call actually supplies a (non-None) value for it.
+    """
+    criteria: dict = {"location": None, "listing_type": None}
+    for key in _STRUCTURAL_CRITERIA_KEYS:
+        criteria[key] = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name not in ("rental_search", "filter_listings"):
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            if name == "rental_search":
+                # A new search fully resets everything, including location/listing_type.
+                filters = args.get("filters") or {}
+                criteria = {"location": filters.get("location"), "listing_type": filters.get("listing_type")}
+                for key in _STRUCTURAL_CRITERIA_KEYS:
+                    criteria[key] = filters.get(key)
+            else:
+                for key in _STRUCTURAL_CRITERIA_KEYS:
+                    if args.get(key) is not None:
+                        criteria[key] = args[key]
+    return criteria
+
+
+def _get_parsed_proximity_rules_from_messages(messages: list[dict]) -> list[dict]:
+    """Return the rules list from the most recent parse_proximity_preferences result, for
+    building the search_criteria_to_text_blob() query's proximity phrase. Unlike
+    _get_enriched_master_from_messages, this is not reset by a new rental_search — proximity
+    preferences are a user-level setting, not tied to a particular search.
+    """
+    idx = _tool_result_message_index(messages, "parse_proximity_preferences")
+    if idx is None:
+        return []
+    try:
+        data = json.loads(messages[idx].get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    rules = data.get("rules") if isinstance(data, dict) else None
+    return rules if isinstance(rules, list) else []
+
+
 def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | None:
     """Return the index of the most recent tool result message for tool_name, or None."""
     id_to_name: dict[str, str] = {}
@@ -528,19 +605,37 @@ def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | No
 
 
 def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
-    """Return listings from the most recent enrich_listings_with_proximity result.
+    """Return listings from the most recent "master" enrichment result: whichever of
+    enrich_listings_with_proximity or score_listings_by_preferences ran more recently.
 
-    Ignores enrich results that predate the latest rental_search so a new search
-    does not keep using proximity data from a previous search.
+    Both tools are treated as equally valid bases for filter_listings/score_listings_by_preferences
+    to build on, mirroring the in-batch tracking in run_agent_step_events where
+    score_listings_by_preferences's output also becomes the new enriched_master (see the
+    `enriched_master = scored_list` assignment there). Without this, a later LLM round-trip
+    that recomputes enriched_master purely from history (this function) would only ever look
+    at enrich_listings_with_proximity and silently drop any semantic_score computed by a
+    score_listings_by_preferences call that ran since — causing filter_listings/sort to lose
+    match scores after the fact (see PR discussion / bug: "match scores disappear after
+    filtering").
+
+    Since semantic_score and proximity are both real Listing model fields, whichever of the two
+    tools ran later will have inherited the other's data via the model round-trip in its own
+    filter_source lookup, so picking the more recent one is safe regardless of call order.
+
+    Ignores results that predate the latest rental_search so a new search does not keep using
+    proximity/score data from a previous search.
     """
     enrich_idx = _tool_result_message_index(messages, "enrich_listings_with_proximity")
-    if enrich_idx is None:
+    score_idx = _tool_result_message_index(messages, "score_listings_by_preferences")
+    candidates = [i for i in (enrich_idx, score_idx) if i is not None]
+    if not candidates:
         return []
+    latest_idx = max(candidates)
     search_idx = _tool_result_message_index(messages, "rental_search")
-    if search_idx is not None and search_idx > enrich_idx:
+    if search_idx is not None and search_idx > latest_idx:
         return []
     try:
-        data = json.loads(messages[enrich_idx].get("content") or "{}")
+        data = json.loads(messages[latest_idx].get("content") or "{}")
     except (json.JSONDecodeError, TypeError):
         return []
     if isinstance(data, dict) and isinstance(data.get("listings"), list):
@@ -634,8 +729,17 @@ def run_tool(
     current_listings: list[dict] | None = None,
     current_plan_entries: list[dict] | None = None,
     available_slots: list[dict] | None = None,
+    search_criteria: dict | None = None,
+    proximity_rules_for_query: list[dict] | None = None,
 ) -> str:
-    """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected."""
+    """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected.
+
+    search_criteria and proximity_rules_for_query (both typically from
+    _get_active_search_criteria_from_messages / _get_parsed_proximity_rules_from_messages)
+    are used only by score_listings_by_preferences and analyze_listing_preferences, to build
+    a search_criteria_to_text_blob() embedding query that mirrors listing_to_text_blob's
+    structure instead of embedding the bare preferences text alone.
+    """
     if name == "ask_user":
         # Return payload for client to show UI and supply real result
         return json.dumps({
@@ -734,12 +838,19 @@ def run_tool(
         preferences_text = (arguments.get("preferences_text") or "").strip()
         if not preferences_text:
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        # Build the embedding query in the same "shape" as listing_to_text_blob (bed/bath/
+        # sqft/price/location + qualitative preferences + proximity) rather than embedding
+        # the bare preferences text alone — see search_criteria_to_text_blob for rationale.
+        query_blob = do_search_criteria_to_text_blob(
+            search_criteria or {},
+            preferences_text,
+            proximity_rules_for_query,
+        )
+        extra_query_text = (arguments.get("query_text") or "").strip()
+        if extra_query_text:
+            query_blob = f"{query_blob} {extra_query_text}".strip()
         try:
-            scored = do_score_listings_by_preferences(
-                listings,
-                preferences_text,
-                query_text=(arguments.get("query_text") or "").strip() or None,
-            )
+            scored = do_score_listings_by_preferences(listings, query_blob)
             return json.dumps({"listings": _with_display_rank(scored), "total_count": len(scored)})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -750,8 +861,25 @@ def run_tool(
             return json.dumps({"error": "listing is required and must be a non-empty object."})
         if not preferences_text:
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        # preferences_text (whatever the LLM passed, which per this tool's description may
+        # already combine qualitative + proximity text) still drives the narrative
+        # key_matches/key_gaps unchanged. For the numeric match_score_pct, fold in the
+        # deterministic structural criteria (bed/bath/sqft/price/location) the same way
+        # score_listings_by_preferences does, for table/Analyze-card consistency — but don't
+        # also inject proximity_rules_for_query here, since preferences_text may already
+        # contain a proximity phrase per this tool's own contract and doubling it up would
+        # skew the score.
+        query_blob = do_search_criteria_to_text_blob(
+            search_criteria or {},
+            preferences_text,
+            proximity_rules=None,
+        )
         try:
-            result = do_analyze_listing_against_preferences(listing, preferences_text)
+            result = do_analyze_listing_against_preferences(
+                listing,
+                preferences_text,
+                score_query_text=query_blob or None,
+            )
             return json.dumps(result)
         except ValueError as e:
             return json.dumps({"error": str(e)})
@@ -959,21 +1087,80 @@ def _make_llm_client() -> tuple[OpenAI, str]:
 logger = logging.getLogger(__name__)
 
 
+def _infer_last_sort_by(messages: list[dict]) -> str | None:
+    """Replay tool_calls chronologically to determine the sort_by that currently governs
+    display order, mirroring the live tracking in run_agent_step_events. Used to reconstruct
+    listing_state on turns where no tool ran this step (see _listing_state_from_messages).
+
+    Returns: the explicit sort_by from the most recent filter_listings call; "semantic_score"
+    if the most recent order-defining tool was score_listings_by_preferences (whose output is
+    always sorted by score descending); or None after a fresh rental_search or when no
+    order-defining tool has run yet. enrich_listings_with_proximity does not reorder listings,
+    so it leaves the current value unchanged. Consumers (streamlit_app._apply_default_match_score_sort
+    call site) use this to avoid silently overriding an explicit non-score sort (e.g. "price",
+    "proximity") the agent just applied, per the Bugbot finding that the UI's default
+    match-score sort was clobbering explicit sorts.
+    """
+    last_sort_by: str | None = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name == "rental_search":
+                last_sort_by = None
+            elif name == "score_listings_by_preferences":
+                last_sort_by = "semantic_score"
+            elif name == "filter_listings":
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                last_sort_by = args.get("sort_by")
+    return last_sort_by
+
+
+def _infer_display_source_from_messages(messages: list[dict]) -> str | None:
+    """Replay tool_calls chronologically to find which display-setting tool
+    (rental_search/filter_listings/enrich_listings_with_proximity/score_listings_by_preferences)
+    most recently determined the displayed listing set, mirroring _infer_last_sort_by.
+
+    Unlike checking only the very last completed tool call, this is robust to a
+    display-irrelevant tool (e.g. ask_user, summarize_listings, parse_proximity_preferences)
+    running *after* the last display-setting tool — which happens routinely once a model
+    stops batching multiple tool calls into one LLM turn (each ask_user pause is then its own
+    turn whose only tool call is ask_user itself). Without this, the UI would lose track of
+    which listings to show as soon as any non-display tool became the most recent call.
+    """
+    display_source: str | None = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name == "rental_search":
+                display_source = "search"
+            elif name == "filter_listings":
+                display_source = "filter"
+            elif name == "enrich_listings_with_proximity":
+                display_source = "enrich"
+            elif name == "score_listings_by_preferences":
+                display_source = "score"
+    return display_source
+
+
 def _listing_state_from_messages(messages: list[dict]) -> dict | None:
-    """Build listing_state (display_list, master_list, display_source) from message history."""
+    """Build listing_state (display_list, master_list, display_source, last_sort_by) from message history."""
     display_list = _get_current_listings_from_messages(messages)
     master_list = _get_enriched_master_from_messages(messages) or _get_master_listings_from_messages(messages)
-    last_tool = _last_completed_tool_name(messages)
-    display_source = None
-    if last_tool == "rental_search":
-        display_source = "search"
-    elif last_tool == "filter_listings":
-        display_source = "filter"
-    elif last_tool == "enrich_listings_with_proximity":
-        display_source = "enrich"
-    elif last_tool == "score_listings_by_preferences":
-        display_source = "score"
-    return {"display_list": display_list or [], "master_list": master_list or [], "display_source": display_source}
+    return {
+        "display_list": display_list or [],
+        "master_list": master_list or [],
+        "display_source": _infer_display_source_from_messages(messages),
+        "last_sort_by": _infer_last_sort_by(messages),
+    }
 
 
 def _stream_llm_call(client: OpenAI, model: str, messages: list[dict]) -> Iterator[dict]:
@@ -1143,8 +1330,17 @@ def run_agent_step_events(
             master_listings = _get_master_listings_from_messages(messages)
             enriched_master = _get_enriched_master_from_messages(messages)
             display_source: str | None = None
+            # Reflects the sort_by that currently governs display order, carried forward
+            # from prior turns' history (see _infer_last_sort_by) so the UI's default
+            # match-score sort knows whether an explicit non-score sort is already active.
+            last_sort_by: str | None = _infer_last_sort_by(messages)
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
+            # Used to build the search_criteria_to_text_blob() embedding query for
+            # score_listings_by_preferences / analyze_listing_preferences (see run_tool),
+            # so scoring queries a listing-blob-shaped text instead of bare preferences.
+            active_search_criteria = _get_active_search_criteria_from_messages(messages)
+            parsed_proximity_rules = _get_parsed_proximity_rules_from_messages(messages)
             for tc in tool_calls_raw:
                 name = tc["name"]
                 seq += 1
@@ -1177,6 +1373,8 @@ def run_agent_step_events(
                     current_listings=filter_source,
                     current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
                     available_slots=available_slots if name == "modify_viewing_plan" else None,
+                    search_criteria=active_search_criteria,
+                    proximity_rules_for_query=parsed_proximity_rules,
                 )
                 ok = True
                 try:
@@ -1197,6 +1395,15 @@ def run_agent_step_events(
                             master_listings = data["listings"]
                             current_listings = master_listings
                             display_source = "search"
+                            last_sort_by = None
+                            # A new search resets everything, mirroring
+                            # _get_active_search_criteria_from_messages.
+                            search_filters = args.get("filters") or {}
+                            active_search_criteria = {
+                                "location": search_filters.get("location"),
+                                "listing_type": search_filters.get("listing_type"),
+                                **{k: search_filters.get(k) for k in _STRUCTURAL_CRITERIA_KEYS},
+                            }
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -1214,6 +1421,14 @@ def run_agent_step_events(
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             current_listings = data["listings"]
                             display_source = "filter"
+                            last_sort_by = args.get("sort_by")
+                            # Field-level merge, not wholesale replacement — a filter_listings
+                            # call that only supplies e.g. proximity_rules/sort_by must not
+                            # blank out bedrooms/price already set by rental_search. Mirrors
+                            # _get_active_search_criteria_from_messages.
+                            for k in _STRUCTURAL_CRITERIA_KEYS:
+                                if args.get(k) is not None:
+                                    active_search_criteria[k] = args[k]
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "score_listings_by_preferences":
@@ -1224,6 +1439,14 @@ def run_agent_step_events(
                             current_listings = scored_list
                             enriched_master = scored_list
                             display_source = "score"
+                            last_sort_by = "semantic_score"
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name == "parse_proximity_preferences":
+                    try:
+                        data = json.loads(result_str)
+                        if isinstance(data, dict) and isinstance(data.get("rules"), list):
+                            parsed_proximity_rules = data["rules"]
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):
@@ -1239,10 +1462,22 @@ def run_agent_step_events(
                 if name == "ask_user":
                     payload = json.loads(result_str)
                     if payload.get("request_user_input"):
+                        # ask_user is very often the *only* tool call in its round (models that
+                        # don't batch multiple tool calls per turn always pause here alone), in
+                        # which case the local `display_source` above is still None even though
+                        # a display-setting tool ran in an earlier round/turn of this same
+                        # conversation. Fall back to replaying full message history so the table/
+                        # map don't vanish across an ask_user pause. See _infer_display_source_from_messages.
+                        resolved_display_source = (
+                            display_source
+                            if display_source is not None
+                            else _infer_display_source_from_messages(messages)
+                        )
                         listing_state = {
                             "display_list": current_listings or [],
                             "master_list": enriched_master or master_listings or [],
-                            "display_source": display_source,
+                            "display_source": resolved_display_source,
+                            "last_sort_by": last_sort_by,
                         }
                         ask_user_payload = {
                             "tool_call_id": tc["id"],
@@ -1263,9 +1498,18 @@ def run_agent_step_events(
                 "master_list": enriched_master or master_listings or [],
                 # Carry forward the display_source from a previous iteration when no
                 # display-changing tool ran in this batch (e.g. summarize_listings after
-                # rental_search), so the streamlit gate still sees the correct source.
+                # rental_search), so the streamlit gate still sees the correct source. Falls
+                # back to replaying full message history (not just this generator call's
+                # in-memory last_listing_state) so the *first* round of a fresh invocation —
+                # e.g. right after an ask_user answer, whose next tool call may itself be
+                # non-display (another ask_user, summarize_listings, etc.) — still resolves
+                # correctly instead of resetting to None. See _infer_display_source_from_messages.
                 "display_source": display_source if display_source is not None
-                                  else (last_listing_state.get("display_source") if last_listing_state else None),
+                                  else (last_listing_state.get("display_source") if last_listing_state
+                                        else _infer_display_source_from_messages(messages)),
+                # last_sort_by is already carried forward incrementally above (seeded from
+                # history, mutated only by order-defining tools), so no extra fallback needed here.
+                "last_sort_by": last_sort_by,
             }
             messages = messages + [assistant_msg] + tool_results
             continue

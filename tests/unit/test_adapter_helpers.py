@@ -4,6 +4,7 @@ import pytest
 
 from rental_search_agent.backends.apify_realtor_ca import (
     _format_price_display,
+    _parse_bedrooms,
     _parse_sqft,
     filters_to_run_input,
     item_to_listing,
@@ -200,6 +201,42 @@ class TestItemToListing:
         listing = item_to_listing(item, "for_rent")
         assert listing.url == "https://www.realtor.ca/real-estate/1/m1"
 
+    def test_photo_url_rejected_off_allowlisted_cdn(self):
+        # Security-review/Bugbot regression: photo_url is scraped third-party data
+        # rendered as a raw <img src> in the UI, so anything off the trusted CDN host
+        # must be dropped rather than passed through.
+        item = mock_apify_item(mls="m1")
+        item["Property"]["Photo"] = [{"MedResPath": "https://attacker.example/evil.jpg"}]
+        listing = item_to_listing(item, "for_rent")
+        assert listing.photo_url is None
+
+    def test_photo_url_accepted_on_allowlisted_cdn(self):
+        item = mock_apify_item(mls="m1")
+        item["Property"]["Photo"] = [{"MedResPath": "https://cdn.realtor.ca/listings/m1/photo.jpg"}]
+        listing = item_to_listing(item, "for_rent")
+        assert listing.photo_url == "https://cdn.realtor.ca/listings/m1/photo.jpg"
+
+    def test_video_url_rejected_when_non_https(self):
+        # Security-review regression: video_url is rendered as a clickable markdown
+        # link in the Analyze expander; dangerous schemes (javascript:, data:, plain
+        # http) must not pass through.
+        item = mock_apify_item(mls="m1")
+        item["AlternateURL"] = {"VideoLink": "javascript:alert(1)"}
+        listing = item_to_listing(item, "for_rent")
+        assert listing.video_url is None
+
+    def test_video_url_rejected_when_malformed(self):
+        item = mock_apify_item(mls="m1")
+        item["AlternateURL"] = {"VideoLink": "not a url"}
+        listing = item_to_listing(item, "for_rent")
+        assert listing.video_url is None
+
+    def test_video_url_accepted_when_well_formed_https(self):
+        item = mock_apify_item(mls="m1")
+        item["AlternateURL"] = {"VideoLink": "https://www.youtube.com/watch?v=abc123"}
+        listing = item_to_listing(item, "for_rent")
+        assert listing.video_url == "https://www.youtube.com/watch?v=abc123"
+
 
 class TestFiltersToRunInput:
     def test_rent_operation_and_bounds(self):
@@ -262,3 +299,46 @@ class TestSearchBackendError:
         err = SearchBackendError("test message")
         assert str(err) == "test message"
         assert isinstance(err, Exception)
+
+
+class TestParseBedrooms:
+    """The actor reports a den by joining it onto the bedroom count as e.g. '1 + 1' rather
+    than a separate field. Regression coverage for the bug where naive int-coercion turned
+    '1 + 1' into 11 (stripping the '+' and space, concatenating the digits)."""
+
+    def test_den_notation_splits_into_primary_and_den_count(self):
+        assert _parse_bedrooms("1 + 1") == (1, 1)
+        assert _parse_bedrooms("2 + 1") == (2, 1)
+
+    def test_den_notation_without_spaces(self):
+        assert _parse_bedrooms("3+1") == (3, 1)
+
+    def test_plain_number_has_no_den(self):
+        assert _parse_bedrooms("3") == (3, 0)
+        assert _parse_bedrooms(3) == (3, 0)
+
+    def test_none_or_empty_defaults_to_zero_no_den(self):
+        assert _parse_bedrooms(None) == (0, 0)
+        assert _parse_bedrooms("") == (0, 0)
+
+    def test_does_not_mangle_den_notation_into_a_large_number(self):
+        # The regression this guards against: _coerce_int("1 + 1") == 11.
+        bedrooms, den_count = _parse_bedrooms("1 + 1")
+        assert bedrooms == 1
+        assert bedrooms != 11
+
+
+class TestItemToListingDen:
+    def test_den_notation_maps_to_primary_bedrooms_has_den_and_display(self):
+        item = mock_apify_item(bedrooms="2 + 1")
+        listing = item_to_listing(item, "for_sale")
+        assert listing.bedrooms == 2
+        assert listing.has_den is True
+        assert listing.bedrooms_display == "2 + 1"
+
+    def test_plain_bedrooms_has_no_den_and_no_display(self):
+        item = mock_apify_item(bedrooms=3)
+        listing = item_to_listing(item, "for_rent")
+        assert listing.bedrooms == 3
+        assert listing.has_den is False
+        assert listing.bedrooms_display is None

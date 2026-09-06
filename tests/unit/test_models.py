@@ -103,6 +103,46 @@ class TestListing:
         )
         assert l.to_short_label(1) == "[1] 123 Main St — $2,800/month"
 
+    def test_semantic_score_defaults_to_none(self):
+        l = Listing(id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2)
+        assert l.semantic_score is None
+
+    def test_semantic_score_round_trips_through_model_validate(self):
+        # Regression test: semantic_score must be a real Listing field (not just a dict key)
+        # so it survives Listing.model_validate(...) round-trips in filter_listings and
+        # enrich_listings_with_proximity — see filtering.py and proximity.py.
+        d = Listing(
+            id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2,
+            semantic_score=0.87,
+        ).model_dump()
+        assert Listing.model_validate(d).semantic_score == 0.87
+
+    def test_semantic_score_bounds(self):
+        with pytest.raises(ValidationError):
+            Listing(
+                id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2,
+                semantic_score=1.5,
+            )
+        with pytest.raises(ValidationError):
+            Listing(
+                id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2,
+                semantic_score=-0.1,
+            )
+
+    def test_has_den_and_bedrooms_display_default_to_none(self):
+        l = Listing(id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2)
+        assert l.has_den is None
+        assert l.bedrooms_display is None
+
+    def test_has_den_and_bedrooms_display_round_trip_through_model_validate(self):
+        d = Listing(
+            id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2,
+            has_den=True, bedrooms_display="2 + 1",
+        ).model_dump()
+        validated = Listing.model_validate(d)
+        assert validated.has_den is True
+        assert validated.bedrooms_display == "2 + 1"
+
     def test_to_short_label_without_index(self):
         l = Listing(
             id="mls-1",
