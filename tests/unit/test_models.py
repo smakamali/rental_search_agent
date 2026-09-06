@@ -28,11 +28,11 @@ class TestRentalSearchFilters:
             max_bedrooms=3,
             min_bathrooms=1,
             location="Toronto",
-            rent_min=1500,
-            rent_max=3000,
+            price_min=1500,
+            price_max=3000,
         )
         assert f.max_bedrooms == 3
-        assert f.rent_min == 1500
+        assert f.price_min == 1500
 
     def test_min_bedrooms_required(self):
         with pytest.raises(ValidationError):
@@ -47,13 +47,36 @@ class TestRentalSearchFilters:
             RentalSearchFilters(min_bedrooms=-1, location="Vancouver")
 
     def test_listing_type_valid(self):
-        for lt in ("for_rent", "for_sale", "for_sale_or_rent"):
+        for lt in ("for_rent", "for_sale"):
             f = RentalSearchFilters(min_bedrooms=1, location="X", listing_type=lt)
             assert f.listing_type == lt
 
     def test_listing_type_invalid(self):
         with pytest.raises(ValidationError):
             RentalSearchFilters(min_bedrooms=1, location="X", listing_type="invalid")
+        with pytest.raises(ValidationError):
+            RentalSearchFilters(min_bedrooms=1, location="X", listing_type="for_sale_or_rent")
+
+    def test_inverted_price_bounds_rejected(self):
+        with pytest.raises(ValidationError, match="price_min"):
+            RentalSearchFilters(min_bedrooms=1, location="X", price_min=3000, price_max=1500)
+
+    def test_inverted_bedroom_bounds_rejected(self):
+        with pytest.raises(ValidationError, match="min_bedrooms"):
+            RentalSearchFilters(min_bedrooms=3, max_bedrooms=1, location="X")
+
+    def test_inverted_bathroom_bounds_rejected(self):
+        with pytest.raises(ValidationError, match="min_bathrooms"):
+            RentalSearchFilters(min_bedrooms=1, location="X", min_bathrooms=3, max_bathrooms=1)
+
+    def test_inverted_sqft_bounds_rejected(self):
+        with pytest.raises(ValidationError, match="min_sqft"):
+            RentalSearchFilters(min_bedrooms=1, location="X", min_sqft=1000, max_sqft=500)
+
+    def test_equal_min_max_bounds_allowed(self):
+        f = RentalSearchFilters(min_bedrooms=2, max_bedrooms=2, location="X", price_min=2000, price_max=2000)
+        assert f.max_bedrooms == 2
+        assert f.price_max == 2000
 
 
 class TestListing:
@@ -100,16 +123,20 @@ class TestListingFilterCriteria:
     def test_all_optional(self):
         c = ListingFilterCriteria()
         assert c.min_bedrooms is None
-        assert c.rent_max is None
+        assert c.price_max is None
 
     def test_with_values(self):
-        c = ListingFilterCriteria(min_bedrooms=2, rent_max=2500)
+        c = ListingFilterCriteria(min_bedrooms=2, price_max=2500)
         assert c.min_bedrooms == 2
-        assert c.rent_max == 2500
+        assert c.price_max == 2500
 
     def test_ge_constraint(self):
         with pytest.raises(ValidationError):
             ListingFilterCriteria(min_sqft=-1)
+
+    def test_inverted_price_bounds_rejected(self):
+        with pytest.raises(ValidationError, match="price_min"):
+            ListingFilterCriteria(price_min=3000, price_max=1500)
 
 
 class TestUserDetails:

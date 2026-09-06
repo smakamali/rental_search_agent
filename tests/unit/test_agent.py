@@ -85,7 +85,15 @@ class TestFlowInstructions:
 
     def test_contains_key_phrases(self):
         instructions = flow_instructions()
-        assert "rental search assistant" in instructions.lower()
+        assert "property search assistant" in instructions.lower()
         assert "rental_search" in instructions or "rental search" in instructions
         assert "draft_viewing_plan" in instructions
         assert "calendar_get_available_slots" in instructions
+
+    def test_proximity_flow_mandates_nearest_first_sort(self):
+        # Regression: the post-enrich filter_listings call must always sort_by="proximity"
+        # so nearest-first is the canonical LLM order (and thus the 'rank' each listing
+        # gets is sequential/nearest-first) rather than left to the Streamlit UI to
+        # re-sort locally, which desyncs the displayed Rank column from that order.
+        instructions = flow_instructions()
+        assert 'sort_by="proximity"' in instructions

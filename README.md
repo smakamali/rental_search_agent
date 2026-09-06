@@ -1,6 +1,6 @@
-# Rental Search Assistant MVP
+# Property Search Assistant MVP
 
-Chat-based rental search assistant: natural-language search, shortlist, viewing plan drafting (with Google Calendar), and simulated viewing requests. Uses REALTOR.CA via **pyRealtor** only; the Apify backend is **not** used in this MVP.
+Chat-based Canadian property search assistant (rent **or** sale): natural-language search, shortlist, viewing plan drafting (with Google Calendar), and simulated viewing requests. Uses REALTOR.CA via **Apify** (`igolaizola/realtor-canada-scraper-ppe`).
 
 **LLM:** The client uses [OpenRouter](https://openrouter.ai) by default (one API key, 400+ models). You can still use direct OpenAI via `OPENAI_API_KEY`.
 
@@ -30,7 +30,10 @@ pip install -e .
 | `OPENROUTER_MODEL` | Optional. OpenRouter model ID (default: `openai/gpt-4o-mini`). Examples: `anthropic/claude-3.5-sonnet`, `google/gemini-pro`. |
 | `OPENAI_API_KEY` | Alternative to OpenRouter. Direct OpenAI API key (used if `OPENROUTER_API_KEY` is not set). |
 | `OPENAI_MODEL` | Optional when using OpenAI. Model name (default: `gpt-4o-mini`). |
-| `USE_PROXY` | Optional. Set to `1`, `true`, or `yes` to enable proxy for pyRealtor (e.g. if REALTOR.CA rate-limits). |
+| `APIFY_TOKEN` | **Required** for property search. [Apify](https://console.apify.com/settings/integrations) API token. |
+| `APIFY_ACTOR_ID` | Optional. Actor id (default: `igolaizola/realtor-canada-scraper-ppe`). |
+| `APIFY_MAX_ITEMS` | Optional. Max listings per search (default: `100`). |
+| `SEARCH_MARKET` | Optional. Only `ca` is implemented (US planned). |
 | `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
 | `GOOGLE_MAPS_API_KEY` | Required for **proximity preferences**: geocoding, drive/walk/transit times. Enable Geocoding, Directions, and Places APIs in Google Cloud. |
@@ -60,6 +63,7 @@ Runs the agent loop with a CLI: you type your search, the LLM calls tools; when 
 
 ```bash
 set OPENROUTER_API_KEY=your-openrouter-key
+set APIFY_TOKEN=your-apify-token
 rental-search-client
 ```
 
@@ -75,7 +79,7 @@ Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or
 
 ### Streamlit UI
 
-Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit"); they are stored in `~/.rental_search_agent/preferences.json` and shared with the CLI. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env` or your environment), then run:
+Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit"); they are stored in `~/.rental_search_agent/preferences.json` and shared with the CLI. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, plus `APIFY_TOKEN` in `.env` or your environment), then run:
 
 ```bash
 rental-search-ui
@@ -116,8 +120,8 @@ pytest --cov=rental_search_agent --cov-report=term-missing
 
 ## Backend
 
-- **In scope:** Single backend **pyRealtor** (REALTOR.CA, Canada/Vancouver). No other backends.
-- **Out of scope:** Apify and the “Realtor.ca Property Search Scraper” actor are **not** implemented or used in this MVP.
+- **In scope:** Canada REALTOR.CA via **Apify** actor `igolaizola/realtor-canada-scraper-ppe` (`for_rent` and `for_sale`). Backend is pluggable for a future US market.
+- **Out of scope (this MVP):** US actors, `for_sale_or_rent` / sold modes, licensed CREA DDF.
 
 ## Docs
 

@@ -1,16 +1,18 @@
-"""Unit tests for rental_search_agent.adapter helper functions."""
+"""Unit tests for Apify Realtor.ca backend helpers and mapping."""
 
-import pandas as pd
 import pytest
 
-from rental_search_agent.adapter import (
-    SearchBackendError,
+from rental_search_agent.backends.apify_realtor_ca import (
     _format_price_display,
     _parse_sqft,
-    _row_to_listing,
+    filters_to_run_input,
+    item_to_listing,
+    post_filter_listings,
 )
-from rental_search_agent.models import Listing
-from tests.fixtures.sample_data import mock_pyRealtor_row
+from rental_search_agent.backends.common import _coerce_float
+from rental_search_agent.backends.errors import SearchBackendError
+from rental_search_agent.models import Listing, RentalSearchFilters
+from tests.fixtures.sample_data import mock_apify_item
 
 
 class TestParseSqft:
@@ -29,11 +31,40 @@ class TestParseSqft:
         assert _parse_sqft("") is None
         assert _parse_sqft("   ") is None
 
-    def test_float_nan(self):
-        assert _parse_sqft(float("nan")) is None
-
     def test_string_with_decimal(self):
         assert _parse_sqft("999.5 sqft") == 999.5
+
+    def test_metric_string_converted_to_sqft(self):
+        # Real Toronto-area payloads report SizeInterior in square metres (e.g. condos
+        # around 700 sqft come back as "65.0316 m2").
+        assert _parse_sqft("65.0316 m2") == pytest.approx(699.99, abs=0.5)
+
+    def test_metric_string_with_superscript(self):
+        assert _parse_sqft("50 m\u00b2") == pytest.approx(538.2, abs=0.5)
+
+    def test_numeric_value_not_treated_as_metric(self):
+        # Plain numbers (no unit string) are assumed to already be sqft.
+        assert _parse_sqft(650) == 650.0
+
+
+class TestCoerceFloat:
+    def test_negative_string_preserves_sign(self):
+        # The Apify actor returns Longitude as a negative-number *string* (e.g.
+        # '-123.116411' for Vancouver). Stripping non-digit chars naively would drop
+        # the '-' and silently flip listings to the wrong hemisphere (e.g. China).
+        assert _coerce_float("-123.116411") == pytest.approx(-123.116411)
+
+    def test_positive_string(self):
+        assert _coerce_float("49.278794") == pytest.approx(49.278794)
+
+    def test_currency_string_unaffected(self):
+        assert _coerce_float("$2,500") == 2500.0
+
+    def test_native_negative_number_unaffected(self):
+        assert _coerce_float(-123.5) == -123.5
+
+    def test_none(self):
+        assert _coerce_float(None) is None
 
 
 class TestFormatPriceDisplay:
@@ -52,17 +83,17 @@ class TestFormatPriceDisplay:
         assert _format_price_display(None, 0, "for_rent") is None
 
 
-class TestRowToListing:
-    def test_basic_mapping(self):
-        row = mock_pyRealtor_row(
+class TestItemToListing:
+    def test_basic_rent_mapping(self):
+        item = mock_apify_item(
             mls="mls-99",
             address="456 Oak Ave",
             bedrooms=3,
             bathrooms=2.0,
             size="1500 sqft",
-            rent=3200,
+            price=3200,
         )
-        listing = _row_to_listing(row, "for_rent")
+        listing = item_to_listing(item, "for_rent")
         assert isinstance(listing, Listing)
         assert listing.id == "mls-99"
         assert listing.address == "456 Oak Ave"
@@ -71,48 +102,159 @@ class TestRowToListing:
         assert listing.sqft == 1500.0
         assert listing.price == 3200
         assert listing.price_display is not None
-        assert "$" in listing.price_display and "3" in listing.price_display
+        assert "$" in listing.price_display
+        assert listing.source == "Realtor.ca"
+        assert listing.latitude == 49.28
 
-    def test_url_fallback_when_website_empty(self):
-        row = mock_pyRealtor_row(mls="abc123", website="")
-        listing = _row_to_listing(row, "for_rent")
+    def test_url_fallback_when_relative_missing(self):
+        item = mock_apify_item(mls="abc123", relative_url="")
+        listing = item_to_listing(item, "for_rent")
         assert "realtor.ca" in listing.url
         assert "abc123" in listing.url
 
-    def test_total_rent_preferred_for_rent(self):
-        row = mock_pyRealtor_row(rent=2500, total_rent=2600)
-        listing = _row_to_listing(row, "for_rent")
-        assert listing.price == 2600
-
-    def test_for_sale_uses_price(self):
-        row_data = {
-            "MLS": "m1",
-            "Address": "1 St",
-            "Bedrooms": 2,
-            "Bathrooms": 2,
-            "Size": 1000,
-            "Price": 450000,
-            "Website": "https://example.com",
-            "Description": "House",
-            "Postal Code": "",
-            "Latitude": 0,
-            "Longitude": 0,
-            "House Category": "",
-            "Ownership Category": "",
-            "Ammenities": "",
-            "Nearby Ammenities": "",
-            "Open House": "",
-            "Stories": 1,
-        }
-        row = pd.Series(row_data)
-        listing = _row_to_listing(row, "for_sale")
+    def test_for_sale_price_display(self):
+        item = mock_apify_item(mls="m1", price=450000, price_display="$450,000")
+        listing = item_to_listing(item, "for_sale")
         assert listing.price == 450000
         assert "450,000" in (listing.price_display or "")
 
     def test_missing_address_defaults(self):
-        row = mock_pyRealtor_row(address="")
-        listing = _row_to_listing(row, "for_rent")
+        item = mock_apify_item(address="")
+        listing = item_to_listing(item, "for_rent")
         assert listing.address == "Address not provided"
+
+    def test_rent_uses_lease_rent_fields(self):
+        # Real igolaizola payloads for rent operations use Property.LeaseRent /
+        # LeaseRentUnformattedValue, not Price/PriceUnformattedValue (which are only
+        # present for buy/for_sale operations). Verified against a live actor run.
+        item = mock_apify_item(mls="m1")
+        item["Property"].pop("Price", None)
+        item["Property"].pop("PriceUnformattedValue", None)
+        item["Property"]["LeaseRent"] = "$2,990/Monthly"
+        item["Property"]["LeaseRentUnformattedValue"] = "2990"
+        listing = item_to_listing(item, "for_rent")
+        assert listing.price == 2990.0
+        assert "2,990" in (listing.price_display or "")
+
+    def test_sale_prefers_price_over_lease_rent(self):
+        item = mock_apify_item(mls="m1", price=639000)
+        item["Property"]["LeaseRent"] = "$2,990/Monthly"
+        item["Property"]["LeaseRentUnformattedValue"] = "2990"
+        listing = item_to_listing(item, "for_sale")
+        assert listing.price == 639000.0
+
+    def test_postal_code_at_item_root_is_used(self):
+        # Real payloads put PostalCode at the item root, not under Property.Address.
+        item = mock_apify_item(mls="m1")
+        del item["Property"]["Address"]["PostalCode"]
+        item["PostalCode"] = "V6Z1Z7"
+        listing = item_to_listing(item, "for_rent")
+        assert listing.postal_code == "V6Z1Z7"
+
+    def test_pipe_delimited_address_normalized(self):
+        item = mock_apify_item(mls="m1")
+        item["Property"]["Address"]["AddressText"] = "709 1009 HARWOOD STREET|Vancouver, British Columbia V6Z1Z7"
+        listing = item_to_listing(item, "for_rent")
+        assert "|" not in listing.address
+        assert listing.address == "709 1009 HARWOOD STREET, Vancouver, British Columbia V6Z1Z7"
+
+    def test_parking_fields_extracted_when_present(self):
+        # Property.ParkingSpaceTotal/ParkingType are explicit structured fields on the
+        # actor payload (verified against a live run for houses/townhouses).
+        item = mock_apify_item(mls="m1", parking_spaces="4", parking_type="Garage, Carport")
+        listing = item_to_listing(item, "for_sale")
+        assert listing.parking_spaces == 4
+        assert listing.parking_type == "Garage, Carport"
+
+    def test_parking_fields_none_when_absent(self):
+        # Not every listing has dedicated parking (e.g. some condos); must stay None
+        # rather than defaulting to 0, so callers can distinguish "unknown" from "none".
+        item = mock_apify_item(mls="m1")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.parking_spaces is None
+        assert listing.parking_type is None
+
+    def test_negative_longitude_string_not_flipped(self):
+        # Real igolaizola payloads report Latitude/Longitude as numeric *strings*
+        # (e.g. '-123.116411' for Vancouver), not floats. A naive digit-stripping
+        # coercion drops the '-' and silently relocates listings to the wrong
+        # hemisphere (observed: Vancouver plotted in China on the results map).
+        item = mock_apify_item(mls="m1", lat="49.278794", lon="-123.116411")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.latitude == pytest.approx(49.278794)
+        assert listing.longitude == pytest.approx(-123.116411)
+
+    def test_trusts_realtor_ca_absolute_url(self):
+        item = mock_apify_item(mls="m1", relative_url="https://www.realtor.ca/real-estate/1/m1")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.url == "https://www.realtor.ca/real-estate/1/m1"
+
+    def test_rejects_offsite_absolute_url(self):
+        item = mock_apify_item(mls="m1", relative_url="https://attacker.example/phish")
+        listing = item_to_listing(item, "for_rent")
+        assert "attacker.example" not in listing.url
+        assert listing.url == "https://www.realtor.ca/listing/m1"
+
+    def test_accepts_relative_path_url(self):
+        item = mock_apify_item(mls="m1", relative_url="/real-estate/1/m1")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.url == "https://www.realtor.ca/real-estate/1/m1"
+
+
+class TestFiltersToRunInput:
+    def test_rent_operation_and_bounds(self):
+        filters = RentalSearchFilters(
+            min_bedrooms=2,
+            max_bedrooms=3,
+            location="Vancouver, BC",
+            listing_type="for_rent",
+            price_min=2000,
+            price_max=3500,
+            min_bathrooms=1,
+            min_sqft=800,
+        )
+        run_input = filters_to_run_input(filters, max_items=40)
+        assert run_input["operation"] == "rent"
+        assert run_input["location"] == "Vancouver, BC"
+        assert run_input["maxItems"] == 40
+        assert run_input["minBeds"] == 2
+        assert run_input["maxBeds"] == 3
+        assert run_input["minPrice"] == 2000
+        assert run_input["maxPrice"] == 3500
+        assert run_input["minBathrooms"] == 1
+        assert run_input["minSquareFootage"] == 800
+
+    def test_sale_operation(self):
+        filters = RentalSearchFilters(
+            min_bedrooms=2,
+            location="Toronto, ON",
+            listing_type="for_sale",
+            price_max=900000,
+        )
+        run_input = filters_to_run_input(filters, max_items=100)
+        assert run_input["operation"] == "buy"
+        assert run_input["maxPrice"] == 900000
+
+    def test_rejects_for_sale_or_rent(self):
+        filters = RentalSearchFilters.model_construct(
+            min_bedrooms=1,
+            location="Vancouver",
+            listing_type="for_sale_or_rent",
+        )
+        with pytest.raises(SearchBackendError, match="for_rent"):
+            filters_to_run_input(filters, max_items=10)
+
+
+class TestPostFilter:
+    def test_filters_by_rent_max(self):
+        listings = [
+            item_to_listing(mock_apify_item(mls="a", price=2000), "for_rent"),
+            item_to_listing(mock_apify_item(mls="b", price=4000), "for_rent"),
+        ]
+        filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver", price_max=2500)
+        out = post_filter_listings(listings, filters)
+        assert len(out) == 1
+        assert out[0].id == "a"
 
 
 class TestSearchBackendError:
@@ -120,9 +262,3 @@ class TestSearchBackendError:
         err = SearchBackendError("test message")
         assert str(err) == "test message"
         assert isinstance(err, Exception)
-
-    def test_catch_and_reraise(self):
-        try:
-            raise SearchBackendError("unavailable")
-        except SearchBackendError as e:
-            assert "unavailable" in str(e)

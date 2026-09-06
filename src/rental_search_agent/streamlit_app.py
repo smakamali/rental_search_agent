@@ -155,26 +155,25 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
             return listings
     if not rules:
         return listings
+    # Preserve each listing's authoritative 'rank' (assigned by the LLM tool layer in
+    # client.py) across this filter round-trip: filter_listings validates listings through
+    # the Listing model, which silently drops unrecognized fields like 'rank'. Re-attach by
+    # id afterward so the UI keeps labeling listings with the same rank the LLM uses for
+    # "listing N" references, even after this safeguard narrows/reorders the set.
+    rank_by_id = {
+        lst.get("id"): lst.get("rank")
+        for lst in listings
+        if isinstance(lst, dict) and lst.get("id") is not None
+    }
     try:
         resp = do_filter_listings(listings, {}, proximity_rules=rules)
-        return [lst.model_dump() if hasattr(lst, "model_dump") else lst for lst in resp.listings]
+        result = [lst.model_dump() if hasattr(lst, "model_dump") else lst for lst in resp.listings]
+        for lst in result:
+            if isinstance(lst, dict) and lst.get("id") in rank_by_id:
+                lst["rank"] = rank_by_id[lst["id"]]
+        return result
     except Exception:
         return listings
-
-
-def _min_proximity_minutes(listing: dict) -> float:
-    """Minimum duration_min across all proximity rules for this listing. Returns inf if none."""
-    prox = listing.get("proximity") or {}
-    if not isinstance(prox, dict):
-        return float("inf")
-    minutes = []
-    for val in prox.values():
-        if isinstance(val, dict) and val.get("duration_min") is not None:
-            try:
-                minutes.append(float(val["duration_min"]))
-            except (TypeError, ValueError):
-                pass
-    return min(minutes) if minutes else float("inf")
 
 
 def _format_proximity_display(proximity: dict | None) -> str:
@@ -207,22 +206,28 @@ def _format_proximity_display(proximity: dict | None) -> str:
 
 
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, rent, Proximity, URL."""
+    """Build table-friendly rows: rank, MLS id, address, bed, bath, size, price, Proximity, URL.
+
+    Uses each listing's 'rank' field (assigned by the LLM tool layer in client.py) rather
+    than its position in this list, so numbering stays correct even when this list has been
+    locally reordered/filtered for display (e.g. the proximity closest-first safeguard),
+    which would otherwise desync the table's numbers from what the LLM calls "listing N".
+    """
     rows = []
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        rent = listing.get("price_display") or (
+        price = listing.get("price_display") or (
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         rows.append({
-            "rank": i + 1,
+            "rank": listing.get("rank") if listing.get("rank") is not None else i + 1,
             "MLS id": listing.get("id") or "—",
             "address": listing.get("address") or "—",
             "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
-            "rent": rent,
+            "price": price,
             "Proximity": _format_proximity_display(listing.get("proximity")),
             "URL": listing.get("url") or "",
         })
@@ -233,7 +238,7 @@ def _render_results_table(listings: list[dict]) -> None:
     """Render search results as custom rows with an Analyze button per listing."""
     if not listings:
         return
-    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Rent, Proximity, Analyze
+    # Header row: Rank, MLS id (link), Address, Bed, Bath, Size, Price, Proximity, Analyze
     header_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
     with header_cols[0]:
         st.caption("Rank")
@@ -248,7 +253,7 @@ def _render_results_table(listings: list[dict]) -> None:
     with header_cols[5]:
         st.caption("Size")
     with header_cols[6]:
-        st.caption("Rent")
+        st.caption("Price")
     with header_cols[7]:
         st.caption("Proximity")
     with header_cols[8]:
@@ -257,7 +262,7 @@ def _render_results_table(listings: list[dict]) -> None:
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        rent = listing.get("price_display") or (
+        price = listing.get("price_display") or (
             f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
         )
         url = listing.get("url") or ""
@@ -265,7 +270,10 @@ def _render_results_table(listings: list[dict]) -> None:
         prox = _format_proximity_display(listing.get("proximity"))
         row_cols = st.columns([0.5, 1, 2, 0.5, 0.5, 0.6, 0.8, 1.2, 1])
         with row_cols[0]:
-            st.write(i + 1)
+            # Use the listing's authoritative 'rank' (from the LLM tool layer), not this
+            # row's position, so the number matches what the LLM calls "listing N" even
+            # after a local reorder (e.g. the proximity closest-first safeguard above).
+            st.write(listing.get("rank") if listing.get("rank") is not None else i + 1)
         with row_cols[1]:
             if url:
                 st.link_button(mls_id, url)
@@ -280,7 +288,7 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[5]:
             st.write(str(int(sqft)) if sqft is not None else "—")
         with row_cols[6]:
-            st.write(rent)
+            st.write(price)
         with row_cols[7]:
             st.caption(prox)
         with row_cols[8]:
@@ -330,6 +338,10 @@ def _get_map_html_cached(listings_json: str) -> str | None:
 def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
     """Build list of {lat, lon, label, url} for listings with valid coordinates.
     Returns (map_points, center_lat, center_lon). Center is None if no points.
+
+    Labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
+    rather than position in this list, so map pin numbers stay correct even when this list
+    has been locally reordered for display (e.g. the proximity closest-first safeguard).
     """
     points = []
     lats, lons = [], []
@@ -345,7 +357,8 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         url = listing.get("url") or ""
-        points.append({"lat": lat, "lon": lon, "label": str(i + 1), "url": url})
+        label = str(listing.get("rank")) if listing.get("rank") is not None else str(i + 1)
+        points.append({"lat": lat, "lon": lon, "label": label, "url": url})
         lats.append(lat)
         lons.append(lon)
     if not points:
@@ -356,7 +369,8 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
 
 
 def _render_results_map(map_points: list[dict], center_lat: float, center_lon: float) -> None:
-    """Render a map with points labeled by listing order (1, 2, 3, ...). Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
+    """Render a map with points labeled by each listing's rank (see _build_map_data).
+    Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
     if folium is not None:
         # Folium: markers with DivIcon so all numbers (1–9, 10, 11, ...) render correctly
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
@@ -541,8 +555,8 @@ def _render_ask_form(pending: dict) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Rental Search Assistant", page_icon="🏠", layout="wide")
-    st.title("Rental Search Assistant")
+    st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
+    st.title("Property Search Assistant")
 
     _ensure_env_loaded()
     _init_session_state()
@@ -560,14 +574,16 @@ def main() -> None:
         listings = st.session_state.get("display_list") or []
         proximity_text = (prefs.get("proximity_preferences") or "").strip()
         display_source = st.session_state.get("display_source")
-        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally
+        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally.
+        # Note: this must NOT independently re-sort listings (e.g. "closest first") — the
+        # LLM is instructed (agent.py step 4p) to sort_by="proximity" itself as part of its
+        # post-enrich filter_listings call, so its canonical order (and each listing's
+        # 'rank', which the LLM uses for "listing N" references) is already nearest-first.
+        # A separate local sort here would visually reorder rows without renumbering rank,
+        # making the Rank column look unsorted even though it's still correctly identifying
+        # each listing.
         if proximity_text and display_source == "enrich" and listings:
             listings = _apply_proximity_filter_safeguard(listings, proximity_text)
-        # When proximity prefs are set and listings have proximity data, sort by closest first
-        if proximity_text and any(
-            _min_proximity_minutes(lst) != float("inf") for lst in listings
-        ):
-            listings = sorted(listings, key=_min_proximity_minutes)
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
@@ -672,7 +688,7 @@ def main() -> None:
             with st.chat_message("assistant"):
                 _render_ask_form(pending)
             return
-        if prompt := st.chat_input("Type your search request (e.g. 2 bed in Vancouver under 3000)"):
+        if prompt := st.chat_input("e.g. 2 bed rental in Vancouver under 3000, or condo for sale in Toronto under 900k"):
             st.session_state["messages"].append({"role": "user", "content": prompt})
             messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
             st.session_state["messages"] = messages

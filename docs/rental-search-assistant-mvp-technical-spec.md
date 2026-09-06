@@ -15,7 +15,7 @@ This document provides implementation-ready technical specifications for the [Re
 
 ## 2. System Architecture
 
-The following diagram illustrates the in-scope components and how they interact. All references are to the MVP implementation (pyRealtor backend; Apify is out of scope).
+The following diagram illustrates the in-scope components and how they interact. MVP search backend is Apify → REALTOR.CA (Canada); US market is reserved via a pluggable backend seam.
 
 ```mermaid
 flowchart TB
@@ -47,16 +47,19 @@ flowchart TB
         T10[modify_viewing_plan]
     end
 
-    subgraph Backend["Rental Search Backend"]
-        Adapter[Adapter\npyRealtor mapping]
-        PyRealtor[pyRealtor\nHousesFacade]
-        Adapter <--> PyRealtor
+    subgraph Backend["Property Search Backend"]
+        Adapter[Adapter\nListing mapping]
+        ApifyCA[ApifyRealtorCaBackend]
+        ApifyActor[Apify actor\nigolaizola]
+        Adapter <--> ApifyCA
+        ApifyCA <--> ApifyActor
     end
 
     subgraph External["External"]
         REALTOR[REALTOR.CA]
         GC[Google Calendar]
         GM[Google Maps\nGeocoding/Directions/Places]
+        ApifyPlatform[Apify platform]
     end
 
     T2d -->|"API key"| GM
@@ -71,7 +74,8 @@ flowchart TB
     Agent <-->|"tool calls /\nresults"| MCP
     T2 -->|"filters"| Adapter
     Adapter -->|"listings\n(mapped)"| T2
-    PyRealtor <-->|"search_area, country\nlistings"| REALTOR
+    ApifyActor <-->|"run + dataset"| ApifyPlatform
+    ApifyPlatform <-->|"scrape"| REALTOR
 ```
 
 | Component | Role |
@@ -80,11 +84,11 @@ flowchart TB
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
 | **MCP Server** | Exposes tools including `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
-| **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into pyRealtor calls; maps pyRealtor/REALTOR.CA output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
-| **pyRealtor** | Python package (`HousesFacade.search_save_houses`); fetches MLS data from REALTOR.CA for the given location (e.g. Vancouver). |
-| **REALTOR.CA** | External listing source (Canada); provides listing data consumed by pyRealtor. |
+| **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into the configured search backend; maps backend output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
+| **ApifyRealtorCaBackend** | Calls Apify actor `igolaizola/realtor-canada-scraper-ppe` for Canada rent/sale search. |
+| **REALTOR.CA** | External listing source (Canada); listing data scraped via Apify. |
 
-**Data flow (summary):** User ↔ Client ↔ Agent ↔ MCP. For search: `rental_search` → Adapter → pyRealtor ↔ REALTOR.CA; Adapter returns mapped listings to `rental_search` → Agent. `ask_user` and `simulate_viewing_request` do not call external services in this diagram (user input for `ask_user` is gathered via the Client/UI).
+**Data flow (summary):** User ↔ Client ↔ Agent ↔ MCP. For search: `rental_search` → Adapter → Apify (Canada) ↔ REALTOR.CA; Adapter returns mapped listings to `rental_search` → Agent. `ask_user` and `simulate_viewing_request` do not call external services in this diagram (user input for `ask_user` is gathered via the Client/UI).
 
 ### 2.1 Class Diagram
 
@@ -99,8 +103,8 @@ classDiagram
         +int? max_bathrooms
         +int? min_sqft
         +int? max_sqft
-        +float? rent_min
-        +float? rent_max
+        +float? price_min
+        +float? price_max
         +str location
         +str? listing_type
     }
@@ -151,8 +155,8 @@ classDiagram
         +int? max_bathrooms
         +int? min_sqft
         +int? max_sqft
-        +float? rent_min
-        +float? rent_max
+        +float? price_min
+        +float? price_max
     }
     ListingFilterCriteria ..> ProximityRule : optional proximity_rules
 
@@ -226,7 +230,8 @@ classDiagram
 |-------|--------|------------------------|
 | **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `ProximityRule`, `GeocodedReference`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
 | **Agent** | `agent.py` | `AgentState` (dataclass), `flow_instructions()`, `build_approval_choices()`, `selected_to_listings()` |
-| **Adapter** | `adapter.py` | `search(filters)`, `SearchBackendError` |
+| **Adapter** | `adapter.py` | `search(filters)` (thin wrapper over `get_search_backend()`), re-exports `SearchBackendError` |
+| **Backends** | `backends/` | `SearchBackend` (Protocol), `get_search_backend()`, `ApifyRealtorCaBackend`, `SearchBackendError` (defined in `backends/errors.py`) |
 | **Filtering** | `filtering.py` | `filter_listings(listings, criteria, sort_by, ascending, proximity_rules)` |
 | **Geocoding** | `geocoding.py` | `geocode_location()`, `geocode_proximity_references()` |
 | **Proximity** | `proximity.py` | `get_nearest_transit_station()`, `enrich_listings_with_proximity()` |
@@ -268,10 +273,10 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | `max_bathrooms` | number (integer) | No | Maximum number of bathrooms. Omit for no upper limit. |
 | `min_sqft` | number (integer) | No | Minimum square footage. Omit if not specified by user. |
 | `max_sqft` | number (integer) | No | Maximum square footage. Omit for no upper limit. |
-| `rent_min` | number | No | Minimum rent (CAD/month). |
-| `rent_max` | number | No | Maximum rent (CAD/month). At least one of `rent_min` or `rent_max` should be set if user gave a range. |
+| `price_min` | number | No | Minimum rent (CAD/month). |
+| `price_max` | number | No | Maximum rent (CAD/month). At least one of `price_min` or `price_max` should be set if user gave a range. |
 | `location` | string | Yes | Location string (e.g. city or area name). |
-| `listing_type` | string | No | Transaction type: `"for_rent"`, `"for_sale"`, or `"for_sale_or_rent"`. Default for rental assistant is `"for_rent"`; omit to use backend default. |
+| `listing_type` | string | No | Transaction type: `"for_rent"` or `"for_sale"`. Default `"for_rent"`. |
 
 **Example:**
 
@@ -281,8 +286,8 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
   "max_bedrooms": 3,
   "min_sqft": 800,
   "max_sqft": 1200,
-  "rent_min": 2500,
-  "rent_max": 3000,
+  "price_min": 2500,
+  "price_max": 3000,
   "location": "Vancouver",
   "listing_type": "for_rent"
 }
@@ -469,7 +474,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `listings` | array of [Listing](#42-listing-item-in-search-results) | Yes | Current list from last rental_search or filter_listings. The chat client derives this from message history; MCP clients must pass explicitly. |
-| `filters` | object | No | Optional criteria: `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, `rent_max`. All optional. |
+| `filters` | object | No | Optional criteria: `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `price_min`, `price_max`. All optional. |
 | `sort_by` | string | No | Attribute to sort by: `"price"`, `"bedrooms"`, `"bathrooms"`, `"sqft"`, `"address"`, `"id"`, `"title"`. |
 | `ascending` | boolean | No | Default `true`. If true, sort ascending (e.g. cheapest first); if false, descending. |
 
@@ -653,52 +658,32 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 3. **Handle errors** by throwing or returning a structured error to the MCP layer (so the tool can return a tool error, not an empty list).
 4. **Pagination:** Document whether the adapter returns first page only or aggregates multiple pages; document max results if capped.
 
-### Chosen backend (MVP): Realtor.ca via pyRealtor
+### Chosen backend (MVP): Realtor.ca via Apify
 
-**In scope for MVP:** [pyRealtor](https://pypi.org/project/pyRealtor/) — Python package (MIT) that fetches MLS listings from [REALTOR.CA](https://www.realtor.ca) for Canadian areas, including Vancouver. No per-result or platform fees; suitable for development and low-volume use. The adapter accepts [§4.1](#41-rental-search-filters-input-to-rental_search) filters, calls pyRealtor, and maps results to the [Listing](#42-listing-item-in-search-results) shape.
+**In scope for MVP:** [Apify](https://apify.com) actor [`igolaizola/realtor-canada-scraper-ppe`](https://apify.com/igolaizola/realtor-canada-scraper-ppe) — fetches MLS listings from [REALTOR.CA](https://www.realtor.ca) for Canadian areas (rent and sale). Requires `APIFY_TOKEN`. The adapter accepts [§4.1](#41-rental-search-filters-input-to-rental_search) filters, calls the actor, and maps results to the [Listing](#42-listing-item-in-search-results) shape.
 
 **Integration pattern:**
 
-- **Environment:** Use [Conda](https://docs.conda.io/) to create and activate the project environment. Conda env name: **`realtor_agent`** (e.g. `conda create -n realtor_agent python=3.10`; `conda activate realtor_agent`). Then install dependencies with pip within that environment.
-- **Install:** `pip install pyRealtor` (Python ≥3.6). Dependencies include `requests`, `pandas`, `lxml`, `openpyxl`.
-- **Entry point:** `pyRealtor.HousesFacade()`. Use `search_save_houses(search_area=<location>, country='Canada')` so that `search_area` is set from `filters["location"]` (e.g. `"Vancouver"`, `"Barrhaven"`). For ambiguous names, pass `country='Canada'`.
-- **Rate limiting:** REALTOR.CA may rate-limit or block IPs under heavy use. Use `search_save_houses(..., use_proxy=True)` if needed; the package supports a proxy option.
-- **Output:** The package writes data to Excel by default. The adapter should use any in-memory return value the facade exposes (e.g. DataFrame or list of records) if available; otherwise read from the saved file and map to [Listing](#42-listing-item-in-search-results). Map fields (id, address, price, bedrooms, sqft if present, listing URL) and set `source: "Realtor.ca"`. Handle missing optional fields (e.g. `sqft`).
-- **Rentals:** REALTOR.CA supports rental listings. If pyRealtor exposes a transaction-type or “for rent” parameter, the adapter should use it for rental-only results; otherwise filter or constrain results to rentals as the package allows.
-- **Pagination / limit:** Document adapter behaviour (e.g. single logical search; pyRealtor may have its own result limits—see package docs).
+- **Install:** `pip install apify-client` (see `requirements.txt`).
+- **Entry point:** `adapter.search(filters)` → `ApifyRealtorCaBackend` (`backends/apify_realtor_ca.py`).
+- **Actor input:** `operation` (`rent` / `buy`), `location`, beds/baths/price/sqft bounds, `maxItems` from `APIFY_MAX_ITEMS`.
+- **Output:** Dataset items mapped to Listing (`MlsNumber`, address, price, beds/baths, lat/lng, URL). `source: "Realtor.ca"`.
+- **Post-fetch filtering:** Re-apply structural criteria as a safety net.
+- **US expansion:** `get_search_backend()` / `SEARCH_MARKET=ca` seam; US not implemented yet.
 
-**Backend result columns (pyRealtor):** The pyRealtor backend returns a DataFrame (or Excel) with the following columns. The adapter uses these for **mapping** to the [Listing](#42-listing-item-in-search-results) shape and for **post-fetch filtering** when the backend does not support a filter (e.g. `rent_max`, `max_bedrooms`).
-
-| Column | Type / notes | Use for |
-|--------|----------------|--------|
-| **MLS** | string | Listing `id`. |
-| **Bedrooms** | number (or string; coerce to numeric) | Map to `bedrooms`; post-filter by `min_bedrooms`, `max_bedrooms`. |
-| **Bathrooms** | number (or string; coerce to numeric) | Post-filter by `min_bathrooms`, `max_bathrooms`. |
-| **Size** | string or number (e.g. sqft; may need parsing) | Map to `sqft` if present; post-filter by `min_sqft`, `max_sqft`. |
-| **Price** | number/string (for sale) | Post-filter by price range when `listing_type` is for_sale. |
-| **Rent** | number/string (for rent) | Map to `price` when Total Rent is absent; post-filter by `rent_min`, `rent_max`. |
-| **Total Rent** | number (for rent) | Prefer over Rent when present for `price` and filtering. |
-| **Address** | string | Map to `address`. |
-| **Description** | string | Use for `title` or description if no dedicated title. |
-| **Website** | string | Map to `url`. |
-| **Latitude**, **Longitude** | number | Optional; for mapping/proximity. |
-| **House Category**, **Ownership Category** | string | Optional metadata. |
-| **Open House**, **Ammenities**, **Nearby Ammenities**, **Stories** | string | Optional metadata. |
-| **Postal Code** | string | Optional; map to `postal_code`. |
-
-**Post-fetch filtering:** Apply `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, and `rent_max` on these columns when the backend does not support them as search parameters. Coerce numeric columns and handle missing or invalid values before filtering.
-
-**Terms:** Data is from REALTOR.CA (CREA). Use consistent with [REALTOR.CA terms of use](https://www.realtor.ca/terms-of-use); typically private, non-commercial use.
+**Terms:** Data is from REALTOR.CA (CREA). Use consistent with [REALTOR.CA terms of use](https://www.realtor.ca/terms-of-use); scraping may be subject to site terms.
 
 ---
 
-### Alternative (informational, not in MVP scope): Realtor.ca via Apify
+### Retired: pyRealtor
 
-**Out of scope for MVP.** Kept for reference if a hosted, pay-per-result backend is needed later.
+The previous MVP used [pyRealtor](https://pypi.org/project/pyRealtor/) directly against Realtor.ca’s unofficial search API. It has been removed due to reliability issues (bot protection). Do not reintroduce it.
 
-**Actor:** [Realtor.ca Property Search Scraper](https://apify.com/stealth_mode/realtor-property-search-scraper) (`stealth_mode/realtor-property-search-scraper`) on Apify. Scrapes Realtor.ca (Canada, including Vancouver rentals). **Billing:** Pay-per-result (~$3 per 1,000 results); no separate platform compute for this actor; Apify’s $5/month free credits apply.
+---
 
-**Integration (when used):** [Apify Python client](https://docs.apify.com/api/client/python) (`pip install apify-client`). Use `ApifyClient` with an API token (Apify Console → Integrations). Run actor with input `{ "urls": [...], "max_items_per_url": N, "ignore_url_failures": true }` (URLs built from filters). Sync run: `client.actor("stealth_mode/realtor-property-search-scraper").call(run_input=...)` then `client.dataset(run["defaultDatasetId"]).iterate_items()`. Map actor output (e.g. `id`, `property.address`, `property.price`, `building.bedrooms`, listing URL) to [Listing](#42-listing-item-in-search-results); set `source: "Realtor.ca"`.
+### Alternative (informational): Licensed MLS / DDF
+
+For production/ToS-safe access, consider CREA DDF or vendors such as Repliers (brokerage/vendor eligibility; monthly cost). Not used in this MVP.
 
 ---
 
@@ -706,7 +691,7 @@ The MCP server’s `rental_search` tool talks to a **single** rental backend (AP
 
 ### 7.1 State to maintain
 
-- **Parsed criteria:** `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `rent_min`, `rent_max`, `location`, `listing_type` (updated after optional geography clarification).
+- **Parsed criteria:** `min_bedrooms`, `max_bedrooms`, `min_bathrooms`, `max_bathrooms`, `min_sqft`, `max_sqft`, `price_min`, `price_max`, `location`, `listing_type` (updated after optional geography clarification).
 - **Viewing preference:** Free-text string from required `ask_user` (e.g. “weekday evenings 6–8pm”). Used when calling `simulate_viewing_request` to choose a `timeslot`.
 - **Shortlist:** The `listings` array from the last successful `rental_search` or `filter_listings` call.
 - **User details:** After approval step, collect once: `name`, `email`, `phone` (optional). Reuse for every `simulate_viewing_request` in that flow.
@@ -766,10 +751,10 @@ For implementers who want to validate inputs/outputs, below are minimal JSON Sch
     "max_bathrooms": { "type": "integer", "minimum": 0 },
     "min_sqft": { "type": "number", "minimum": 0 },
     "max_sqft": { "type": "number", "minimum": 0 },
-    "rent_min": { "type": "number", "minimum": 0 },
-    "rent_max": { "type": "number", "minimum": 0 },
+    "price_min": { "type": "number", "minimum": 0 },
+    "price_max": { "type": "number", "minimum": 0 },
     "location": { "type": "string", "minLength": 1 },
-    "listing_type": { "type": "string", "enum": ["for_rent", "for_sale", "for_sale_or_rent"] }
+    "listing_type": { "type": "string", "enum": ["for_rent", "for_sale"] }
   }
 }
 ```

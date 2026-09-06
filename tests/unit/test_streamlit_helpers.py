@@ -7,9 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
+from rental_search_agent.models import ProximityRule
 from rental_search_agent.streamlit_app import (
     PREF_KEYS,
-    _get_latest_search_listings,
+    _apply_proximity_filter_safeguard,
+    _build_map_data,
+    _listings_to_table_rows,
     _load_preferences_from_file,
     _preferences_block,
     _preferences_file,
@@ -135,47 +138,73 @@ class TestSavePreferencesToFile:
                     _save_preferences_to_file({"name": "X", "email": "x@x.com"})
                 assert not path.exists()
 
+class TestDisplayRankUsage:
+    """Regression tests for Sourcery finding: the Streamlit UI's local proximity
+    closest-first safeguard reorders/filters listings independently of the LLM, which
+    would desync the table/map numbering from the 'rank' the LLM uses for "listing N"
+    references unless the UI renders using each listing's preserved 'rank' field.
+    """
 
-class TestGetLatestSearchListings:
-    def test_empty_messages(self):
-        assert _get_latest_search_listings([]) == []
-
-    def test_no_tool_messages(self):
-        messages = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
+    def test_table_rows_use_rank_field_not_position(self):
+        # Listings deliberately out of rank order (as they'd be after a local resort).
+        listings = [
+            {"id": "b", "rank": 2, "address": "B St"},
+            {"id": "a", "rank": 1, "address": "A St"},
         ]
-        assert _get_latest_search_listings(messages) == []
+        rows = _listings_to_table_rows(listings)
+        assert rows[0]["rank"] == 2
+        assert rows[1]["rank"] == 1
 
-    def test_tool_message_with_listings(self):
-        listings = [{"id": "1", "address": "123 Main St", "price": 2500}]
-        messages = [
-            {"role": "tool", "content": json.dumps({"listings": listings})},
-        ]
-        result = _get_latest_search_listings(messages)
-        assert result == listings
+    def test_table_rows_fall_back_to_position_when_rank_missing(self):
+        listings = [{"id": "a", "address": "A St"}, {"id": "b", "address": "B St"}]
+        rows = _listings_to_table_rows(listings)
+        assert rows[0]["rank"] == 1
+        assert rows[1]["rank"] == 2
 
-    def test_most_recent_wins(self):
-        old_listings = [{"id": "old"}]
-        new_listings = [{"id": "new"}]
-        messages = [
-            {"role": "tool", "content": json.dumps({"listings": old_listings})},
-            {"role": "assistant", "content": "x"},
-            {"role": "tool", "content": json.dumps({"listings": new_listings})},
+    def test_map_labels_use_rank_field_not_position(self):
+        listings = [
+            {"id": "b", "rank": 2, "latitude": 49.28, "longitude": -123.12},
+            {"id": "a", "rank": 1, "latitude": 49.29, "longitude": -123.13},
         ]
-        result = _get_latest_search_listings(messages)
-        assert result == new_listings
+        points, _, _ = _build_map_data(listings)
+        assert points[0]["label"] == "2"
+        assert points[1]["label"] == "1"
 
-    def test_malformed_json_skipped(self):
-        messages = [
-            {"role": "tool", "content": "not json"},
-            {"role": "tool", "content": json.dumps({"listings": [{"id": "1"}]})},
+    def test_proximity_safeguard_preserves_rank_across_filter_roundtrip(self):
+        rule = ProximityRule(location="downtown", mode="drive", max_minutes=30)
+        listings = [
+            {
+                "id": "a",
+                "title": "A",
+                "url": "https://x.com/a",
+                "address": "1 A St",
+                "price": 2000,
+                "bedrooms": 1,
+                "rank": 1,
+                "proximity": {"downtown|drive": {"duration_min": 10, "distance_km": 5}},
+            },
+            {
+                "id": "b",
+                "title": "B",
+                "url": "https://x.com/b",
+                "address": "2 B St",
+                "price": 2200,
+                "bedrooms": 1,
+                "rank": 2,
+                "proximity": {"downtown|drive": {"duration_min": 20, "distance_km": 12}},
+            },
         ]
-        result = _get_latest_search_listings(messages)
-        assert result == [{"id": "1"}]
+        with patch(
+            "rental_search_agent.streamlit_app.parse_proximity_preferences",
+            return_value=[rule],
+        ):
+            result = _apply_proximity_filter_safeguard(listings, "30 min drive to downtown")
+        result_by_id = {lst["id"]: lst for lst in result}
+        assert result_by_id["a"]["rank"] == 1
+        assert result_by_id["b"]["rank"] == 2
 
-    def test_message_without_listings_skipped(self):
-        messages = [
-            {"role": "tool", "content": json.dumps({"answer": "yes"})},
-        ]
-        assert _get_latest_search_listings(messages) == []
+
+# Note: TestGetLatestSearchListings was removed — _get_latest_search_listings()
+# (parsing listings out of message history after the fact) was superseded by the
+# session-state-based display_list/master_list tracking introduced in the
+# proximity-handling work, and no longer exists in streamlit_app.py.

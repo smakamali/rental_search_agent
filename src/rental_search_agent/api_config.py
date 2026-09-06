@@ -82,7 +82,7 @@ def get_llm_client_and_model() -> tuple["OpenAI", str]:  # noqa: F821
             base_url=OPENROUTER_BASE_URL,
             default_headers={
                 "HTTP-Referer": "https://github.com/smakamali/rental_search_agent",
-                "X-Title": "Rental Search Assistant",
+                "X-Title": "Property Search Assistant",
             },
         )
     else:

@@ -39,7 +39,7 @@ from rental_search_agent.viewing_plan import (
 )
 
 mcp = FastMCP(
-    "Rental Search Assistant",
+    "Property Search Assistant",
     json_response=True,
 )
 
@@ -87,7 +87,7 @@ def filter_listings(
     """Narrow and/or sort search results. Pass the current list (e.g. from last rental_search or filter_listings or enrich_listings_with_proximity), filter criteria (optional), optional sort_by and ascending, and optional proximity_rules (from parse_proximity_preferences). When proximity_rules is set, listings must satisfy all rules (AND); unknown proximity keeps the listing. Returns listings and total_count in same shape as rental_search."""
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list of listing objects.")
-    criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "rent_min", "rent_max"}
+    criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "price_min", "price_max"}
     criteria_dict = {k: v for k, v in (filters or {}).items() if k in criteria_keys and v is not None}
     if not criteria_dict and not sort_by and not (proximity_rules and len(proximity_rules) > 0):
         raise ValueError("At least one filter criterion, sort_by, or proximity_rules is required.")

@@ -1,7 +1,5 @@
 """Reusable fixtures for rental_search_agent tests."""
 
-import pandas as pd
-
 from rental_search_agent.models import (
     Listing,
     ListingFilterCriteria,
@@ -102,39 +100,58 @@ def sample_filter_criteria(**kwargs) -> ListingFilterCriteria:
     return ListingFilterCriteria(**{k: v for k, v in kwargs.items() if v is not None})
 
 
-def mock_pyRealtor_row(
+def mock_apify_item(
     mls: str = "mls-001",
     address: str = "123 Main St",
     bedrooms: int = 2,
     bathrooms: float | None = 2.0,
     size: str | float | None = "1000 sqft",
-    rent: float | str = 2800,
-    total_rent: float | None = None,
-    website: str | None = "https://www.realtor.ca/listing/mls-001",
+    price: float = 2800,
+    price_display: str | None = None,
+    relative_url: str | None = None,
     description: str = "Nice apartment",
+    postal: str = "V6B 1A1",
+    lat: float | None = 49.28,
+    lon: float | None = -123.12,
+    building_type: str = "Apartment",
+    ownership: str = "Condominium",
+    parking_spaces: int | str | None = None,
+    parking_type: str | None = None,
     **kwargs,
-) -> pd.Series:
-    """Create a mock pandas Series mimicking pyRealtor output row."""
-    data = {
-        "MLS": mls,
-        "Address": address,
-        "Bedrooms": bedrooms,
-        "Bathrooms": bathrooms,
-        "Size": size,
-        "Rent": rent,
-        "Website": website,
-        "Description": description,
-        "Postal Code": "V6B 1A1",
-        "Latitude": 49.28,
-        "Longitude": -123.12,
-        "House Category": "Apartment",
-        "Ownership Category": "Condominium",
-        "Ammenities": "Balcony",
-        "Nearby Ammenities": "",
-        "Open House": "",
-        "Stories": 1,
+) -> dict:
+    """Create a mock igolaizola / Realtor.ca-style dataset item."""
+    if relative_url is None:
+        relative_url = f"/real-estate/123/{mls}"
+    if price_display is None:
+        price_display = f"${int(price):,}"
+    property_obj: dict = {
+        "Price": price_display,
+        "PriceUnformattedValue": price,
+        "Address": {
+            "AddressText": address,
+            "PostalCode": postal,
+            "Latitude": lat,
+            "Longitude": lon,
+        },
     }
-    if total_rent is not None:
-        data["Total Rent"] = total_rent
-    data.update(kwargs)
-    return pd.Series(data)
+    if parking_spaces is not None:
+        property_obj["ParkingSpaceTotal"] = parking_spaces
+    if parking_type is not None:
+        property_obj["ParkingType"] = parking_type
+    item = {
+        "Id": mls,
+        "MlsNumber": mls,
+        "RelativeURLEn": relative_url,
+        "PublicRemarks": description,
+        "OwnershipType": ownership,
+        "Property": property_obj,
+        "Building": {
+            "Bedrooms": bedrooms,
+            "BathroomTotal": bathrooms,
+            "SizeInterior": size,
+            "Type": building_type,
+            "Stories": 1,
+        },
+    }
+    item.update(kwargs)
+    return item

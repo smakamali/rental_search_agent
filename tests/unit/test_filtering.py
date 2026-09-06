@@ -36,7 +36,7 @@ class TestListingMatches:
         assert _listing_matches(sample_listing(bathrooms=1.5), criteria) is False
 
     def test_rent_min_max_match(self):
-        criteria = ListingFilterCriteria(rent_min=2000, rent_max=3000)
+        criteria = ListingFilterCriteria(price_min=2000, price_max=3000)
         assert _listing_matches(sample_listing(price=2500), criteria) is True
         assert _listing_matches(sample_listing(price=1500), criteria) is False
         assert _listing_matches(sample_listing(price=3500), criteria) is False
