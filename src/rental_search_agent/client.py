@@ -1121,24 +1121,44 @@ def _infer_last_sort_by(messages: list[dict]) -> str | None:
     return last_sort_by
 
 
+def _infer_display_source_from_messages(messages: list[dict]) -> str | None:
+    """Replay tool_calls chronologically to find which display-setting tool
+    (rental_search/filter_listings/enrich_listings_with_proximity/score_listings_by_preferences)
+    most recently determined the displayed listing set, mirroring _infer_last_sort_by.
+
+    Unlike checking only the very last completed tool call, this is robust to a
+    display-irrelevant tool (e.g. ask_user, summarize_listings, parse_proximity_preferences)
+    running *after* the last display-setting tool — which happens routinely once a model
+    stops batching multiple tool calls into one LLM turn (each ask_user pause is then its own
+    turn whose only tool call is ask_user itself). Without this, the UI would lose track of
+    which listings to show as soon as any non-display tool became the most recent call.
+    """
+    display_source: str | None = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name == "rental_search":
+                display_source = "search"
+            elif name == "filter_listings":
+                display_source = "filter"
+            elif name == "enrich_listings_with_proximity":
+                display_source = "enrich"
+            elif name == "score_listings_by_preferences":
+                display_source = "score"
+    return display_source
+
+
 def _listing_state_from_messages(messages: list[dict]) -> dict | None:
     """Build listing_state (display_list, master_list, display_source, last_sort_by) from message history."""
     display_list = _get_current_listings_from_messages(messages)
     master_list = _get_enriched_master_from_messages(messages) or _get_master_listings_from_messages(messages)
-    last_tool = _last_completed_tool_name(messages)
-    display_source = None
-    if last_tool == "rental_search":
-        display_source = "search"
-    elif last_tool == "filter_listings":
-        display_source = "filter"
-    elif last_tool == "enrich_listings_with_proximity":
-        display_source = "enrich"
-    elif last_tool == "score_listings_by_preferences":
-        display_source = "score"
     return {
         "display_list": display_list or [],
         "master_list": master_list or [],
-        "display_source": display_source,
+        "display_source": _infer_display_source_from_messages(messages),
         "last_sort_by": _infer_last_sort_by(messages),
     }
 
@@ -1442,10 +1462,21 @@ def run_agent_step_events(
                 if name == "ask_user":
                     payload = json.loads(result_str)
                     if payload.get("request_user_input"):
+                        # ask_user is very often the *only* tool call in its round (models that
+                        # don't batch multiple tool calls per turn always pause here alone), in
+                        # which case the local `display_source` above is still None even though
+                        # a display-setting tool ran in an earlier round/turn of this same
+                        # conversation. Fall back to replaying full message history so the table/
+                        # map don't vanish across an ask_user pause. See _infer_display_source_from_messages.
+                        resolved_display_source = (
+                            display_source
+                            if display_source is not None
+                            else _infer_display_source_from_messages(messages)
+                        )
                         listing_state = {
                             "display_list": current_listings or [],
                             "master_list": enriched_master or master_listings or [],
-                            "display_source": display_source,
+                            "display_source": resolved_display_source,
                             "last_sort_by": last_sort_by,
                         }
                         ask_user_payload = {
@@ -1467,9 +1498,15 @@ def run_agent_step_events(
                 "master_list": enriched_master or master_listings or [],
                 # Carry forward the display_source from a previous iteration when no
                 # display-changing tool ran in this batch (e.g. summarize_listings after
-                # rental_search), so the streamlit gate still sees the correct source.
+                # rental_search), so the streamlit gate still sees the correct source. Falls
+                # back to replaying full message history (not just this generator call's
+                # in-memory last_listing_state) so the *first* round of a fresh invocation —
+                # e.g. right after an ask_user answer, whose next tool call may itself be
+                # non-display (another ask_user, summarize_listings, etc.) — still resolves
+                # correctly instead of resetting to None. See _infer_display_source_from_messages.
                 "display_source": display_source if display_source is not None
-                                  else (last_listing_state.get("display_source") if last_listing_state else None),
+                                  else (last_listing_state.get("display_source") if last_listing_state
+                                        else _infer_display_source_from_messages(messages)),
                 # last_sort_by is already carried forward incrementally above (seeded from
                 # history, mutated only by order-defining tools), so no extra fallback needed here.
                 "last_sort_by": last_sort_by,
