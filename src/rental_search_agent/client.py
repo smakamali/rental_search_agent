@@ -528,19 +528,37 @@ def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | No
 
 
 def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
-    """Return listings from the most recent enrich_listings_with_proximity result.
+    """Return listings from the most recent "master" enrichment result: whichever of
+    enrich_listings_with_proximity or score_listings_by_preferences ran more recently.
 
-    Ignores enrich results that predate the latest rental_search so a new search
-    does not keep using proximity data from a previous search.
+    Both tools are treated as equally valid bases for filter_listings/score_listings_by_preferences
+    to build on, mirroring the in-batch tracking in run_agent_step_events where
+    score_listings_by_preferences's output also becomes the new enriched_master (see the
+    `enriched_master = scored_list` assignment there). Without this, a later LLM round-trip
+    that recomputes enriched_master purely from history (this function) would only ever look
+    at enrich_listings_with_proximity and silently drop any semantic_score computed by a
+    score_listings_by_preferences call that ran since — causing filter_listings/sort to lose
+    match scores after the fact (see PR discussion / bug: "match scores disappear after
+    filtering").
+
+    Since semantic_score and proximity are both real Listing model fields, whichever of the two
+    tools ran later will have inherited the other's data via the model round-trip in its own
+    filter_source lookup, so picking the more recent one is safe regardless of call order.
+
+    Ignores results that predate the latest rental_search so a new search does not keep using
+    proximity/score data from a previous search.
     """
     enrich_idx = _tool_result_message_index(messages, "enrich_listings_with_proximity")
-    if enrich_idx is None:
+    score_idx = _tool_result_message_index(messages, "score_listings_by_preferences")
+    candidates = [i for i in (enrich_idx, score_idx) if i is not None]
+    if not candidates:
         return []
+    latest_idx = max(candidates)
     search_idx = _tool_result_message_index(messages, "rental_search")
-    if search_idx is not None and search_idx > enrich_idx:
+    if search_idx is not None and search_idx > latest_idx:
         return []
     try:
-        data = json.loads(messages[enrich_idx].get("content") or "{}")
+        data = json.loads(messages[latest_idx].get("content") or "{}")
     except (json.JSONDecodeError, TypeError):
         return []
     if isinstance(data, dict) and isinstance(data.get("listings"), list):

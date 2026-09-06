@@ -8,6 +8,7 @@ import pytest
 from rental_search_agent.client import (
     TOOLS,
     _get_current_listings_from_messages,
+    _get_enriched_master_from_messages,
     _get_viewing_plan_from_messages,
     _infer_last_sort_by,
     _listing_state_from_messages,
@@ -417,6 +418,85 @@ class TestGetCurrentListingsFromMessages:
         ]
         result = _get_current_listings_from_messages(messages)
         assert result == listings
+
+
+def _tool_result_msg(tc_id: str, content: dict) -> dict:
+    return {"role": "tool", "tool_call_id": tc_id, "content": json.dumps(content)}
+
+
+class TestGetEnrichedMasterFromMessages:
+    """Regression tests for the bug where match scores disappeared after filtering/sorting
+    in a later LLM round-trip: _get_enriched_master_from_messages previously only looked at
+    the most recent enrich_listings_with_proximity result, ignoring score_listings_by_preferences.
+    When score ran in one LLM round-trip and filter_listings (or another score/filter) ran in a
+    *later* round-trip, this function recomputes "enriched_master" purely from message history
+    (see run_agent_step_events / _listing_state_from_messages) and must treat
+    score_listings_by_preferences as an equally valid master source, or the recomputed master
+    reverts to the pre-scoring enrich result and silently drops every semantic_score.
+    """
+
+    def test_returns_enrich_result_when_only_enrich_ran(self):
+        enriched = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}}]
+        messages = [
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == enriched
+
+    def test_returns_score_result_when_only_score_ran(self):
+        scored = [{"id": "a", "semantic_score": 0.8}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == scored
+
+    def test_score_after_enrich_in_separate_round_trip_wins(self):
+        """Core regression: enrich then score in a LATER round-trip. Previously this
+        returned the stale pre-score enrich listings (semantic_score=None); it must now
+        return the scored listings."""
+        enriched = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}, "semantic_score": None}]
+        scored = [{"id": "a", "proximity": {"transit|walk": {"duration_min": 3}}, "semantic_score": 0.75}]
+        messages = [
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+        ]
+        result = _get_enriched_master_from_messages(messages)
+        assert result == scored
+        assert result[0]["semantic_score"] == 0.75
+
+    def test_enrich_after_score_in_separate_round_trip_wins(self):
+        """Reverse order: score then enrich later must return the enrich result (which, in
+        the real system, inherits semantic_score via the Listing model round-trip)."""
+        scored = [{"id": "a", "semantic_score": 0.75}]
+        enriched = [{"id": "a", "semantic_score": 0.75, "proximity": {"transit|walk": {"duration_min": 3}}}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {}, tc_id="e1"),
+            _tool_result_msg("e1", {"listings": enriched}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == enriched
+
+    def test_new_rental_search_resets_master(self):
+        scored = [{"id": "a", "semantic_score": 0.75}]
+        new_search = [{"id": "b"}]
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}, tc_id="s1"),
+            _tool_result_msg("s1", {"listings": scored}),
+            _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": new_search}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == []
+
+    def test_no_enrich_or_score_returns_empty(self):
+        messages = [
+            _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": [{"id": "a"}]}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == []
 
 
 class TestGetViewingPlanFromMessages:
