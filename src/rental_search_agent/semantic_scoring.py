@@ -50,10 +50,15 @@ def _proximity_to_text(proximity: dict[str, Any]) -> str:
 def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     """Build a single text representation of a listing for embedding.
 
-    Includes: title, address, structured line (bedrooms, bathrooms, sqft, price),
-    description, amenities, nearby_amenities, house_category. Optionally includes
-    proximity text when the listing has a non-empty proximity dict (e.g. after
-    enrich_listings_with_proximity).
+    Includes: title, address, structured line (bedrooms, bathrooms, sqft, price, lot
+    size), description, amenities, nearby_amenities, house_category, property_category,
+    open_house. Optionally includes proximity text when the listing has a non-empty
+    proximity dict (e.g. after enrich_listings_with_proximity).
+
+    Deliberately excludes fields that aren't preference-relevant text (photo_url,
+    video_url, agent_name/agent_phone/brokerage_name, listing_age_display/hours,
+    price_change_display) — including them here would add noise to the embedding
+    without helping match a listing to a user's stated preferences.
     """
     title = (_get_listing_attr(listing, "title") or "").strip()
     address = (_get_listing_attr(listing, "address") or "").strip()
@@ -65,6 +70,9 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     ammenities = (_get_listing_attr(listing, "ammenities") or "").strip()
     nearby_ammenities = (_get_listing_attr(listing, "nearby_ammenities") or "").strip()
     house_category = (_get_listing_attr(listing, "house_category") or "").strip()
+    property_category = (_get_listing_attr(listing, "property_category") or "").strip()
+    lot_size = (_get_listing_attr(listing, "lot_size") or "").strip()
+    open_house = (_get_listing_attr(listing, "open_house") or "").strip()
     parking_spaces = _get_listing_attr(listing, "parking_spaces")
     parking_type = (_get_listing_attr(listing, "parking_type") or "").strip()
     listing_type = _get_listing_attr(listing, "listing_type")
@@ -90,6 +98,8 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
         if parking_type:
             parking_desc += f" ({parking_type})"
         structured_parts.append(parking_desc)
+    if lot_size:
+        structured_parts.append(f"lot size {lot_size}")
     structured_line = ", ".join(structured_parts) if structured_parts else ""
 
     proximity = _get_listing_attr(listing, "proximity")
@@ -110,6 +120,10 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
         blob_parts.append(nearby_ammenities)
     if house_category:
         blob_parts.append(house_category)
+    if property_category:
+        blob_parts.append(property_category)
+    if open_house:
+        blob_parts.append(f"Open house: {open_house}")
     if proximity_text:
         blob_parts.append(proximity_text)
 

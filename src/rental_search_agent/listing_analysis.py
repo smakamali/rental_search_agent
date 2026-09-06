@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any, Optional, Union
 
+from rental_search_agent.agent import current_date_context
 from rental_search_agent.api_config import get_llm_client_and_model
 from rental_search_agent.models import Listing
 from rental_search_agent.semantic_scoring import (
@@ -23,6 +24,9 @@ _ANALYSIS_SYSTEM_PROMPT = (
     "'key_matches' (array of short strings: aspects of the listing that satisfy the user's preferences), "
     "and 'key_gaps' (array of short strings: aspects the user wants but the listing lacks or does not mention). "
     "Be concise and factual; only include points clearly supported by the listing text or clearly missing. "
+    "If the listing text mentions an open house date, compare it to today's date (given above the listing): "
+    "only list it as a key match if the date is today or in the future; if it has already passed, do not mention "
+    "it as a match, and do not treat a missing/past open house as a gap unless the user specifically asked for one. "
     "Return only the JSON object with no explanation."
 )
 
@@ -69,9 +73,13 @@ def analyze_listing_against_preferences(
         logger.warning("Listing analysis embedding failed: %s", e)
         raise ValueError(f"Failed to compute match score: {e}") from e
 
-    # Key matches / key gaps via LLM
+    # Key matches / key gaps via LLM. Today's date is injected here (LLM-prompt text
+    # only) so the model can reason about stale info like a past open house date —
+    # it is deliberately NOT added to `blob` above, since blob also feeds embed_texts()
+    # for match_score_pct, and embeddings can't do date arithmetic; adding the date
+    # there would just be inert noise in the similarity vector.
     client, model = get_llm_client_and_model()
-    user_content = f"Listing:\n{blob}\n\nUser preferences:\n{preferences_text}"
+    user_content = f"{current_date_context().strip()}\n\nListing:\n{blob}\n\nUser preferences:\n{preferences_text}"
     ctx = (conversation_context or "").strip()
     if ctx:
         user_content += f"\n\nAdditional context from conversation:\n{ctx}"

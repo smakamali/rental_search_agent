@@ -88,6 +88,24 @@ class Listing(BaseModel):
     postal_code: Optional[str] = Field(None, description="Postal code.")
     parking_spaces: Optional[int] = Field(None, ge=0, description="Total number of parking spaces.")
     parking_type: Optional[str] = Field(None, description="Parking type(s), e.g. 'Garage', 'Underground'.")
+    property_category: Optional[str] = Field(
+        None,
+        description="Broader property category (e.g. 'Single Family', 'Vacant Land', 'Multi-Family'), distinct "
+        "from house_category (specific building format, e.g. 'Apartment', 'House').",
+    )
+    lot_size: Optional[str] = Field(None, description="Lot/land size as reported by the source (e.g. '0.25 ac', '50 x 100 ft').")
+    listing_age_display: Optional[str] = Field(None, description="Human-readable listing freshness, e.g. '18 hours ago'.")
+    listing_age_hours: Optional[float] = Field(
+        None, ge=0, description="Approximate hours since the listing was published, parsed from listing_age_display. Smaller = newer."
+    )
+    photo_url: Optional[str] = Field(None, description="URL of the primary listing photo.")
+    video_url: Optional[str] = Field(None, description="URL of a video or virtual tour, when available.")
+    agent_name: Optional[str] = Field(None, description="Name of the (primary, when multiple) listing agent.")
+    agent_phone: Optional[str] = Field(None, description="Phone number of the listing agent.")
+    brokerage_name: Optional[str] = Field(None, description="Name of the listing brokerage/office.")
+    price_change_display: Optional[str] = Field(
+        None, description="Recent price-change signal as reported by the source (e.g. a price-reduced date/time label), when available."
+    )
     listing_type: Optional[Literal["for_rent", "for_sale"]] = Field(
         None, description="Transaction type this listing was fetched as: for_rent or for_sale."
     )
