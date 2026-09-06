@@ -36,6 +36,7 @@ from rental_search_agent.models import (
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
+from rental_search_agent.semantic_scoring import search_criteria_to_text_blob as do_search_criteria_to_text_blob
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -507,6 +508,82 @@ def _get_master_listings_from_messages(messages: list[dict]) -> list[dict]:
     return _get_listings_from_tool(messages, "rental_search")
 
 
+_STRUCTURAL_CRITERIA_KEYS = (
+    "min_bedrooms",
+    "max_bedrooms",
+    "min_bathrooms",
+    "max_bathrooms",
+    "min_sqft",
+    "max_sqft",
+    "price_min",
+    "price_max",
+)
+
+
+def _get_active_search_criteria_from_messages(messages: list[dict]) -> dict:
+    """Reconstruct the structural search criteria currently in effect, for building the
+    search_criteria_to_text_blob() query used by score_listings_by_preferences /
+    analyze_listing_preferences.
+
+    location and listing_type always come from the most recent rental_search call, since
+    filter_listings never carries either (it only narrows bed/bath/sqft/price). Bed/bath/sqft/
+    price start from that same rental_search call's own filters, then get overlaid — per
+    field, not wholesale — by any later filter_listings call(s) that explicitly supply that
+    field.
+
+    This is a field-level merge rather than "the latest filter_listings call is fully
+    authoritative", because not every filter_listings call re-supplies every structural
+    criterion: e.g. the proximity step (4p) calls filter_listings with only proximity_rules/
+    sort_by, no bed/bath/price args at all. Treating that call as wholesale-authoritative
+    would wrongly drop the original search's bedrooms/price from the reconstructed criteria
+    (and thus from the query blob) even though the underlying listings are still bounded by
+    them. A field only changes when a later call actually supplies a (non-None) value for it.
+    """
+    criteria: dict = {"location": None, "listing_type": None}
+    for key in _STRUCTURAL_CRITERIA_KEYS:
+        criteria[key] = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name not in ("rental_search", "filter_listings"):
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            if name == "rental_search":
+                # A new search fully resets everything, including location/listing_type.
+                filters = args.get("filters") or {}
+                criteria = {"location": filters.get("location"), "listing_type": filters.get("listing_type")}
+                for key in _STRUCTURAL_CRITERIA_KEYS:
+                    criteria[key] = filters.get(key)
+            else:
+                for key in _STRUCTURAL_CRITERIA_KEYS:
+                    if args.get(key) is not None:
+                        criteria[key] = args[key]
+    return criteria
+
+
+def _get_parsed_proximity_rules_from_messages(messages: list[dict]) -> list[dict]:
+    """Return the rules list from the most recent parse_proximity_preferences result, for
+    building the search_criteria_to_text_blob() query's proximity phrase. Unlike
+    _get_enriched_master_from_messages, this is not reset by a new rental_search — proximity
+    preferences are a user-level setting, not tied to a particular search.
+    """
+    idx = _tool_result_message_index(messages, "parse_proximity_preferences")
+    if idx is None:
+        return []
+    try:
+        data = json.loads(messages[idx].get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    rules = data.get("rules") if isinstance(data, dict) else None
+    return rules if isinstance(rules, list) else []
+
+
 def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | None:
     """Return the index of the most recent tool result message for tool_name, or None."""
     id_to_name: dict[str, str] = {}
@@ -652,8 +729,17 @@ def run_tool(
     current_listings: list[dict] | None = None,
     current_plan_entries: list[dict] | None = None,
     available_slots: list[dict] | None = None,
+    search_criteria: dict | None = None,
+    proximity_rules_for_query: list[dict] | None = None,
 ) -> str:
-    """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected."""
+    """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected.
+
+    search_criteria and proximity_rules_for_query (both typically from
+    _get_active_search_criteria_from_messages / _get_parsed_proximity_rules_from_messages)
+    are used only by score_listings_by_preferences and analyze_listing_preferences, to build
+    a search_criteria_to_text_blob() embedding query that mirrors listing_to_text_blob's
+    structure instead of embedding the bare preferences text alone.
+    """
     if name == "ask_user":
         # Return payload for client to show UI and supply real result
         return json.dumps({
@@ -752,12 +838,19 @@ def run_tool(
         preferences_text = (arguments.get("preferences_text") or "").strip()
         if not preferences_text:
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        # Build the embedding query in the same "shape" as listing_to_text_blob (bed/bath/
+        # sqft/price/location + qualitative preferences + proximity) rather than embedding
+        # the bare preferences text alone — see search_criteria_to_text_blob for rationale.
+        query_blob = do_search_criteria_to_text_blob(
+            search_criteria or {},
+            preferences_text,
+            proximity_rules_for_query,
+        )
+        extra_query_text = (arguments.get("query_text") or "").strip()
+        if extra_query_text:
+            query_blob = f"{query_blob} {extra_query_text}".strip()
         try:
-            scored = do_score_listings_by_preferences(
-                listings,
-                preferences_text,
-                query_text=(arguments.get("query_text") or "").strip() or None,
-            )
+            scored = do_score_listings_by_preferences(listings, query_blob)
             return json.dumps({"listings": _with_display_rank(scored), "total_count": len(scored)})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -768,8 +861,25 @@ def run_tool(
             return json.dumps({"error": "listing is required and must be a non-empty object."})
         if not preferences_text:
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
+        # preferences_text (whatever the LLM passed, which per this tool's description may
+        # already combine qualitative + proximity text) still drives the narrative
+        # key_matches/key_gaps unchanged. For the numeric match_score_pct, fold in the
+        # deterministic structural criteria (bed/bath/sqft/price/location) the same way
+        # score_listings_by_preferences does, for table/Analyze-card consistency — but don't
+        # also inject proximity_rules_for_query here, since preferences_text may already
+        # contain a proximity phrase per this tool's own contract and doubling it up would
+        # skew the score.
+        query_blob = do_search_criteria_to_text_blob(
+            search_criteria or {},
+            preferences_text,
+            proximity_rules=None,
+        )
         try:
-            result = do_analyze_listing_against_preferences(listing, preferences_text)
+            result = do_analyze_listing_against_preferences(
+                listing,
+                preferences_text,
+                score_query_text=query_blob or None,
+            )
             return json.dumps(result)
         except ValueError as e:
             return json.dumps({"error": str(e)})
@@ -1206,6 +1316,11 @@ def run_agent_step_events(
             last_sort_by: str | None = _infer_last_sort_by(messages)
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
+            # Used to build the search_criteria_to_text_blob() embedding query for
+            # score_listings_by_preferences / analyze_listing_preferences (see run_tool),
+            # so scoring queries a listing-blob-shaped text instead of bare preferences.
+            active_search_criteria = _get_active_search_criteria_from_messages(messages)
+            parsed_proximity_rules = _get_parsed_proximity_rules_from_messages(messages)
             for tc in tool_calls_raw:
                 name = tc["name"]
                 seq += 1
@@ -1238,6 +1353,8 @@ def run_agent_step_events(
                     current_listings=filter_source,
                     current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
                     available_slots=available_slots if name == "modify_viewing_plan" else None,
+                    search_criteria=active_search_criteria,
+                    proximity_rules_for_query=parsed_proximity_rules,
                 )
                 ok = True
                 try:
@@ -1259,6 +1376,14 @@ def run_agent_step_events(
                             current_listings = master_listings
                             display_source = "search"
                             last_sort_by = None
+                            # A new search resets everything, mirroring
+                            # _get_active_search_criteria_from_messages.
+                            search_filters = args.get("filters") or {}
+                            active_search_criteria = {
+                                "location": search_filters.get("location"),
+                                "listing_type": search_filters.get("listing_type"),
+                                **{k: search_filters.get(k) for k in _STRUCTURAL_CRITERIA_KEYS},
+                            }
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -1277,6 +1402,13 @@ def run_agent_step_events(
                             current_listings = data["listings"]
                             display_source = "filter"
                             last_sort_by = args.get("sort_by")
+                            # Field-level merge, not wholesale replacement — a filter_listings
+                            # call that only supplies e.g. proximity_rules/sort_by must not
+                            # blank out bedrooms/price already set by rental_search. Mirrors
+                            # _get_active_search_criteria_from_messages.
+                            for k in _STRUCTURAL_CRITERIA_KEYS:
+                                if args.get(k) is not None:
+                                    active_search_criteria[k] = args[k]
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "score_listings_by_preferences":
@@ -1288,6 +1420,13 @@ def run_agent_step_events(
                             enriched_master = scored_list
                             display_source = "score"
                             last_sort_by = "semantic_score"
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if name == "parse_proximity_preferences":
+                    try:
+                        data = json.loads(result_str)
+                        if isinstance(data, dict) and isinstance(data.get("rules"), list):
+                            parsed_proximity_rules = data["rules"]
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):

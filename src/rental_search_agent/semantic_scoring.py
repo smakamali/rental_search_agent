@@ -130,6 +130,138 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     return " ".join(blob_parts)
 
 
+def _format_count_range(min_val: Optional[float], max_val: Optional[float], unit: str) -> str:
+    """Phrase a min/max numeric range (bedrooms, bathrooms, sqft) for the search-criteria
+    query blob. unit should already be pluralized (e.g. 'bedrooms').
+
+    Mirrors listing_to_text_blob's own single-value phrasing (e.g. "3 bedrooms") when
+    min == max, since an exact request (e.g. "3 bed" -> min_bedrooms=max_bedrooms=3) is the
+    most common case and this keeps the query's phrasing lexically identical to how a
+    matching listing states its own count, rather than diverging into range language.
+    Returns "" when both bounds are None.
+    """
+    if min_val is None and max_val is None:
+        return ""
+
+    def _fmt(v: float) -> str:
+        return f"{v:g}"
+
+    if min_val is not None and max_val is not None:
+        if min_val == max_val:
+            return f"{_fmt(min_val)} {unit}"
+        return f"{_fmt(min_val)}-{_fmt(max_val)} {unit}"
+    if max_val is not None:
+        return f"up to {_fmt(max_val)} {unit}"
+    return f"at least {_fmt(min_val)} {unit}"
+
+
+def _format_price_range(price_min: Optional[float], price_max: Optional[float], listing_type: Optional[str]) -> str:
+    """Phrase a price_min/price_max range for the search-criteria query blob, using the same
+    for_rent/for_sale suffix convention as listing_to_text_blob's structured_line ("$X/month"
+    vs "$X list price") so the query and listing sides phrase price the same way.
+    """
+    if price_min is None and price_max is None:
+        return ""
+
+    def _fmt(v: float) -> str:
+        return f"${int(v)}"
+
+    if price_min is not None and price_max is not None and price_min != price_max:
+        amount = f"{_fmt(price_min)}-{_fmt(price_max)}"
+    elif price_max is not None and price_min is None:
+        amount = f"up to {_fmt(price_max)}"
+    elif price_min is not None and price_max is None:
+        amount = f"at least {_fmt(price_min)}"
+    else:
+        amount = _fmt(price_min if price_min is not None else price_max)
+
+    if listing_type == "for_sale":
+        return f"{amount} list price"
+    return f"{amount}/month"
+
+
+def _proximity_rules_to_query_text(proximity_rules: Optional[List[dict]]) -> str:
+    """Phrase parsed ProximityRule dicts (location, mode, max_minutes) as query text, by
+    reusing _proximity_to_text() with each rule's max_minutes standing in for duration_min.
+    This gives the query the exact same phrasing a listing would use for its own real
+    measured distance (e.g. "5 min walk to nearest transit station"), for close lexical
+    alignment between the two sides of the comparison. Returns "" for no/empty rules.
+    """
+    if not proximity_rules:
+        return ""
+    synthetic_proximity: dict[str, Any] = {}
+    for rule in proximity_rules:
+        if not isinstance(rule, dict):
+            continue
+        location = (rule.get("location") or "").strip()
+        max_minutes = rule.get("max_minutes")
+        if not location or max_minutes is None:
+            continue
+        mode = (rule.get("mode") or "").strip()
+        synthetic_proximity[f"{location}|{mode}"] = {"duration_min": max_minutes}
+    return _proximity_to_text(synthetic_proximity)
+
+
+def search_criteria_to_text_blob(
+    criteria: dict[str, Any],
+    qualitative_preferences: str = "",
+    proximity_rules: Optional[List[dict]] = None,
+) -> str:
+    """Build a single text representation of the user's current search request, for use as
+    the embedding QUERY in score_listings_by_preferences / analyze_listing_against_preferences.
+
+    Deliberately mirrors listing_to_text_blob()'s field choices and phrasing conventions
+    (bedroom/bathroom/sqft counts, $-price with the same for_rent/for_sale suffix, and
+    proximity phrased via the same _proximity_to_text() helper) so the query text is
+    constructed in the same "shape" as the listing text it's compared against, rather than
+    being just the bare qualitative_preferences string.
+
+    Args:
+        criteria: dict with keys min_bedrooms, max_bedrooms, min_bathrooms, max_bathrooms,
+            min_sqft, max_sqft, price_min, price_max, location, listing_type — the same
+            shape as RentalSearchFilters/ListingFilterCriteria plus location/listing_type.
+        qualitative_preferences: user's qualitative preferences text (e.g. "balcony, parking,
+            storage"), included as-is (like a listing's description/amenities text).
+        proximity_rules: optional list of parsed ProximityRule dicts (location, mode,
+            max_minutes), phrased via _proximity_rules_to_query_text.
+
+    Returns:
+        Joined blob string: location, structured bed/bath/sqft/price line, qualitative
+        preferences, proximity text — omitting any part with no data.
+    """
+    location = (criteria.get("location") or "").strip()
+    listing_type = criteria.get("listing_type")
+
+    structured_parts: List[str] = []
+    beds = _format_count_range(criteria.get("min_bedrooms"), criteria.get("max_bedrooms"), "bedrooms")
+    if beds:
+        structured_parts.append(beds)
+    baths = _format_count_range(criteria.get("min_bathrooms"), criteria.get("max_bathrooms"), "bathrooms")
+    if baths:
+        structured_parts.append(baths)
+    sqft = _format_count_range(criteria.get("min_sqft"), criteria.get("max_sqft"), "sqft")
+    if sqft:
+        structured_parts.append(sqft)
+    price = _format_price_range(criteria.get("price_min"), criteria.get("price_max"), listing_type)
+    if price:
+        structured_parts.append(price)
+    structured_line = ", ".join(structured_parts)
+
+    proximity_text = _proximity_rules_to_query_text(proximity_rules)
+    qualitative_preferences = (qualitative_preferences or "").strip()
+
+    blob_parts: List[str] = []
+    if location:
+        blob_parts.append(location)
+    if structured_line:
+        blob_parts.append(structured_line)
+    if qualitative_preferences:
+        blob_parts.append(qualitative_preferences)
+    if proximity_text:
+        blob_parts.append(proximity_text)
+    return " ".join(blob_parts)
+
+
 def embed_texts(texts: List[str], model: Optional[str] = None) -> List[List[float]]:
     """Embed a list of texts using OpenAI or OpenRouter Embeddings API. Returns list of vectors."""
     if not texts:

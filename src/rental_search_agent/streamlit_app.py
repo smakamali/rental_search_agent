@@ -18,11 +18,18 @@ except ImportError:
 
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
-from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step_events
+from rental_search_agent.client import (
+    _get_active_search_criteria_from_messages,
+    _get_parsed_proximity_rules_from_messages,
+    _load_env_file,
+    _make_llm_client,
+    run_agent_step_events,
+)
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
 from rental_search_agent.proximity_parser import parse_proximity_preferences
+from rental_search_agent.semantic_scoring import search_criteria_to_text_blob
 
 # Keys for stored user preferences (viewing time, name, email, phone, proximity, listing preferences)
 PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
@@ -783,19 +790,25 @@ def main() -> None:
                     if analyze_listing_id not in analysis_result:
                         with st.spinner("Analyzing listing..."):
                             try:
+                                # Build the same listing-blob-shaped embedding query
+                                # score_listings_by_preferences uses for the table's
+                                # semantic_score/"Match score" column (bed/bath/sqft/price/
+                                # location + qualitative preferences + proximity), reusing the
+                                # same message-history reconstruction so both surfaces stay
+                                # consistent for the same listing/preferences. preferences_text
+                                # above (which also folds in proximity) still drives the
+                                # narrative key_matches/key_gaps, unaffected by this override.
+                                chat_messages = st.session_state.get("messages") or []
+                                search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                                proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                                score_query_text = search_criteria_to_text_blob(
+                                    search_criteria, qualitative, proximity_rules
+                                )
                                 result = analyze_listing_against_preferences(
                                     analyze_listing,
                                     preferences_text,
                                     conversation_context=conversation_context or None,
-                                    # Score using qualitative preferences only (matching the
-                                    # query text score_listings_by_preferences uses for the
-                                    # table's semantic_score/"Match score" column), even
-                                    # though preferences_text above also folds in proximity
-                                    # for the narrative key_matches/key_gaps. Otherwise this
-                                    # card's "Match score" and the table's "Match score"
-                                    # column are computed from different embedding queries
-                                    # and can show different numbers for the same listing.
-                                    score_query_text=qualitative or None,
+                                    score_query_text=score_query_text or None,
                                 )
                                 st.session_state.setdefault("analysis_result", {})[
                                     analyze_listing_id
