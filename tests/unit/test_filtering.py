@@ -137,3 +137,27 @@ class TestFilterListings:
             listings, ListingFilterCriteria(), sort_by="invalid", ascending=True
         )
         assert result.total_count == 2
+
+    def test_semantic_score_survives_filtering(self):
+        # Regression test: filter_listings previously dropped semantic_score because it
+        # round-trips each listing through Listing.model_validate()/model_dump(), and
+        # semantic_score wasn't a real Listing field — so any filter_listings call after
+        # score_listings_by_preferences silently erased the match score in the UI.
+        listings = [
+            sample_listing(id="1", bedrooms=2, semantic_score=0.3),
+            sample_listing(id="2", bedrooms=2, semantic_score=0.9),
+        ]
+        result = filter_listings(listings, ListingFilterCriteria(min_bedrooms=1))
+        scores_by_id = {l.id: l.semantic_score for l in result.listings}
+        assert scores_by_id == {"1": 0.3, "2": 0.9}
+
+    def test_sort_by_semantic_score_descending(self):
+        listings = [
+            sample_listing(id="1", semantic_score=0.3),
+            sample_listing(id="2", semantic_score=0.9),
+            sample_listing(id="3", semantic_score=0.6),
+        ]
+        result = filter_listings(
+            listings, ListingFilterCriteria(), sort_by="semantic_score", ascending=False
+        )
+        assert [l.id for l in result.listings] == ["2", "3", "1"]

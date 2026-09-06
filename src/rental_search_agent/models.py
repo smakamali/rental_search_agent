@@ -113,6 +113,16 @@ class Listing(BaseModel):
         None,
         description="Per-rule proximity data: keys are rule identifiers, values are { distance_km, duration_min } or null for unknown.",
     )
+    semantic_score: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Cosine-similarity match score (0-1) vs. the user's qualitative preferences, "
+        "set by score_listings_by_preferences. A real field (not just a display-only dict key) so "
+        "it survives round-trips through Listing.model_validate() in filter_listings/"
+        "enrich_listings_with_proximity — without this, filtering/enriching after scoring would "
+        "silently drop the score.",
+    )
 
     def to_short_label(self, index: Optional[int] = None) -> str:
         """Short label for approval choices, e.g. '[1] 123 Main St — $2,800/month'."""

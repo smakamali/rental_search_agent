@@ -259,6 +259,22 @@ class TestEnrichListingsWithProximity:
         assert prox[key]["distance_km"] == pytest.approx(2.0)
         assert prox[key]["duration_min"] == pytest.approx(5.0)
 
+    def test_semantic_score_survives_enrichment(self):
+        # Regression test: enrich_listings_with_proximity round-trips each listing through
+        # Listing.model_validate()/model_dump() (see proximity.py), which previously dropped
+        # semantic_score since it wasn't a real Listing field.
+        listing = _sample_listing_dict()
+        listing["semantic_score"] = 0.87
+        rules = [ProximityRule(location="Downtown Vancouver", mode="drive", max_minutes=30)]
+        geocoded = [GeocodedReference(location="Downtown Vancouver", lat=49.28, lon=-123.1, display_name="Downtown Vancouver")]
+
+        payload = _distance_matrix_ok_response(dist_m=2000, dur_s=300)
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                result = enrich_listings_with_proximity([listing], rules, geocoded)
+
+        assert result[0]["semantic_score"] == 0.87
+
     def test_listing_without_coords_gets_none_proximity(self):
         listing = _sample_listing_dict()
         listing["latitude"] = None
