@@ -298,6 +298,17 @@ def _format_days_on_market(listing: dict) -> str:
         return "—"
 
 
+def _format_bedrooms(listing: dict) -> str:
+    """Bedroom count for display, preserving the source's den notation (e.g. '2 + 1' for 2
+    bedrooms + a den) when bedrooms_display is set, so the den isn't silently dropped from
+    the UI even though it's excluded from the numeric bedrooms count used for filtering."""
+    display = listing.get("bedrooms_display")
+    if display:
+        return str(display)
+    bedrooms = listing.get("bedrooms")
+    return str(bedrooms) if bedrooms is not None else "—"
+
+
 def _format_match_score(listing: dict) -> str:
     """Match score display: semantic_score (0-1) as a whole percentage, or '—' when
     scoring hasn't run yet (e.g. no qualitative preferences set)."""
@@ -332,7 +343,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "photo": listing.get("photo_url") or "",
             "address": listing.get("address") or "—",
             "type": listing.get("house_category") or "—",
-            "bed": listing.get("bedrooms") if listing.get("bedrooms") is not None else "—",
+            "bed": _format_bedrooms(listing),
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
             "price": price,
@@ -384,7 +395,7 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[3]:
             st.write(listing.get("house_category") or "—")
         with row_cols[4]:
-            st.write(listing.get("bedrooms") if listing.get("bedrooms") is not None else "—")
+            st.write(_format_bedrooms(listing))
         with row_cols[5]:
             st.write(f"{float(bath):g}" if bath is not None else "—")
         with row_cols[6]:

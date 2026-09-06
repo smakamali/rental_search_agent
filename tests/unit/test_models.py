@@ -129,6 +129,20 @@ class TestListing:
                 semantic_score=-0.1,
             )
 
+    def test_has_den_and_bedrooms_display_default_to_none(self):
+        l = Listing(id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2)
+        assert l.has_den is None
+        assert l.bedrooms_display is None
+
+    def test_has_den_and_bedrooms_display_round_trip_through_model_validate(self):
+        d = Listing(
+            id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2,
+            has_den=True, bedrooms_display="2 + 1",
+        ).model_dump()
+        validated = Listing.model_validate(d)
+        assert validated.has_den is True
+        assert validated.bedrooms_display == "2 + 1"
+
     def test_to_short_label_without_index(self):
         l = Listing(
             id="mls-1",

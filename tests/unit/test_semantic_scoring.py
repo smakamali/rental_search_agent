@@ -63,6 +63,26 @@ class TestListingToTextBlobParking:
         assert "parking" not in blob.lower()
 
 
+class TestListingToTextBlobDen:
+    def test_has_den_appends_den_to_bedroom_phrase(self):
+        listing = _listing(bedrooms=2, has_den=True)
+        blob = listing_to_text_blob(listing)
+        assert "2 bedrooms + den" in blob
+
+    def test_no_den_omits_den_phrase(self):
+        listing = _listing(bedrooms=2, has_den=False)
+        blob = listing_to_text_blob(listing)
+        assert "2 bedrooms" in blob
+        assert "den" not in blob.lower()
+
+    def test_has_den_none_omits_den_phrase(self):
+        # has_den defaults to None for hand-built/older Listing dicts without the field set.
+        listing = _listing(bedrooms=2)
+        blob = listing_to_text_blob(listing)
+        assert "2 bedrooms" in blob
+        assert "den" not in blob.lower()
+
+
 class TestFormatCountRange:
     def test_exact_value_mirrors_listing_single_value_phrasing(self):
         # min == max is the common case (e.g. "3 bed" -> min_bedrooms=max_bedrooms=3) and

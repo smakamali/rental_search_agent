@@ -14,6 +14,7 @@ from rental_search_agent.streamlit_app import (
     _apply_proximity_filter_safeguard,
     _build_map_data,
     _escape_markdown_link_text,
+    _format_bedrooms,
     _format_days_on_market,
     _format_match_score,
     _listings_to_table_rows,
@@ -241,6 +242,19 @@ class TestTableRowShape:
         assert rows[0]["days_on_market"] == "—"
         assert rows[0]["match_score"] == "—"
 
+    def test_bed_column_shows_den_notation_when_present(self):
+        # Regression: the actor reports a den as e.g. "2 + 1" bedrooms (2 bedrooms + a
+        # den); the table must surface that notation rather than just the plain bedrooms
+        # count (which deliberately excludes the den — see _format_bedrooms).
+        rows = _listings_to_table_rows(
+            [{"id": "a", "address": "A St", "rank": 1, "bedrooms": 2, "bedrooms_display": "2 + 1"}]
+        )
+        assert rows[0]["bed"] == "2 + 1"
+
+    def test_bed_column_falls_back_to_plain_bedrooms(self):
+        rows = _listings_to_table_rows([{"id": "a", "address": "A St", "rank": 1, "bedrooms": 3}])
+        assert rows[0]["bed"] == "3"
+
 
 class TestFormatDaysOnMarket:
     def test_rounds_hours_to_days(self):
@@ -251,6 +265,20 @@ class TestFormatDaysOnMarket:
 
     def test_non_numeric_hours_returns_dash(self):
         assert _format_days_on_market({"listing_age_hours": "n/a"}) == "—"
+
+
+class TestFormatBedrooms:
+    def test_prefers_bedrooms_display_when_present(self):
+        assert _format_bedrooms({"bedrooms": 2, "bedrooms_display": "2 + 1"}) == "2 + 1"
+
+    def test_falls_back_to_plain_bedrooms(self):
+        assert _format_bedrooms({"bedrooms": 3}) == "3"
+
+    def test_missing_bedrooms_returns_dash(self):
+        assert _format_bedrooms({}) == "—"
+
+    def test_empty_bedrooms_display_falls_back_to_plain_bedrooms(self):
+        assert _format_bedrooms({"bedrooms": 3, "bedrooms_display": ""}) == "3"
 
 
 class TestFormatMatchScore:

@@ -72,7 +72,20 @@ class Listing(BaseModel):
     address: str = Field(..., description="Human-readable address or area.")
     price: float = Field(..., ge=0, description="Rent/price as number (for sorting).")
     price_display: Optional[str] = Field(None, description="Formatted rent/price for presentation (e.g. $2,500/month).")
-    bedrooms: int = Field(..., ge=0, description="Number of bedrooms.")
+    bedrooms: int = Field(
+        ..., ge=0, description="Number of real bedrooms only — excludes a den (see has_den/bedrooms_display)."
+    )
+    has_den: Optional[bool] = Field(
+        None,
+        description="Whether the listing has a den (a flex room, not a real bedroom) in addition to bedrooms — "
+        "parsed from the source reporting a bedroom count like '2 + 1' (2 bedrooms + 1 den). A den is deliberately "
+        "excluded from the numeric bedrooms count above so bedroom-count filtering/sorting isn't inflated by it.",
+    )
+    bedrooms_display: Optional[str] = Field(
+        None,
+        description="Source's own bedroom notation when it includes a den, e.g. '2 + 1' (2 bedrooms + 1 den). "
+        "None when the source reports a plain bedroom count with no den — display bedrooms itself in that case.",
+    )
     sqft: Optional[float] = Field(None, ge=0, description="Square footage.")
     source: Optional[str] = Field(None, description="Source name for display.")
     bathrooms: Optional[float] = Field(None, ge=0, description="Number of bathrooms.")

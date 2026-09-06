@@ -50,10 +50,10 @@ def _proximity_to_text(proximity: dict[str, Any]) -> str:
 def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     """Build a single text representation of a listing for embedding.
 
-    Includes: title, address, structured line (bedrooms, bathrooms, sqft, price, lot
-    size), description, amenities, nearby_amenities, house_category, property_category,
-    open_house. Optionally includes proximity text when the listing has a non-empty
-    proximity dict (e.g. after enrich_listings_with_proximity).
+    Includes: title, address, structured line (bedrooms + den when present, bathrooms,
+    sqft, price, lot size), description, amenities, nearby_amenities, house_category,
+    property_category, open_house. Optionally includes proximity text when the listing has
+    a non-empty proximity dict (e.g. after enrich_listings_with_proximity).
 
     Deliberately excludes fields that aren't preference-relevant text (photo_url,
     video_url, agent_name/agent_phone/brokerage_name, listing_age_display/hours,
@@ -63,6 +63,7 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
     title = (_get_listing_attr(listing, "title") or "").strip()
     address = (_get_listing_attr(listing, "address") or "").strip()
     bedrooms = _get_listing_attr(listing, "bedrooms")
+    has_den = _get_listing_attr(listing, "has_den")
     bathrooms = _get_listing_attr(listing, "bathrooms")
     sqft = _get_listing_attr(listing, "sqft")
     price = _get_listing_attr(listing, "price")
@@ -79,7 +80,13 @@ def listing_to_text_blob(listing: Union[Listing, dict]) -> str:
 
     structured_parts: List[str] = []
     if bedrooms is not None:
-        structured_parts.append(f"{int(bedrooms)} bedrooms")
+        # has_den is surfaced here (rather than left as a separate, easy-to-miss field) so
+        # a "must have den" qualitative preference or LLM analysis prompt can match it via
+        # this same text, exactly like any other amenity mentioned in the blob.
+        bed_phrase = f"{int(bedrooms)} bedrooms"
+        if has_den:
+            bed_phrase += " + den"
+        structured_parts.append(bed_phrase)
     if bathrooms is not None:
         b = bathrooms
         structured_parts.append(f"{b} bathrooms" if b == int(b) else f"{b} bathrooms")

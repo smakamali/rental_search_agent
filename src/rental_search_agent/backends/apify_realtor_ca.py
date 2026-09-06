@@ -86,6 +86,29 @@ def _parse_relative_age_hours(text: Optional[str]) -> Optional[float]:
     return round(quantity * hours_per_unit, 1)
 
 
+# The actor reports a den by joining it onto the bedroom count as e.g. "1 + 1" or "2 + 1"
+# (primary bedrooms + den), rather than a separate structured field — confirmed live: the
+# same "N + M" notation realtor.ca itself shows as "Bedrooms Above Grade: N" / "Below Grade:
+# M". Naively coercing a string like "1 + 1" straight to int (stripping non-digit chars)
+# silently mangles it to 11 bedrooms, so this must be parsed before any numeric coercion.
+_DEN_BEDROOMS_RE = re.compile(r"^\s*(\d+)\s*\+\s*(\d+)\s*$")
+
+
+def _parse_bedrooms(raw: Any) -> tuple[int, int]:
+    """Parse the actor's raw Bedrooms value into (bedrooms, den_count).
+
+    bedrooms is the PRIMARY bedroom count only — a den is a flex room, not a real bedroom,
+    and must not inflate the numeric count used for display-sort/filtering by bedrooms.
+    den_count is the extra "+N" room count reported alongside it (typically 1), or 0 when
+    the source just reports a plain number with no den.
+    """
+    text = str(raw or "").strip()
+    match = _DEN_BEDROOMS_RE.match(text)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return _coerce_int(raw, default=0), 0
+
+
 def _run_field(run: Any, snake_name: str, camel_name: str) -> Any:
     """Read a field off an Apify actor Run result.
 
@@ -195,13 +218,14 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
     )
     price_display = _format_price_display(price_raw, price, listing_type)
 
-    bedrooms = _coerce_int(
+    bedrooms, den_count = _parse_bedrooms(
         building.get("Bedrooms")
         or building.get("BedroomsTotal")
         or item.get("Bedrooms")
-        or item.get("BedroomsTotal"),
-        default=0,
+        or item.get("BedroomsTotal")
     )
+    has_den = den_count > 0
+    bedrooms_display = f"{bedrooms} + {den_count}" if has_den else None
     bathrooms = _coerce_float(
         building.get("BathroomTotal")
         or building.get("Bathrooms")
@@ -317,6 +341,8 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
         price=price,
         price_display=price_display,
         bedrooms=bedrooms,
+        has_den=has_den,
+        bedrooms_display=bedrooms_display,
         sqft=sqft,
         source="Realtor.ca",
         bathrooms=bathrooms,
