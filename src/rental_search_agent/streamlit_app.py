@@ -787,6 +787,15 @@ def main() -> None:
                                     analyze_listing,
                                     preferences_text,
                                     conversation_context=conversation_context or None,
+                                    # Score using qualitative preferences only (matching the
+                                    # query text score_listings_by_preferences uses for the
+                                    # table's semantic_score/"Match score" column), even
+                                    # though preferences_text above also folds in proximity
+                                    # for the narrative key_matches/key_gaps. Otherwise this
+                                    # card's "Match score" and the table's "Match score"
+                                    # column are computed from different embedding queries
+                                    # and can show different numbers for the same listing.
+                                    score_query_text=qualitative or None,
                                 )
                                 st.session_state.setdefault("analysis_result", {})[
                                     analyze_listing_id

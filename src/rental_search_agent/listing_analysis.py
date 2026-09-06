@@ -35,19 +35,31 @@ def analyze_listing_against_preferences(
     listing: Union[Listing, dict[str, Any]],
     preferences_text: str,
     conversation_context: Optional[str] = None,
+    score_query_text: Optional[str] = None,
 ) -> dict[str, Any]:
     """Analyze one listing against user preferences.
 
     Uses the full listing blob (title, address, description, amenities, etc.) for both
-    the semantic match score and the LLM-generated key matches/gaps. The match score
-    is computed only from preferences_text and the listing blob; conversation_context
-    is optional and used only for the LLM key_matches/key_gaps output.
+    the semantic match score and the LLM-generated key matches/gaps. conversation_context
+    is optional and used only for the LLM key_matches/key_gaps output, never for the
+    numeric match score.
 
     Args:
         listing: One listing as dict or Listing model.
-        preferences_text: User's qualitative preferences (e.g. balcony, parking, gym).
+        preferences_text: User's preferences, used as the LLM prompt's narrative input for
+            key_matches/key_gaps (may combine qualitative and proximity preferences, e.g.
+            "balcony, parking\n\nProximity: 5 min walk to transit"). Also used as the
+            embedding query for match_score_pct unless score_query_text is given.
         conversation_context: Optional summary or excerpt of the conversation; used only
             in the LLM prompt for key_matches/key_gaps, not for the numeric match score.
+        score_query_text: Optional. When given, used instead of preferences_text as the
+            embedding query for match_score_pct. Callers that combine qualitative and
+            proximity preferences into one preferences_text string (for a richer narrative)
+            should pass just the qualitative portion here, matching the query text
+            score_listings_by_preferences uses for the table's semantic_score — otherwise
+            the two "Match score" numbers shown in the UI are computed from different query
+            text and can diverge for the same listing/preferences even though both are
+            labeled the same way.
 
     Returns:
         Dict with: match_score_pct (int 0-100), key_matches (list[str]), key_gaps (list[str]).
@@ -58,6 +70,7 @@ def analyze_listing_against_preferences(
     preferences_text = (preferences_text or "").strip()
     if not preferences_text:
         raise ValueError("preferences_text is required and must be non-empty.")
+    score_text = (score_query_text or "").strip() or preferences_text
 
     blob = listing_to_text_blob(listing)
     if not blob.strip():
@@ -65,7 +78,7 @@ def analyze_listing_against_preferences(
 
     # Match score via embeddings + cosine similarity
     try:
-        pref_emb, listing_emb = embed_texts([preferences_text, blob])
+        pref_emb, listing_emb = embed_texts([score_text, blob])
         sim = _cosine_similarity(pref_emb, listing_emb)
         sim = max(0.0, min(1.0, sim))
         match_score_pct = round(sim * 100)
