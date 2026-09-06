@@ -137,6 +137,8 @@ def _init_session_state() -> None:
         st.session_state["master_list"] = []
     if "display_source" not in st.session_state:
         st.session_state["display_source"] = None
+    if "last_sort_by" not in st.session_state:
+        st.session_state["last_sort_by"] = None
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
@@ -225,6 +227,21 @@ def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
         key=lambda item: item.get("semantic_score") if isinstance(item, dict) and item.get("semantic_score") is not None else -1,
         reverse=True,
     )
+
+
+def _escape_markdown_link_text(text: str) -> str:
+    """Escape characters that would let untrusted text break out of a markdown link
+    label — e.g. "[label](url)" — and inject a second, attacker-controlled link.
+
+    Security-review/Bugbot finding: the Analyze expander builds a markdown link whose
+    *label* is the listing's scraped MLS id (f"[{id}]({url})"); a crafted id containing
+    "](attacker-url)[" would close the intended label early and open a new link, so the
+    text a user sees as the MLS number could actually navigate elsewhere. Backslash-
+    escaping "[", "]", and "\\" itself (the characters CommonMark treats as link-label
+    delimiters) neutralizes this while leaving normal MLS ids (plain alphanumeric)
+    unchanged.
+    """
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
 def _render_clickable_photo(photo_url: str, listing_url: str, width: int) -> None:
@@ -677,6 +694,7 @@ def _render_ask_form(pending: dict) -> None:
                         # Always replace, including empty lists (zero-result search/filter).
                         st.session_state["display_list"] = listing_state.get("display_list", [])
                         st.session_state["display_source"] = listing_state.get("display_source")
+                        st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
                     if "master_list" in listing_state:
                         st.session_state["master_list"] = listing_state.get("master_list") or []
                 if payload is not None:
@@ -719,7 +737,13 @@ def main() -> None:
         # Default display sort: rank by match score (semantic_score) when available, so
         # the best qualitative matches surface first in both the table and the map. This
         # is display-only (see _apply_default_match_score_sort docstring re: 'rank').
-        listings = _apply_default_match_score_sort(listings)
+        # Bugbot regression guard: only apply this fallback when no *explicit* non-score
+        # sort is currently active (e.g. the agent just ran filter_listings with
+        # sort_by="price"/"proximity"/etc.) — otherwise this would silently clobber that
+        # explicit sort and desync the table from what the agent told the user it did.
+        last_sort_by = st.session_state.get("last_sort_by")
+        if last_sort_by is None or last_sort_by == "semantic_score":
+            listings = _apply_default_match_score_sort(listings)
         if listings:
             with st.expander("Search results table", expanded=True):
                 _render_results_table(listings)
@@ -789,7 +813,8 @@ def main() -> None:
                                 _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
                                 detail_bits = []
                                 if analyze_listing.get("id") and analyze_listing.get("url"):
-                                    detail_bits.append(f"**MLS:** [{analyze_listing['id']}]({analyze_listing['url']})")
+                                    mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
+                                    detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
                                 if analyze_listing.get("property_category"):
                                     detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
                                 if analyze_listing.get("lot_size"):
@@ -860,6 +885,7 @@ def main() -> None:
                     # Always replace, including empty lists (zero-result search/filter).
                     st.session_state["display_list"] = listing_state.get("display_list", [])
                     st.session_state["display_source"] = listing_state.get("display_source")
+                    st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
                 if "master_list" in listing_state:
                     st.session_state["master_list"] = listing_state.get("master_list") or []
             if payload is not None:

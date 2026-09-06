@@ -13,6 +13,7 @@ from rental_search_agent.streamlit_app import (
     _apply_default_match_score_sort,
     _apply_proximity_filter_safeguard,
     _build_map_data,
+    _escape_markdown_link_text,
     _format_days_on_market,
     _format_match_score,
     _listings_to_table_rows,
@@ -261,6 +262,25 @@ class TestFormatMatchScore:
 
     def test_non_numeric_score_returns_dash(self):
         assert _format_match_score({"semantic_score": "n/a"}) == "—"
+
+
+class TestEscapeMarkdownLinkText:
+    """Security-review regression: the Analyze expander builds a markdown link whose
+    label is a scraped MLS id (f"[{id}](url)"); a crafted id must not be able to close
+    the label early and inject a second, attacker-controlled link."""
+
+    def test_plain_id_unchanged(self):
+        assert _escape_markdown_link_text("R3160716") == "R3160716"
+
+    def test_escapes_brackets_that_would_break_out_of_label(self):
+        malicious = "1234](https://attacker.example)[click me"
+        escaped = _escape_markdown_link_text(malicious)
+        assert "]" not in escaped.replace("\\]", "")
+        assert "[" not in escaped.replace("\\[", "")
+        assert escaped == "1234\\](https://attacker.example)\\[click me"
+
+    def test_escapes_backslash(self):
+        assert _escape_markdown_link_text("a\\b") == "a\\\\b"
 
 
 class TestApplyDefaultMatchScoreSort:

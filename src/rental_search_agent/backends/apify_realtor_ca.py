@@ -279,6 +279,15 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
 
     alt_url = item.get("AlternateURL")
     video_url = str(alt_url.get("VideoLink") or "").strip() or None if isinstance(alt_url, dict) else None
+    # Video/virtual-tour links can legitimately point at various third-party providers
+    # (unlike photo_url/url, there's no single trusted host to allowlist here), so instead
+    # require a well-formed https:// URL with a real hostname — this is scraped, third-party
+    # data rendered as a clickable markdown link in the UI, and must not allow dangerous
+    # schemes (e.g. "javascript:", "data:") or malformed values through.
+    if video_url:
+        parsed_video = urlparse(video_url)
+        if parsed_video.scheme != "https" or not parsed_video.hostname:
+            video_url = None
 
     # Individual is a list of listing agents (sometimes co-listed); take the first as the
     # primary contact. No usable email is present in this payload — only an internal

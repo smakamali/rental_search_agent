@@ -6,8 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from rental_search_agent.client import (
+    TOOLS,
     _get_current_listings_from_messages,
     _get_viewing_plan_from_messages,
+    _infer_last_sort_by,
+    _listing_state_from_messages,
     _with_display_rank,
     run_tool,
 )
@@ -19,6 +22,71 @@ from tests.fixtures.sample_data import (
     sample_listings,
     sample_listings_with_coords,
 )
+
+
+def _assistant_tool_call_msg(name: str, arguments: dict | None = None, tc_id: str = "call_1") -> dict:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": tc_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments or {})}}
+        ],
+    }
+
+
+class TestInferLastSortBy:
+    """Regression tests for the Bugbot finding that the UI's default match-score sort
+    was silently overriding an agent's explicit non-score sort_by (e.g. price/proximity),
+    since the UI had no signal for whether an explicit sort was already active."""
+
+    def test_no_tool_calls_returns_none(self):
+        assert _infer_last_sort_by([{"role": "user", "content": "hi"}]) is None
+
+    def test_filter_listings_sort_by_is_tracked(self):
+        messages = [_assistant_tool_call_msg("filter_listings", {"sort_by": "price"})]
+        assert _infer_last_sort_by(messages) == "price"
+
+    def test_filter_listings_without_sort_by_resets_to_none(self):
+        messages = [
+            _assistant_tool_call_msg("filter_listings", {"sort_by": "price"}),
+            _assistant_tool_call_msg("filter_listings", {"min_bedrooms": 2}),
+        ]
+        assert _infer_last_sort_by(messages) is None
+
+    def test_score_listings_by_preferences_implies_semantic_score(self):
+        messages = [_assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"})]
+        assert _infer_last_sort_by(messages) == "semantic_score"
+
+    def test_rental_search_resets_to_none(self):
+        messages = [
+            _assistant_tool_call_msg("filter_listings", {"sort_by": "price"}),
+            _assistant_tool_call_msg("rental_search", {"min_bedrooms": 2, "location": "Vancouver"}),
+        ]
+        assert _infer_last_sort_by(messages) is None
+
+    def test_enrich_does_not_change_sort(self):
+        # enrich_listings_with_proximity does not reorder listings, so it must not
+        # clobber a previously-active explicit sort.
+        messages = [
+            _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}),
+            _assistant_tool_call_msg("enrich_listings_with_proximity", {"rules": [], "geocoded_refs": []}),
+        ]
+        assert _infer_last_sort_by(messages) == "semantic_score"
+
+    def test_listing_state_from_messages_includes_last_sort_by(self):
+        messages = [_assistant_tool_call_msg("filter_listings", {"sort_by": "proximity"})]
+        state = _listing_state_from_messages(messages)
+        assert state["last_sort_by"] == "proximity"
+
+
+class TestFilterListingsToolSchema:
+    def test_sort_by_enum_includes_listing_age_hours(self):
+        # Regression test (Bugbot finding): flow instructions and filtering.SORTABLE_ATTRS
+        # both support sorting by listing_age_hours, but the tool schema exposed to the
+        # LLM previously omitted it from the enum, making the documented sort unreachable.
+        filter_tool = next(t for t in TOOLS if t["function"]["name"] == "filter_listings")
+        sort_by_enum = filter_tool["function"]["parameters"]["properties"]["sort_by"]["enum"]
+        assert "listing_age_hours" in sort_by_enum
 
 
 class TestWithDisplayRank:

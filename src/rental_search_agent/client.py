@@ -186,7 +186,7 @@ TOOLS = [
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
                     "price_min": {"type": "number", "minimum": 0, "description": "Minimum price (CAD/month for rent; list price for sale)."},
                     "price_max": {"type": "number", "minimum": 0, "description": "Maximum price (CAD/month for rent; list price for sale)."},
-                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Omit for no sort."},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity, listing_age_hours). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Use 'listing_age_hours' with ascending=true to show newest first. Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
@@ -959,8 +959,42 @@ def _make_llm_client() -> tuple[OpenAI, str]:
 logger = logging.getLogger(__name__)
 
 
+def _infer_last_sort_by(messages: list[dict]) -> str | None:
+    """Replay tool_calls chronologically to determine the sort_by that currently governs
+    display order, mirroring the live tracking in run_agent_step_events. Used to reconstruct
+    listing_state on turns where no tool ran this step (see _listing_state_from_messages).
+
+    Returns: the explicit sort_by from the most recent filter_listings call; "semantic_score"
+    if the most recent order-defining tool was score_listings_by_preferences (whose output is
+    always sorted by score descending); or None after a fresh rental_search or when no
+    order-defining tool has run yet. enrich_listings_with_proximity does not reorder listings,
+    so it leaves the current value unchanged. Consumers (streamlit_app._apply_default_match_score_sort
+    call site) use this to avoid silently overriding an explicit non-score sort (e.g. "price",
+    "proximity") the agent just applied, per the Bugbot finding that the UI's default
+    match-score sort was clobbering explicit sorts.
+    """
+    last_sort_by: str | None = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name == "rental_search":
+                last_sort_by = None
+            elif name == "score_listings_by_preferences":
+                last_sort_by = "semantic_score"
+            elif name == "filter_listings":
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                last_sort_by = args.get("sort_by")
+    return last_sort_by
+
+
 def _listing_state_from_messages(messages: list[dict]) -> dict | None:
-    """Build listing_state (display_list, master_list, display_source) from message history."""
+    """Build listing_state (display_list, master_list, display_source, last_sort_by) from message history."""
     display_list = _get_current_listings_from_messages(messages)
     master_list = _get_enriched_master_from_messages(messages) or _get_master_listings_from_messages(messages)
     last_tool = _last_completed_tool_name(messages)
@@ -973,7 +1007,12 @@ def _listing_state_from_messages(messages: list[dict]) -> dict | None:
         display_source = "enrich"
     elif last_tool == "score_listings_by_preferences":
         display_source = "score"
-    return {"display_list": display_list or [], "master_list": master_list or [], "display_source": display_source}
+    return {
+        "display_list": display_list or [],
+        "master_list": master_list or [],
+        "display_source": display_source,
+        "last_sort_by": _infer_last_sort_by(messages),
+    }
 
 
 def _stream_llm_call(client: OpenAI, model: str, messages: list[dict]) -> Iterator[dict]:
@@ -1143,6 +1182,10 @@ def run_agent_step_events(
             master_listings = _get_master_listings_from_messages(messages)
             enriched_master = _get_enriched_master_from_messages(messages)
             display_source: str | None = None
+            # Reflects the sort_by that currently governs display order, carried forward
+            # from prior turns' history (see _infer_last_sort_by) so the UI's default
+            # match-score sort knows whether an explicit non-score sort is already active.
+            last_sort_by: str | None = _infer_last_sort_by(messages)
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
             for tc in tool_calls_raw:
@@ -1197,6 +1240,7 @@ def run_agent_step_events(
                             master_listings = data["listings"]
                             current_listings = master_listings
                             display_source = "search"
+                            last_sort_by = None
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -1214,6 +1258,7 @@ def run_agent_step_events(
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             current_listings = data["listings"]
                             display_source = "filter"
+                            last_sort_by = args.get("sort_by")
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "score_listings_by_preferences":
@@ -1224,6 +1269,7 @@ def run_agent_step_events(
                             current_listings = scored_list
                             enriched_master = scored_list
                             display_source = "score"
+                            last_sort_by = "semantic_score"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):
@@ -1243,6 +1289,7 @@ def run_agent_step_events(
                             "display_list": current_listings or [],
                             "master_list": enriched_master or master_listings or [],
                             "display_source": display_source,
+                            "last_sort_by": last_sort_by,
                         }
                         ask_user_payload = {
                             "tool_call_id": tc["id"],
@@ -1266,6 +1313,9 @@ def run_agent_step_events(
                 # rental_search), so the streamlit gate still sees the correct source.
                 "display_source": display_source if display_source is not None
                                   else (last_listing_state.get("display_source") if last_listing_state else None),
+                # last_sort_by is already carried forward incrementally above (seeded from
+                # history, mutated only by order-defining tools), so no extra fallback needed here.
+                "last_sort_by": last_sort_by,
             }
             messages = messages + [assistant_msg] + tool_results
             continue
