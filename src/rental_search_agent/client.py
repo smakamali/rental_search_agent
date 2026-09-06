@@ -7,13 +7,19 @@ import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Iterator
 from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
 from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.calendar_service import default_timezone
-from rental_search_agent.agent import current_date_context, flow_instructions, selected_to_listings
+from rental_search_agent.agent import (
+    TOOL_STATUS_LABELS,
+    current_date_context,
+    flow_instructions,
+    selected_to_listings,
+)
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.geocoding import (
     geocode_location as do_geocode_location,
@@ -970,38 +976,150 @@ def _listing_state_from_messages(messages: list[dict]) -> dict | None:
     return {"display_list": display_list or [], "master_list": master_list or [], "display_source": display_source}
 
 
-def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[list[dict], dict | None, dict | None]:
-    """Run one or more LLM calls and tool executions. Returns (updated_messages, ask_user_payload | None, listing_state | None).
-    listing_state has display_list, master_list, display_source for the UI. When ask_user needs input, returns
-    (messages + assistant_msg + tool_results_before_ask, payload, listing_state)."""
+def _stream_llm_call(client: OpenAI, model: str, messages: list[dict]) -> Iterator[dict]:
+    """Stream one chat.completions call. Yields {"type": "text_delta", "delta": str} as content
+    arrives. Returns (content, tool_calls) via the generator's return value (retrieve with
+    `x = yield from _stream_llm_call(...)`), where tool_calls is a list of
+    {"id", "name", "arguments"} dicts in call order. Raises if the accumulated response can't be
+    parsed (e.g. a provider that streams tool-call arguments inconsistently) so the caller can
+    fall back to a non-streaming call."""
+    content_parts: list[str] = []
+    tool_calls_acc: dict[int, dict] = {}
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+        stream=True,
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+        if delta.content:
+            content_parts.append(delta.content)
+            yield {"type": "text_delta", "delta": delta.content}
+        for tc_delta in delta.tool_calls or []:
+            entry = tool_calls_acc.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
+            if tc_delta.id:
+                entry["id"] = tc_delta.id
+            fn = tc_delta.function
+            if fn is not None:
+                if fn.name:
+                    entry["name"] = fn.name
+                if fn.arguments:
+                    entry["arguments"] += fn.arguments
+    tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+    for tc in tool_calls:
+        if not tc.get("id") or not tc.get("name"):
+            raise ValueError("Incomplete tool call in streamed response (missing id/name).")
+        json.loads(tc.get("arguments") or "{}")  # raises json.JSONDecodeError if malformed
+    return "".join(content_parts), tool_calls
+
+
+def _llm_call_with_fallback(client: OpenAI, model: str, messages: list[dict]) -> Iterator[dict]:
+    """Streams the LLM call via _stream_llm_call; if that raises (some providers stream tool-call
+    arguments inconsistently), retries once non-streaming. Yields text_delta events. Returns
+    (content, tool_calls), or None if the LLM returned no usable response (empty choices/message).
+    Note: on fallback, any text already streamed for the failed attempt is superseded by the
+    fallback's own text_delta — acceptable since this only triggers on malformed tool-call
+    streaming, which is rare."""
+    try:
+        content, tool_calls = yield from _stream_llm_call(client, model, messages)
+        return content, tool_calls
+    except Exception as e:
+        logger.warning("Streaming LLM call failed (%s); retrying non-streaming.", e)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
+    if not resp or not resp.choices:
+        return None
+    msg = resp.choices[0].message
+    if not msg:
+        return None
+    content = msg.content or ""
+    if content:
+        yield {"type": "text_delta", "delta": content}
+    tool_calls = [
+        {"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or "{}"}
+        for tc in (msg.tool_calls or [])
+    ]
+    return content, tool_calls
+
+
+def _call_llm(client: OpenAI, model: str, messages: list[dict], *, stream: bool) -> Iterator[dict]:
+    """Calls the LLM once. If stream=True, streams text_delta events (with non-streaming
+    fallback on malformed tool-call streaming). If stream=False, performs the original plain
+    (non-streaming) call with no text_delta events — used by run_agent_step so its behavior
+    (and existing test mocks, which model the non-streaming response shape) is unaffected.
+    Returns (content, tool_calls), or None if the LLM returned no usable response."""
+    if stream:
+        result = yield from _llm_call_with_fallback(client, model, messages)
+        return result
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
+    if not resp or not resp.choices:
+        return None
+    msg = resp.choices[0].message
+    if not msg:
+        return None
+    tool_calls = [
+        {"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or "{}"}
+        for tc in (msg.tool_calls or [])
+    ]
+    return msg.content or "", tool_calls
+
+
+def run_agent_step_events(
+    client: OpenAI, model: str, messages: list[dict], *, stream: bool = True
+) -> Iterator[dict]:
+    """Generator version of run_agent_step that reports live progress. Yields:
+      {"type": "text_delta", "delta": str} - a chunk of the assistant's text as it streams in
+        (only when stream=True; ignored/absent when stream=False).
+      {"type": "tool_start", "name": str, "label": str, "seq": int} - before executing a tool
+        that has a friendly label in agent.TOOL_STATUS_LABELS (e.g. ask_user does not).
+      {"type": "tool_end", "name": str, "label": str, "ok": bool, "seq": int} - after executing
+        it; `seq` pairs a tool_end with its tool_start (unique per tool call within this step).
+      {"type": "done", "messages": [...], "ask_user_payload": dict | None, "listing_state": dict | None}
+        - always the last event; carries the same info run_agent_step returns as a tuple.
+    """
     last_listing_state: dict | None = None
+    seq = 0
     while True:
         logger.debug("Calling LLM (model=%s)...", model)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
-        if not resp or not resp.choices:
+        result = yield from _call_llm(client, model, messages, stream=stream)
+        if result is None:
             logger.warning("LLM returned empty choices (possible API error or context too long); aborting step.")
-            return (messages, None, last_listing_state or _listing_state_from_messages(messages))
-        msg = resp.choices[0].message
+            yield {
+                "type": "done",
+                "messages": messages,
+                "ask_user_payload": None,
+                "listing_state": last_listing_state or _listing_state_from_messages(messages),
+            }
+            return
+        content, tool_calls_raw = result
         logger.debug("LLM responded")
-        if not msg:
-            return (messages, None, _listing_state_from_messages(messages))
-        if msg.tool_calls:
-            logger.debug("LLM requested %d tool(s): %s", len(msg.tool_calls), [tc.function.name for tc in msg.tool_calls])
+        if tool_calls_raw:
+            logger.debug("LLM requested %d tool(s): %s", len(tool_calls_raw), [tc["name"] for tc in tool_calls_raw])
             assistant_msg = {
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": content or "",
                 "tool_calls": [
                     {
-                        "id": tc.id,
+                        "id": tc["id"],
                         "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+                        "function": {"name": tc["name"], "arguments": tc["arguments"] or "{}"},
                     }
-                    for tc in msg.tool_calls
+                    for tc in tool_calls_raw
                 ],
             }
             tool_results: list[dict] = []
@@ -1011,11 +1129,15 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             display_source: str | None = None
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
-            for tc in msg.tool_calls:
-                name = tc.function.name
+            for tc in tool_calls_raw:
+                name = tc["name"]
+                seq += 1
+                label = TOOL_STATUS_LABELS.get(name)
+                if label:
+                    yield {"type": "tool_start", "name": name, "label": label, "seq": seq}
                 logger.debug("Executing tool: %s", name)
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
                 # filter_listings always re-filters from the master (enriched if available, else raw)
@@ -1033,17 +1155,25 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                     filter_source = current_listings
                 else:
                     filter_source = None
-                result = run_tool(
+                result_str = run_tool(
                     name,
                     args,
                     current_listings=filter_source,
                     current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
                     available_slots=available_slots if name == "modify_viewing_plan" else None,
                 )
+                ok = True
+                try:
+                    parsed_result = json.loads(result_str)
+                    ok = not (isinstance(parsed_result, dict) and "error" in parsed_result)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if label:
+                    yield {"type": "tool_end", "name": name, "label": label, "ok": ok, "seq": seq}
                 # Update derived context from tool results so chained tools in same batch see fresh data
                 if name == "rental_search":
                     try:
-                        data = json.loads(result)
+                        data = json.loads(result_str)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             # Drop proximity/score master from a previous search so filter/score
                             # use the new results rather than a stale enriched set.
@@ -1055,7 +1185,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         pass
                 if name == "enrich_listings_with_proximity":
                     try:
-                        data = json.loads(result)
+                        data = json.loads(result_str)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             enriched_master = data["listings"]
                             current_listings = enriched_master
@@ -1064,7 +1194,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         pass
                 if name == "filter_listings":
                     try:
-                        data = json.loads(result)
+                        data = json.loads(result_str)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             current_listings = data["listings"]
                             display_source = "filter"
@@ -1072,7 +1202,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         pass
                 if name == "score_listings_by_preferences":
                     try:
-                        data = json.loads(result)
+                        data = json.loads(result_str)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
                             scored_list = data["listings"]
                             current_listings = scored_list
@@ -1082,7 +1212,7 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         pass
                 if name in ("draft_viewing_plan", "modify_viewing_plan"):
                     try:
-                        data = json.loads(result)
+                        data = json.loads(result_str)
                         if isinstance(data, dict) and "entries" in data:
                             raw = data.get("entries")
                             if isinstance(raw, list):
@@ -1091,24 +1221,27 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         pass
                 logger.debug("Tool %s completed", name)
                 if name == "ask_user":
-                    payload = json.loads(result)
+                    payload = json.loads(result_str)
                     if payload.get("request_user_input"):
                         listing_state = {
                             "display_list": current_listings or [],
                             "master_list": enriched_master or master_listings or [],
                             "display_source": display_source,
                         }
-                        return (
-                            messages + [assistant_msg] + tool_results,
-                            {
-                                "tool_call_id": tc.id,
-                                "prompt": payload.get("prompt", ""),
-                                "choices": payload.get("choices") or [],
-                                "allow_multiple": payload.get("allow_multiple", False),
-                            },
-                            listing_state,
-                        )
-                tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                        ask_user_payload = {
+                            "tool_call_id": tc["id"],
+                            "prompt": payload.get("prompt", ""),
+                            "choices": payload.get("choices") or [],
+                            "allow_multiple": payload.get("allow_multiple", False),
+                        }
+                        yield {
+                            "type": "done",
+                            "messages": messages + [assistant_msg] + tool_results,
+                            "ask_user_payload": ask_user_payload,
+                            "listing_state": listing_state,
+                        }
+                        return
+                tool_results.append({"role": "tool", "tool_call_id": tc["id"], "content": result_str})
             last_listing_state = {
                 "display_list": current_listings or [],
                 "master_list": enriched_master or master_listings or [],
@@ -1126,15 +1259,28 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
             listings = _get_selected_listings_from_messages(messages)
             if slots and listings:
                 logger.debug("Auto-calling draft_viewing_plan (LLM returned no tool calls after calendar_get_available_slots)")
+                seq += 1
+                label = TOOL_STATUS_LABELS.get("draft_viewing_plan")
+                if label:
+                    yield {"type": "tool_start", "name": "draft_viewing_plan", "label": label, "seq": seq}
                 try:
-                    result = run_tool("draft_viewing_plan", {"listings": listings, "available_slots": slots})
+                    result_str = run_tool("draft_viewing_plan", {"listings": listings, "available_slots": slots})
+                    ok = True
+                    try:
+                        parsed_result = json.loads(result_str)
+                        ok = not (isinstance(parsed_result, dict) and "error" in parsed_result)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 except Exception as e:
                     logger.debug("draft_viewing_plan auto-call failed: %s", e)
-                    result = json.dumps({"error": str(e)})
+                    result_str = json.dumps({"error": str(e)})
+                    ok = False
+                if label:
+                    yield {"type": "tool_end", "name": "draft_viewing_plan", "label": label, "ok": ok, "seq": seq}
                 synthetic_id = f"call_auto_draft_viewing_plan_{uuid.uuid4().hex}"
                 assistant_msg = {
                     "role": "assistant",
-                    "content": msg.content or "",
+                    "content": content or "",
                     "tool_calls": [
                         {
                             "id": synthetic_id,
@@ -1146,13 +1292,32 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
                         }
                     ],
                 }
-                tool_results = [{"role": "tool", "tool_call_id": synthetic_id, "content": result}]
+                tool_results = [{"role": "tool", "tool_call_id": synthetic_id, "content": result_str}]
                 messages = messages + [assistant_msg] + tool_results
                 continue
         # Normal final assistant reply: use in-memory state from last tool batch if available
-        messages = messages + [{"role": "assistant", "content": msg.content or ""}]
+        messages = messages + [{"role": "assistant", "content": content or ""}]
         listing_state = last_listing_state if last_listing_state is not None else _listing_state_from_messages(messages)
-        return (messages, None, listing_state)
+        yield {"type": "done", "messages": messages, "ask_user_payload": None, "listing_state": listing_state}
+        return
+
+
+def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[list[dict], dict | None, dict | None]:
+    """Run one or more LLM calls and tool executions. Returns (updated_messages, ask_user_payload | None, listing_state | None).
+    listing_state has display_list, master_list, display_source for the UI. When ask_user needs input, returns
+    (messages + assistant_msg + tool_results_before_ask, payload, listing_state).
+
+    Thin wrapper that drains run_agent_step_events with stream=False (i.e. the original plain
+    LLM call, no streaming) so this function's behavior — and callers such as the CLI and the
+    unit tests that mock client.chat.completions.create with non-streaming response shapes — are
+    unaffected. For live progress (streamed text + tool status events), use
+    run_agent_step_events(..., stream=True) directly (used by the Streamlit UI)."""
+    final: dict | None = None
+    for event in run_agent_step_events(client, model, messages, stream=False):
+        if event["type"] == "done":
+            final = event
+    assert final is not None  # run_agent_step_events always ends with a "done" event
+    return (final["messages"], final.get("ask_user_payload"), final.get("listing_state"))
 
 
 def run_agent_loop() -> None:
