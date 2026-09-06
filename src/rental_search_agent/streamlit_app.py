@@ -1,4 +1,4 @@
-"""Streamlit chat UI for the rental search agent. Uses run_agent_step from client."""
+"""Streamlit chat UI for the rental search agent. Uses run_agent_step_events from client."""
 
 import html
 import json
@@ -18,7 +18,7 @@ except ImportError:
 
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
-from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step
+from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step_events
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
@@ -449,6 +449,55 @@ def _render_chat_history() -> None:
                     st.markdown(content)
 
 
+def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
+    """Run one agent step against st.session_state['messages'] with live UI feedback: an
+    expandable checklist of tool calls as they run (e.g. "Searching for listings...") and the
+    assistant's final text streamed in as it arrives. Updates st.session_state['messages'] in
+    place. Returns (ask_user_payload, listing_state) — same info run_agent_step returns besides
+    messages, which is already applied to session state."""
+    step_placeholders: dict[int, "st.delta_generator.DeltaGenerator"] = {}
+    final_event: dict | None = None
+    with st.chat_message("assistant"):
+        status_box = st.status("Working...", expanded=True)
+        text_placeholder = st.empty()
+        acc_text = ""
+        for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
+            etype = event["type"]
+            if etype in ("round_start", "text_reset"):
+                # round_start: a new LLM round is starting; any text streamed so far belongs to
+                # a distinct, separately-persisted assistant message (e.g. rare preamble
+                # alongside a tool call).
+                # text_reset: a malformed streamed tool call triggered a non-streaming fallback
+                # retry within the *same* round; the fallback's text_delta is the full,
+                # authoritative reply and must replace (not append to) the partial text already
+                # streamed from the failed attempt.
+                # Either way, reset so stale/partial text isn't concatenated with what follows.
+                acc_text = ""
+                text_placeholder.empty()
+            elif etype == "tool_start":
+                ph = status_box.empty()
+                ph.markdown(f"- \u23f3 {event['label']}")
+                step_placeholders[event["seq"]] = ph
+                status_box.update(label=event["label"])
+            elif etype == "tool_end":
+                ph = step_placeholders.get(event["seq"])
+                if ph is not None:
+                    icon = "\u2705" if event["ok"] else "\u26a0\ufe0f"
+                    ph.markdown(f"- {icon} {event['label']}")
+            elif etype == "text_delta":
+                acc_text += event["delta"]
+                text_placeholder.markdown(acc_text)
+            elif etype == "done":
+                final_event = event
+        status_box.update(label="Done", state="complete", expanded=False)
+        if not acc_text:
+            # No streamed text (e.g. the turn ended on ask_user) — nothing more to show here.
+            text_placeholder.empty()
+    assert final_event is not None  # run_agent_step_events always ends with a "done" event
+    st.session_state["messages"] = final_event["messages"]
+    return final_event.get("ask_user_payload"), final_event.get("listing_state")
+
+
 def _build_answer_json(pending: dict, answer_value: str | list[str]) -> str:
     """Build JSON string for tool result: { answer } or { selected }."""
     if pending.get("allow_multiple"):
@@ -538,8 +587,7 @@ def _render_ask_form(pending: dict) -> None:
                 st.stop()
             # Run step in a loop until no more pending ask (or we get final reply)
             while True:
-                messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
-                st.session_state["messages"] = messages
+                payload, listing_state = _run_agent_step_with_ui(client, model)
                 if listing_state is not None:
                     if listing_state.get("display_source") is not None:
                         # Always replace, including empty lists (zero-result search/filter).
@@ -690,8 +738,9 @@ def main() -> None:
             return
         if prompt := st.chat_input("e.g. 2 bed rental in Vancouver under 3000, or condo for sale in Toronto under 900k"):
             st.session_state["messages"].append({"role": "user", "content": prompt})
-            messages, payload, listing_state = run_agent_step(client, model, st.session_state["messages"])
-            st.session_state["messages"] = messages
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            payload, listing_state = _run_agent_step_with_ui(client, model)
             if listing_state is not None:
                 if listing_state.get("display_source") is not None:
                     # Always replace, including empty lists (zero-result search/filter).

@@ -15,6 +15,30 @@ def current_date_context() -> str:
     return f"Today's date is {today}.\n\n"
 
 
+# Friendly, present-progressive labels shown in the UI while a tool is running (see
+# client.run_agent_step_events). Tools not listed here run normally but are not reported
+# as a checklist step (e.g. ask_user, which hands off to an input form instead).
+TOOL_STATUS_LABELS: dict[str, str] = {
+    "rental_search": "Searching for listings...",
+    "filter_listings": "Filtering listings...",
+    "summarize_listings": "Summarizing results...",
+    "parse_proximity_preferences": "Parsing your proximity preferences...",
+    "geocode_location": "Looking up location...",
+    "geocode_proximity_references": "Looking up locations...",
+    "enrich_listings_with_proximity": "Calculating travel times...",
+    "score_listings_by_preferences": "Ranking listings by your preferences...",
+    "analyze_listing_preferences": "Analyzing listing...",
+    "calendar_list_events": "Checking your calendar...",
+    "calendar_get_available_slots": "Checking calendar availability...",
+    "calendar_create_event": "Booking viewing...",
+    "calendar_update_event": "Updating your calendar...",
+    "calendar_delete_event": "Updating your calendar...",
+    "draft_viewing_plan": "Drafting viewing plan...",
+    "modify_viewing_plan": "Updating viewing plan...",
+    "simulate_viewing_request": "Sending viewing request...",
+}
+
+
 @dataclass
 class AgentState:
     """§7.1 State to maintain."""
