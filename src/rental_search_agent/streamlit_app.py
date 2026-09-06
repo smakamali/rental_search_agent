@@ -463,10 +463,15 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
         acc_text = ""
         for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
             etype = event["type"]
-            if etype == "round_start":
-                # A new LLM round is starting. Any text streamed so far belongs to a distinct,
-                # separately-persisted assistant message (e.g. rare preamble alongside a tool
-                # call) — reset so it isn't concatenated with this round's text.
+            if etype in ("round_start", "text_reset"):
+                # round_start: a new LLM round is starting; any text streamed so far belongs to
+                # a distinct, separately-persisted assistant message (e.g. rare preamble
+                # alongside a tool call).
+                # text_reset: a malformed streamed tool call triggered a non-streaming fallback
+                # retry within the *same* round; the fallback's text_delta is the full,
+                # authoritative reply and must replace (not append to) the partial text already
+                # streamed from the failed attempt.
+                # Either way, reset so stale/partial text isn't concatenated with what follows.
                 acc_text = ""
                 text_placeholder.empty()
             elif etype == "tool_start":

@@ -425,3 +425,39 @@ class TestRunAgentStepEventsStreaming:
         done = [e for e in events if e["type"] == "done"][0]
         assert done["ask_user_payload"] is None
         assert done["messages"][-1]["content"] == "Done."
+
+    def test_partial_text_before_malformed_tool_call_is_reset_not_duplicated(self):
+        """If the provider streams some assistant text before sending malformed tool-call
+        arguments, the fallback must emit a text_reset before its own text_delta, so a consumer
+        accumulating text_delta into one string discards the partial text instead of
+        concatenating it with the fallback's (full, authoritative) text."""
+        broken_stream = [
+            _make_content_delta_chunk("Sure, let me "),
+            _make_tool_call_delta_chunk(0, call_id="call-1", name="rental_search", arguments="{not valid json"),
+        ]
+        fallback_reply = _make_tool_call_reply(
+            "rental_search", {"min_bedrooms": 2, "location": "Vancouver"}, call_id="call-2"
+        )
+        final_stream = [_make_content_delta_chunk("Done.")]
+        sample_resp = RentalSearchResponse(listings=[sample_listing()], total_count=1)
+
+        with patch("rental_search_agent.client.search", return_value=sample_resp):
+            client, model = _make_streaming_client(broken_stream, fallback_reply, final_stream)
+            messages = _base_messages() + [{"role": "user", "content": "Find 2 bed in Vancouver"}]
+            events = list(run_agent_step_events(client, model, messages, stream=True))
+
+        # The partial "Sure, let me " text_delta arrives, then a text_reset, then no further
+        # text_delta until the (unrelated, next-round) final "Done." reply.
+        types_and_deltas = [(e["type"], e.get("delta")) for e in events if e["type"] in ("text_delta", "text_reset")]
+        assert types_and_deltas[0] == ("text_delta", "Sure, let me ")
+        assert types_and_deltas[1] == ("text_reset", None)
+        assert types_and_deltas[2] == ("text_delta", "Done.")
+        # A consumer that resets its accumulator on text_reset (like the Streamlit UI helper)
+        # ends up with just "Done.", not "Sure, let me Done.".
+        acc = ""
+        for etype, delta in types_and_deltas:
+            if etype == "text_reset":
+                acc = ""
+            else:
+                acc += delta
+        assert acc == "Done."

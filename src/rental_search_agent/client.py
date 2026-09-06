@@ -1023,14 +1023,17 @@ def _llm_call_with_fallback(client: OpenAI, model: str, messages: list[dict]) ->
     """Streams the LLM call via _stream_llm_call; if that raises (some providers stream tool-call
     arguments inconsistently), retries once non-streaming. Yields text_delta events. Returns
     (content, tool_calls), or None if the LLM returned no usable response (empty choices/message).
-    Note: on fallback, any text already streamed for the failed attempt is superseded by the
-    fallback's own text_delta — acceptable since this only triggers on malformed tool-call
-    streaming, which is rare."""
+    Note: the failed streaming attempt may have already yielded text_delta events (e.g. the
+    provider streamed some assistant text before sending malformed tool-call arguments). On
+    fallback, a {"type": "text_reset"} event is yielded first so consumers discard that partial
+    text before the fallback's own text_delta (its full, authoritative content) arrives —
+    otherwise the partial and fallback text would be shown concatenated instead of replaced."""
     try:
         content, tool_calls = yield from _stream_llm_call(client, model, messages)
         return content, tool_calls
     except Exception as e:
         logger.warning("Streaming LLM call failed (%s); retrying non-streaming.", e)
+    yield {"type": "text_reset"}
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -1092,6 +1095,11 @@ def run_agent_step_events(
         be concatenated with it.
       {"type": "text_delta", "delta": str} - a chunk of the assistant's text as it streams in
         (only when stream=True; ignored/absent when stream=False).
+      {"type": "text_reset"} - discard any text_delta accumulated so far *within the current
+        round* (unlike round_start, this does not mean a new round started): it precedes a
+        non-streaming fallback retry after a malformed streamed tool call, where the fallback's
+        own text_delta is the full, authoritative replacement for any partial text already
+        streamed from the failed attempt.
       {"type": "tool_start", "name": str, "label": str, "seq": int} - before executing a tool
         that has a friendly label in agent.TOOL_STATUS_LABELS (e.g. ask_user does not).
       {"type": "tool_end", "name": str, "label": str, "ok": bool, "seq": int} - after executing
