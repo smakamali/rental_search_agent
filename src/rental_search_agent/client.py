@@ -1083,6 +1083,13 @@ def run_agent_step_events(
     client: OpenAI, model: str, messages: list[dict], *, stream: bool = True
 ) -> Iterator[dict]:
     """Generator version of run_agent_step that reports live progress. Yields:
+      {"type": "round_start"} - before each LLM call. A "round" is one LLM call plus any tool
+        calls it requests; a single run_agent_step_events call can span multiple rounds (e.g.
+        rental_search -> filter_listings -> summarize_listings -> final reply). Consumers that
+        accumulate text_delta into a single displayed string should reset that accumulator here,
+        since text from an earlier round's assistant message (e.g. rare preamble text alongside
+        a tool call) is a distinct persisted message from the final round's reply and should not
+        be concatenated with it.
       {"type": "text_delta", "delta": str} - a chunk of the assistant's text as it streams in
         (only when stream=True; ignored/absent when stream=False).
       {"type": "tool_start", "name": str, "label": str, "seq": int} - before executing a tool
@@ -1095,6 +1102,7 @@ def run_agent_step_events(
     last_listing_state: dict | None = None
     seq = 0
     while True:
+        yield {"type": "round_start"}
         logger.debug("Calling LLM (model=%s)...", model)
         result = yield from _call_llm(client, model, messages, stream=stream)
         if result is None:

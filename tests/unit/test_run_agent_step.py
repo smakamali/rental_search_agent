@@ -399,8 +399,8 @@ class TestRunAgentStepEventsStreaming:
         events = list(run_agent_step_events(client, model, messages, stream=True))
 
         assert not any(e["type"] in ("tool_start", "tool_end") for e in events)
-        assert [e["type"] for e in events] == ["done"]
-        done = events[0]
+        assert [e["type"] for e in events] == ["round_start", "done"]
+        done = [e for e in events if e["type"] == "done"][0]
         assert done["ask_user_payload"]["tool_call_id"] == "call-ask"
         assert done["ask_user_payload"]["prompt"] == "Which listing?"
 

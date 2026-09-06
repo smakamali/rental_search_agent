@@ -16,7 +16,7 @@ try:
 except ImportError:
     pdk = None
 
-from rental_search_agent.agent import TOOL_STATUS_LABELS, current_date_context, flow_instructions
+from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
 from rental_search_agent.client import _load_env_file, _make_llm_client, run_agent_step_events
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
@@ -463,7 +463,13 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
         acc_text = ""
         for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
             etype = event["type"]
-            if etype == "tool_start":
+            if etype == "round_start":
+                # A new LLM round is starting. Any text streamed so far belongs to a distinct,
+                # separately-persisted assistant message (e.g. rare preamble alongside a tool
+                # call) — reset so it isn't concatenated with this round's text.
+                acc_text = ""
+                text_placeholder.empty()
+            elif etype == "tool_start":
                 ph = status_box.empty()
                 ph.markdown(f"- \u23f3 {event['label']}")
                 step_placeholders[event["seq"]] = ph
