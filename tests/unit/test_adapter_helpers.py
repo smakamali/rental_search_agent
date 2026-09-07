@@ -3,6 +3,7 @@
 import pytest
 
 from rental_search_agent.backends.apify_realtor_ca import (
+    ApifyRealtorCaBackend,
     _format_price_display,
     _parse_bedrooms,
     _parse_sqft,
@@ -237,6 +238,42 @@ class TestItemToListing:
         listing = item_to_listing(item, "for_rent")
         assert listing.video_url == "https://www.youtube.com/watch?v=abc123"
 
+    def test_description_from_top_level_public_remarks(self):
+        item = mock_apify_item(mls="m1", description="Bright corner unit with balcony.")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.description == "Bright corner unit with balcony."
+
+    def test_empty_public_remarks_falls_back_to_details(self):
+        # Realtor.ca returns PublicRemarks as "" on search results; the actor's
+        # fetchDetails option stores the full remarks under _details.
+        item = mock_apify_item(mls="m1", description="")
+        item["_details"] = {
+            "PublicRemarks": "Renovated 2-bed with in-suite laundry and parking.",
+        }
+        listing = item_to_listing(item, "for_rent")
+        assert listing.description == "Renovated 2-bed with in-suite laundry and parking."
+        assert listing.title.startswith("Renovated 2-bed")
+
+    def test_empty_public_remarks_falls_back_to_nested_details_property(self):
+        item = mock_apify_item(mls="m1", description="")
+        item["_details"] = {
+            "Property": {"PublicRemarks": "Quiet unit near SkyTrain."},
+        }
+        listing = item_to_listing(item, "for_rent")
+        assert listing.description == "Quiet unit near SkyTrain."
+
+    def test_empty_public_remarks_without_details_is_none(self):
+        item = mock_apify_item(mls="m1", description="")
+        listing = item_to_listing(item, "for_rent")
+        assert listing.description is None
+        assert listing.title == "Listing m1"
+
+    def test_top_level_remarks_preferred_over_details(self):
+        item = mock_apify_item(mls="m1", description="Search-result remarks.")
+        item["_details"] = {"PublicRemarks": "Detail-page remarks."}
+        listing = item_to_listing(item, "for_rent")
+        assert listing.description == "Search-result remarks."
+
 
 class TestFiltersToRunInput:
     def test_rent_operation_and_bounds(self):
@@ -260,6 +297,12 @@ class TestFiltersToRunInput:
         assert run_input["maxPrice"] == 3500
         assert run_input["minBathrooms"] == 1
         assert run_input["minSquareFootage"] == 800
+        assert run_input["fetchDetails"] is True
+
+    def test_fetch_details_can_be_disabled(self):
+        filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver, BC")
+        run_input = filters_to_run_input(filters, max_items=10, fetch_details=False)
+        assert run_input["fetchDetails"] is False
 
     def test_sale_operation(self):
         filters = RentalSearchFilters(
@@ -288,6 +331,18 @@ class TestFiltersToRunInput:
         )
         run_input = filters_to_run_input(filters, max_items=10)
         assert run_input["location"] == "Vancouver, BC"
+
+
+class TestFetchDetailsEnv:
+    def test_default_is_enabled(self, monkeypatch):
+        monkeypatch.delenv("APIFY_FETCH_DETAILS", raising=False)
+        backend = ApifyRealtorCaBackend(token="t")
+        assert backend.fetch_details is True
+
+    def test_env_can_disable(self, monkeypatch):
+        monkeypatch.setenv("APIFY_FETCH_DETAILS", "false")
+        backend = ApifyRealtorCaBackend(token="t")
+        assert backend.fetch_details is False
 
 
 class TestPostFilter:
