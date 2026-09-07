@@ -109,18 +109,85 @@ class TestStructuralAndProximity:
 
 
 class TestAmenityUnknown:
-    def test_missing_text_amenity_is_unknown_not_unmet(self):
+    def test_missing_text_amenity_is_unknown_when_description_empty(self):
         from rental_search_agent.preference_criteria import (
             AmenityFeature,
             match_amenity_feature,
         )
 
-        listing = _listing(description="Nice apartment", ammenities="", parking_spaces=None)
+        listing = _listing(description="", ammenities="", parking_spaces=None)
         result = match_amenity_feature(
             listing, AmenityFeature("balcony", "Balcony", ("balcony",))
         )
         assert result.status == "unknown"
         assert result.score is None
+
+    def test_missing_text_amenity_is_unmet_when_description_present(self):
+        from rental_search_agent.preference_criteria import (
+            AmenityFeature,
+            match_amenity_feature,
+        )
+
+        listing = _listing(
+            description="Bright apartment near the park. Updated kitchen.",
+            ammenities="",
+            parking_spaces=None,
+        )
+        result = match_amenity_feature(
+            listing, AmenityFeature("balcony", "Balcony", ("balcony",))
+        )
+        assert result.status == "unmet"
+        assert result.score == 0.0
+
+    def test_description_mention_is_met(self):
+        from rental_search_agent.preference_criteria import (
+            AmenityFeature,
+            match_amenity_feature,
+        )
+
+        listing = _listing(
+            description="Private balcony and in-suite storage locker.",
+            ammenities="",
+            parking_spaces=None,
+        )
+        balcony = match_amenity_feature(
+            listing, AmenityFeature("balcony", "Balcony", ("balcony",))
+        )
+        storage = match_amenity_feature(
+            listing, AmenityFeature("storage", "Storage", ("storage", "locker"))
+        )
+        assert balcony.status == "met"
+        assert storage.status == "met"
+
+    def test_description_changes_amenity_and_match_ranking(self):
+        prefs = EffectiveSearchPreferences(
+            qualitative_preferences="must have balcony, parking, storage",
+        )
+        with_remarks = _listing(
+            id="match",
+            description="Corner unit with a balcony, underground parking, and a storage locker.",
+            ammenities="",
+            parking_spaces=None,
+        )
+        without_feature = _listing(
+            id="miss",
+            description="Updated kitchen and hardwood floors in a quiet building.",
+            ammenities="",
+            parking_spaces=None,
+        )
+        with patch(
+            "rental_search_agent.match_scoring.embed_texts",
+            side_effect=RuntimeError("skip semantic"),
+        ):
+            scored = score_listings_by_preferences(
+                [without_feature, with_remarks],
+                effective_prefs=prefs,
+            )
+        by_id = {row["id"]: row for row in scored}
+        assert by_id["match"]["score_breakdown"]["components"]["amenity"] == 1.0
+        assert by_id["miss"]["score_breakdown"]["components"]["amenity"] == 0.0
+        assert scored[0]["id"] == "match"
+        assert by_id["match"]["match_score"] > by_id["miss"]["match_score"]
 
 
 class TestPlaceholderPrefs:

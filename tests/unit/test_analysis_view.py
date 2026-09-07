@@ -116,17 +116,17 @@ class TestCriteriaDisplay:
         assert drive_row.comparison_text == "14 min ≤ 30 min"
 
         balcony = by_id["balcony"]
-        assert balcony.status == "unknown"
-        assert balcony.status != "unmet"
+        assert balcony.status == "unmet"
+        assert balcony.score == 0.0
         bal_row = checklist_item_to_row({
             "id": balcony.id, "name": balcony.name, "status": balcony.status,
-            "detail": balcony.detail, "group": "amenity",
+            "observed": balcony.observed, "detail": balcony.detail, "group": "amenity",
         })
-        assert bal_row.comparison_text == "Not mentioned"
+        assert balcony.status != "unknown"
         assert "(unknown)" not in bal_row.comparison_text
 
         storage = by_id["storage"]
-        assert storage.status == "unknown"
+        assert storage.status == "unmet"
 
         parking = by_id["parking"]
         assert parking.status == "met"

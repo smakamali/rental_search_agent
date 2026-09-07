@@ -57,6 +57,7 @@ class TestAdapterSearch:
         assert run_input["location"] == "Vancouver, BC"
         assert run_input["minBeds"] == 1
         assert run_input["maxItems"] == 50
+        assert run_input["fetchDetails"] is True
 
     def test_filter_by_min_bedrooms_post_fetch(self):
         client = _mock_client()
@@ -159,7 +160,23 @@ class TestAdapterSearch:
             search(filters)
         wait_duration = client.actor.return_value.call.call_args.kwargs["wait_duration"]
         assert isinstance(wait_duration, timedelta)
-        assert wait_duration.total_seconds() > 0
+        assert wait_duration.total_seconds() >= 8 * 60
+
+    def test_fetch_details_disabled_uses_shorter_wait(self):
+        from datetime import timedelta
+
+        client = _mock_client()
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, fetch_details=False
+        )
+        with patch("rental_search_agent.adapter.get_search_backend", return_value=backend):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            search(filters)
+        run_input = client.actor.return_value.call.call_args.kwargs["run_input"]
+        assert run_input["fetchDetails"] is False
+        wait_duration = client.actor.return_value.call.call_args.kwargs["wait_duration"]
+        assert isinstance(wait_duration, timedelta)
+        assert wait_duration.total_seconds() == 2 * 60
 
     def test_dict_shaped_run_result_is_supported(self):
         # apify-client < 3.0 (resolved on Python < 3.11 envs) returns a plain dict with
