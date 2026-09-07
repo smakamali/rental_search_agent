@@ -52,7 +52,6 @@ _SORT_BY_LABELS = {
     "address": "Address",
 }
 
-_TABLE_COL_WIDTHS = [0.5, 0.6, 1.8, 0.8, 0.4, 0.4, 0.6, 0.8, 0.8, 0.8, 1.0, 1.1, 0.8]
 _CARDS_PER_ROW = 3
 _TRANSIT_LOCATION_ALIASES = frozenset(
     {
@@ -591,6 +590,36 @@ def inject_results_css() -> None:
         .rsa-card-prox { min-height: 3.1rem; margin: 0.35rem 0 0.15rem; font-size: 0.85rem; line-height: 1.4; }
         .rsa-card-prox-ok { opacity: 0.9; }
         .rsa-card-prox-unavail { opacity: 0.72; }
+        .rsa-table-photo { width: 64px; }
+        .rsa-table-photo-img {
+            display: block;
+            width: 64px;
+            aspect-ratio: 16 / 10;
+            object-fit: cover;
+            border-radius: 0.3rem;
+        }
+        .rsa-table-photo-fallback {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 64px;
+            aspect-ratio: 16 / 10;
+            border-radius: 0.3rem;
+            background: rgba(128,128,128,0.12);
+            text-decoration: none;
+            color: inherit;
+            font-size: 0.7rem;
+            opacity: 0.7;
+        }
+        .rsa-table-street { font-weight: 600; font-size: 0.82rem; line-height: 1.25; }
+        .rsa-table-street a { color: inherit; text-decoration: none; }
+        .rsa-table-street a:hover { text-decoration: underline; }
+        .rsa-table-locality { opacity: 0.68; font-size: 0.72rem; line-height: 1.25; margin-top: 0.05rem; }
+        .rsa-table-prox { font-size: 0.75rem; line-height: 1.3; }
+        .rsa-table-prox-ok { opacity: 0.9; }
+        .rsa-table-prox-unavail { opacity: 0.72; }
+        .rsa-table-num { font-variant-numeric: tabular-nums; font-size: 0.88rem; }
+        .rsa-table-rule { border-top: 1px solid rgba(128,128,128,0.22); margin: 0.2rem 0; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -636,6 +665,49 @@ def _render_clickable_address(address: str, listing_url: str) -> None:
         st.write(address or "—")
 
 
+@dataclass(frozen=True)
+class TableColumn:
+    key: str
+    header: str
+    width: float
+    help: str | None = None
+
+
+def table_has_visible_tags(listings: list[dict]) -> bool:
+    """True when at least one displayed listing has a New / Open house / Reduced tag."""
+    return any(listing_tag_labels(item) for item in listings if isinstance(item, dict))
+
+
+def table_column_schema(listings: list[dict]) -> list[TableColumn]:
+    """Column headers/widths for the comparison table. Tags only when a result has one."""
+    columns = [
+        TableColumn("rank", "Rank", 0.42),
+        TableColumn("photo", "Photo", 0.7),
+        TableColumn("address", "Address", 1.7),
+        TableColumn("type", "Type", 0.75),
+        TableColumn("bed", "Bed", 0.42),
+        TableColumn("bath", "Bath", 0.42),
+        TableColumn("size", "Size", 0.85),
+        TableColumn("price", "Price", 0.85),
+        TableColumn(
+            "dom",
+            "DOM",
+            0.48,
+            "Approximate days since listing publication",
+        ),
+        TableColumn("match", "Match", 0.8),
+    ]
+    if table_has_visible_tags(listings):
+        columns.append(TableColumn("tags", "Tags", 0.85))
+    columns.extend(
+        [
+            TableColumn("proximity", "Proximity", 1.35),
+            TableColumn("analyze", "Analyze", 0.7),
+        ]
+    )
+    return columns
+
+
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     """Build table-friendly rows: rank, photo, address, type, bed, bath, size, price,
     days on market, match score, tags, Proximity, URL.
@@ -648,16 +720,14 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     """
     rows = []
     for i, listing in enumerate(listings):
-        bath = listing.get("bathrooms")
-        sqft = listing.get("sqft")
         rows.append({
             "rank": listing_rank(listing, i),
             "photo": listing.get("photo_url") or "",
             "address": listing.get("address") or "—",
             "type": listing.get("house_category") or "—",
             "bed": _format_bedrooms(listing),
-            "bath": f"{float(bath):g}" if bath is not None else "—",
-            "size": str(int(sqft)) if sqft is not None else "—",
+            "bath": format_count(listing.get("bathrooms")),
+            "size": format_sqft(listing.get("sqft")),
             "price": _format_listing_price(listing),
             "days_on_market": _format_days_on_market(listing),
             "match_score": _format_match_score(listing),
@@ -670,63 +740,135 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     return rows
 
 
+def _render_table_photo(photo_url: str, listing_url: str) -> None:
+    """Compact 64px 16:10 thumbnail. Safe HTTP(S) only."""
+    safe_listing = safe_http_url(listing_url) or ""
+    safe_photo = safe_http_url(photo_url) or ""
+    if safe_photo:
+        img = f'<img src="{html.escape(safe_photo)}" alt="" class="rsa-table-photo-img">'
+        body = (
+            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{img}</a>'
+            if safe_listing
+            else img
+        )
+    elif safe_listing:
+        body = (
+            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener" '
+            f'class="rsa-table-photo-fallback">View</a>'
+        )
+    else:
+        body = '<div class="rsa-table-photo-fallback" aria-hidden="true"></div>'
+    st.markdown(f'<div class="rsa-table-photo">{body}</div>', unsafe_allow_html=True)
+
+
+def _render_table_address(listing: dict) -> None:
+    headline, locality = listing_address_parts(listing)
+    safe_listing = safe_http_url(listing.get("url") or "") or ""
+    street = html.escape(headline or "—")
+    if safe_listing:
+        street_html = (
+            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{street}</a>'
+        )
+    else:
+        street_html = street
+    loc_html = (
+        f'<div class="rsa-table-locality">{html.escape(locality)}</div>' if locality else ""
+    )
+    st.markdown(
+        f'<div class="rsa-table-address"><div class="rsa-table-street">{street_html}</div>'
+        f"{loc_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_table_proximity(listing: dict) -> None:
+    lines = proximity_card_lines(parse_proximity_display(listing.get("proximity")))
+    if not lines:
+        st.markdown('<div class="rsa-table-prox">—</div>', unsafe_allow_html=True)
+        return
+    blocks = []
+    for kind, text in lines:
+        cls = "rsa-table-prox-ok" if kind == "available" else "rsa-table-prox-unavail"
+        blocks.append(f'<div class="{cls}">{html.escape(text)}</div>')
+    st.markdown(
+        f'<div class="rsa-table-prox">{"".join(blocks)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_table_cell(column_key: str, listing: dict, index: int) -> None:
+    if column_key == "rank":
+        st.markdown(
+            f'<div class="rsa-table-num">{html.escape(str(listing_rank(listing, index)))}</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if column_key == "photo":
+        _render_table_photo(listing.get("photo_url") or "", listing.get("url") or "")
+        return
+    if column_key == "address":
+        _render_table_address(listing)
+        return
+    if column_key == "type":
+        st.write(listing.get("house_category") or "—")
+        return
+    if column_key == "bed":
+        st.write(_format_bedrooms(listing))
+        return
+    if column_key == "bath":
+        st.write(format_count(listing.get("bathrooms")))
+        return
+    if column_key == "size":
+        st.markdown(
+            f'<div class="rsa-table-num">{html.escape(format_sqft(listing.get("sqft")))}</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if column_key == "price":
+        st.markdown(
+            f'<div class="rsa-table-num">{html.escape(_format_listing_price(listing))}</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if column_key == "dom":
+        st.write(_format_days_on_market(listing))
+        return
+    if column_key == "match":
+        render_compact_match_score(listing, size=28, show_label=False)
+        return
+    if column_key == "tags":
+        labels = listing_tag_labels(listing)
+        st.caption(" · ".join(labels) if labels else "—")
+        return
+    if column_key == "proximity":
+        _render_table_proximity(listing)
+        return
+    if column_key == "analyze":
+        if st.button("Analyze", key=_analyze_button_key(listing, index)):
+            request_listing_analysis(listing)
+
+
 def _render_results_table(listings: list[dict]) -> None:
-    """Render search results as custom rows with an Analyze button per listing."""
+    """Dense comparison table. Uses listing rank and shared Match/proximity helpers."""
     if not listings:
         return
-    # Header row: Rank, Photo, Address, Type, Bed, Bath, Size, Price, Days on Market,
-    # Match score, Tags, Proximity, Analyze
-    header_cols = st.columns(_TABLE_COL_WIDTHS)
-    headers = [
-        "Rank", "Photo", "Address", "Type", "Bed", "Bath", "Size", "Price",
-        "Days on Market", "Match score", "Tags", "Proximity", "Analyze",
-    ]
-    for col, label in zip(header_cols, headers):
+    columns = table_column_schema(listings)
+    widths = [col.width for col in columns]
+    header_cols = st.columns(widths)
+    for col, spec in zip(header_cols, columns):
         with col:
-            st.caption(label)
-    st.divider()
+            if spec.help:
+                st.caption(spec.header, help=spec.help)
+            else:
+                st.caption(spec.header)
+    st.markdown('<div class="rsa-table-rule"></div>', unsafe_allow_html=True)
     for i, listing in enumerate(listings):
-        bath = listing.get("bathrooms")
-        sqft = listing.get("sqft")
-        url = listing.get("url") or ""
-        photo_url = listing.get("photo_url") or ""
-        prox = format_proximity_caption(parse_proximity_display(listing.get("proximity")))
-        tags = _format_tags(listing)
-        headline, locality = listing_address_parts(listing)
-        row_cols = st.columns(_TABLE_COL_WIDTHS)
-        with row_cols[0]:
-            # Use the listing's authoritative 'rank' (from the LLM tool layer), not this
-            # row's position, so the number matches what the LLM calls "listing N" even
-            # after a local reorder (e.g. the proximity closest-first safeguard, or the
-            # default match-score sort, above).
-            st.write(listing_rank(listing, i))
-        with row_cols[1]:
-            _render_clickable_photo(photo_url, url, width=56)
-        with row_cols[2]:
-            st.write(headline)
-            if locality:
-                st.caption(locality)
-        with row_cols[3]:
-            st.write(listing.get("house_category") or "—")
-        with row_cols[4]:
-            st.write(_format_bedrooms(listing))
-        with row_cols[5]:
-            st.write(f"{float(bath):g}" if bath is not None else "—")
-        with row_cols[6]:
-            st.write(str(int(sqft)) if sqft is not None else "—")
-        with row_cols[7]:
-            st.write(_format_listing_price(listing))
-        with row_cols[8]:
-            st.write(_format_days_on_market(listing))
-        with row_cols[9]:
-            st.write(_format_match_score(listing))
-        with row_cols[10]:
-            st.caption(tags or "—")
-        with row_cols[11]:
-            st.caption(prox)
-        with row_cols[12]:
-            if st.button("Analyze", key=_analyze_button_key(listing, i)):
-                request_listing_analysis(listing)
+        row_cols = st.columns(widths)
+        for col, spec in zip(row_cols, columns):
+            with col:
+                _render_table_cell(spec.key, listing, i)
+        if i < len(listings) - 1:
+            st.markdown('<div class="rsa-table-rule"></div>', unsafe_allow_html=True)
 
 
 def _render_grid_photo(photo_url: str, listing_url: str, rank: Any) -> None:

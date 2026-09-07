@@ -22,6 +22,8 @@ from rental_search_agent.streamlit_results import (
     prepare_map_label_widget_state,
     prepare_results_widget_state,
     proximity_unavailable_summary,
+    table_column_schema,
+    table_has_visible_tags,
 )
 
 
@@ -265,3 +267,79 @@ class TestGridHelpers:
         )
         assert labels == ["New", "Open house", "Reduced"]
         assert listing_tag_labels({}) == []
+
+
+class TestTableHelpers:
+    def test_omits_tags_column_when_no_result_has_tags(self):
+        listings = [{"id": "a", "rank": 1, "address": "A St"}]
+        assert table_has_visible_tags(listings) is False
+        assert [col.key for col in table_column_schema(listings)] == [
+            "rank",
+            "photo",
+            "address",
+            "type",
+            "bed",
+            "bath",
+            "size",
+            "price",
+            "dom",
+            "match",
+            "proximity",
+            "analyze",
+        ]
+
+    def test_includes_tags_column_when_any_result_has_a_tag(self):
+        listings = [
+            {"id": "a", "rank": 1},
+            {"id": "b", "rank": 2, "listing_age_hours": 12},
+        ]
+        assert table_has_visible_tags(listings) is True
+        assert "tags" in [col.key for col in table_column_schema(listings)]
+
+    def test_size_uses_shared_sqft_formatting(self):
+        rows = _listings_to_table_rows(
+            [{"id": "a", "address": "A St", "rank": 1, "sqft": 1852}]
+        )
+        assert rows[0]["size"] == "1,852 sq ft"
+
+    def test_match_prefers_match_score_and_keeps_canonical_rank(self):
+        rows = _listings_to_table_rows(
+            [
+                {
+                    "id": "b",
+                    "rank": 2,
+                    "address": "B St",
+                    "match_score": 0.74,
+                    "semantic_score": 0.4,
+                },
+                {
+                    "id": "a",
+                    "rank": 1,
+                    "address": "A St",
+                    "semantic_score": 0.9,
+                },
+            ]
+        )
+        assert rows[0]["rank"] == 2
+        assert rows[0]["match_score"] == "74%"
+        assert rows[1]["rank"] == 1
+        assert rows[1]["match_score"] == "90%"
+
+    def test_proximity_rows_stay_structured(self):
+        rows = _listings_to_table_rows(
+            [
+                {
+                    "id": "a",
+                    "rank": 1,
+                    "proximity": {
+                        "800 Burrard St|drive": {"duration_min": 23},
+                        "nearest transit station|walk": {"duration_min": 2},
+                        "Metrotown|drive": None,
+                    },
+                }
+            ]
+        )
+        prox = rows[0]["Proximity"]
+        assert "23 min to 800 Burrard St" in prox
+        assert "2 min walk to transit" in prox
+        assert "(some unknown)" not in prox
