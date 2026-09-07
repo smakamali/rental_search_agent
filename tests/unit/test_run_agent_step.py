@@ -271,22 +271,17 @@ class TestRunAgentStepFilterSource:
 
 
 # ---------------------------------------------------------------------------
-# Tests: auto-call draft_viewing_plan after calendar_get_available_slots
+# Tests: chat agent must not auto-call draft_viewing_plan after calendar slots
 # ---------------------------------------------------------------------------
 
 class TestRunAgentStepAutoDraftViewingPlan:
-    def test_auto_drafts_viewing_plan_when_llm_forgets(self):
-        """After calendar_get_available_slots, if LLM returns no tool calls and slots + selected
-        listings exist in history, run_agent_step auto-invokes draft_viewing_plan."""
+    def test_does_not_auto_draft_viewing_plan_when_llm_forgets(self):
+        """After calendar_get_available_slots, if LLM returns no tool calls, chat agent must
+        not auto-invoke draft_viewing_plan (booking is out of chat scope)."""
         slots = sample_available_slots(3)
         listing = sample_listing(id="mls-001")
         listing_dict = listing.model_dump()
 
-        # Build history where:
-        # - rental_search result exists with listing
-        # - ask_user result has selected=[choice with id]
-        # - calendar_get_available_slots result has slots
-        # The last assistant tool_calls message names calendar_get_available_slots
         from rental_search_agent.agent import build_approval_choices
         choices = build_approval_choices([listing])
         selected_choice = choices[0]
@@ -310,17 +305,23 @@ class TestRunAgentStepAutoDraftViewingPlan:
             {"role": "tool", "tool_call_id": "tc-slots", "content": json.dumps({"slots": slots})},
         ]
 
-        # LLM returns a plain reply (no draft_viewing_plan call)
         final = _make_final_reply("I'll help you book viewings.")
 
-        client, model = _make_client(final, _make_final_reply("Plan created."))
+        client, model = _make_client(final)
         updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
-        # There should be a tool message whose content contains "entries" (from auto-drafted plan)
-        tool_msgs = [m for m in updated if m.get("role") == "tool"]
-        entries_msgs = [m for m in tool_msgs if "entries" in (m.get("content") or "")]
-        assert len(entries_msgs) >= 1
+        assert updated[-1]["role"] == "assistant"
+        assert updated[-1]["content"] == "I'll help you book viewings."
+        # No new draft_viewing_plan tool call after the final LLM reply
+        draft_calls = [
+            tc
+            for m in updated
+            if m.get("role") == "assistant"
+            for tc in (m.get("tool_calls") or [])
+            if (tc.get("function") or {}).get("name") == "draft_viewing_plan"
+        ]
+        assert draft_calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,7 @@ class TestSearchCriteriaToTextBlob:
             "max_bedrooms": 3,
             "price_max": 1000000,
             "listing_type": "for_sale",
+            "house_categories": ["Apartment", "Row / Townhouse"],
         }
         blob = search_criteria_to_text_blob(
             criteria,
@@ -167,7 +168,7 @@ class TestSearchCriteriaToTextBlob:
             proximity_rules=[{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
         )
         assert blob == (
-            "Metrotown, Burnaby, BC 3 bedrooms, up to $1000000 list price "
+            "Metrotown, Burnaby, BC 3 bedrooms, up to $1000000 list price, Apartment or Row / Townhouse "
             "must have balcony, parking, storage 5 min walk to nearest transit station"
         )
 

@@ -170,6 +170,10 @@ class TestListingFilterCriteria:
         assert c.min_bedrooms == 2
         assert c.price_max == 2500
 
+    def test_house_categories(self):
+        c = ListingFilterCriteria(house_categories=["Apartment", "House"])
+        assert c.house_categories == ["Apartment", "House"]
+
     def test_ge_constraint(self):
         with pytest.raises(ValidationError):
             ListingFilterCriteria(min_sqft=-1)
