@@ -121,12 +121,22 @@ def normalize_map_label_mode(value: str | None) -> str:
     return "price"
 
 
-def prepare_results_widget_state(session_state: Any) -> str:
-    """Coerce persisted results_view so the Grid/Table/Map control is always valid."""
+def current_results_view(session_state: Any) -> str:
+    """Read/normalize results_view without writing. Safe after the widget exists."""
     view = normalize_results_view(session_state.get("results_view"))
     if view not in WIDGET_RESULTS_VIEWS:
-        view = "grid"
-    session_state["results_view"] = view
+        return "grid"
+    return view
+
+
+def prepare_results_widget_state(session_state: Any) -> str:
+    """Coerce persisted results_view before the Grid/Table/Map control is created.
+
+    Must not write after ``st.segmented_control(key="results_view")`` is instantiated.
+    """
+    view = current_results_view(session_state)
+    if session_state.get("results_view") != view:
+        session_state["results_view"] = view
     return view
 
 
@@ -144,12 +154,22 @@ def ordered_by_caption(sort_by: str | None) -> str | None:
     return f"Ordered by {label.lower()}"
 
 
-def prepare_map_label_widget_state(session_state: Any) -> str:
-    """Coerce persisted map_label_mode so the Price/Match/Rank control is always valid."""
+def current_map_label_mode(session_state: Any) -> str:
+    """Read/normalize map_label_mode without writing. Safe after the widget exists."""
     mode = normalize_map_label_mode(session_state.get("map_label_mode"))
     if mode not in WIDGET_MAP_LABEL_MODES:
-        mode = "price"
-    session_state["map_label_mode"] = mode
+        return "price"
+    return mode
+
+
+def prepare_map_label_widget_state(session_state: Any) -> str:
+    """Coerce persisted map_label_mode before the Price/Match/Rank control is created.
+
+    Must not write after ``st.segmented_control(key="map_label_mode")`` is instantiated.
+    """
+    mode = current_map_label_mode(session_state)
+    if session_state.get("map_label_mode") != mode:
+        session_state["map_label_mode"] = mode
     return mode
 
 
@@ -1249,7 +1269,7 @@ def _render_map_panel(listings: list[dict]) -> None:
         format_func=lambda x: _MAP_LABEL_LABELS.get(x, x.title()),
         key="map_label_mode",
     )
-    label_mode = prepare_map_label_widget_state(st.session_state)
+    label_mode = current_map_label_mode(st.session_state)
     map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
     st.markdown(
         f'<div class="rsa-map-coverage">'
@@ -1277,7 +1297,7 @@ def render_search_results(listings: list[dict]) -> None:
     inject_results_css()
     prepare_results_widget_state(st.session_state)
     _render_results_header(listings)
-    view = prepare_results_widget_state(st.session_state)
+    view = current_results_view(st.session_state)
     if view == "table":
         _render_results_table(listings)
     elif view == "map":

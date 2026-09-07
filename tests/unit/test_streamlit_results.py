@@ -22,6 +22,8 @@ from rental_search_agent.streamlit_results import (
     results_count_label,
     listing_match_score,
     match_score_display,
+    current_map_label_mode,
+    current_results_view,
     normalize_map_label_mode,
     normalize_results_view,
     parse_proximity_display,
@@ -184,6 +186,26 @@ class TestResultsViewState:
         assert prepare_results_widget_state(state) == "map"
         assert state["results_view"] == "map"
 
+    def test_current_view_does_not_write_after_widget(self):
+        state = {"results_view": "table"}
+        assert current_results_view(state) == "table"
+        assert state["results_view"] == "table"
+        stale = {"results_view": "cards"}
+        assert current_results_view(stale) == "grid"
+        assert stale["results_view"] == "cards"
+
+    def test_prepare_skips_noop_write_when_already_canonical(self):
+        writes = []
+
+        class Guard(dict):
+            def __setitem__(self, key, value):
+                writes.append((key, value))
+                super().__setitem__(key, value)
+
+        state = Guard(results_view="grid")
+        assert prepare_results_widget_state(state) == "grid"
+        assert writes == []
+
 
 class TestMapLabelState:
     def test_invalid_falls_back_to_price(self):
@@ -203,6 +225,26 @@ class TestMapLabelState:
         assert state["map_label_mode"] == "match"
         state = {"map_label_mode": "weird"}
         assert prepare_map_label_widget_state(state) == "price"
+
+    def test_current_map_label_does_not_write_after_widget(self):
+        state = {"map_label_mode": "rank"}
+        assert current_map_label_mode(state) == "rank"
+        assert state["map_label_mode"] == "rank"
+        stale = {"map_label_mode": "weird"}
+        assert current_map_label_mode(stale) == "price"
+        assert stale["map_label_mode"] == "weird"
+
+    def test_prepare_map_label_skips_noop_write(self):
+        writes = []
+
+        class Guard(dict):
+            def __setitem__(self, key, value):
+                writes.append((key, value))
+                super().__setitem__(key, value)
+
+        state = Guard(map_label_mode="match")
+        assert prepare_map_label_widget_state(state) == "match"
+        assert writes == []
 
 
 class TestAddressAndSortHelpers:
