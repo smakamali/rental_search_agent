@@ -146,6 +146,12 @@ def _init_session_state() -> None:
         st.session_state["display_source"] = None
     if "last_sort_by" not in st.session_state:
         st.session_state["last_sort_by"] = None
+    if "chat_open" not in st.session_state:
+        st.session_state["chat_open"] = True
+    if "results_view" not in st.session_state:
+        st.session_state["results_view"] = "cards"
+    if "map_label_mode" not in st.session_state:
+        st.session_state["map_label_mode"] = "price"
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
@@ -321,6 +327,60 @@ def _format_match_score(listing: dict) -> str:
         return "—"
 
 
+def _format_listing_price(listing: dict) -> str:
+    """Human-readable price for table/cards.
+
+    Prefer the numeric ``price`` field so scraped ``price_display`` cannot inject
+    Markdown links into any Markdown render path. Fall back to plain display text.
+    """
+    price = listing.get("price")
+    if price is not None:
+        try:
+            return f"${int(float(price)):,}"
+        except (TypeError, ValueError):
+            pass
+    raw = listing.get("price_display")
+    if not raw:
+        return "—"
+    return str(raw)
+
+
+def _analyze_button_key(listing: dict, index: int) -> str:
+    """Stable unique widget key for Analyze. Empty/None ids must not collide."""
+    listing_id = listing.get("id")
+    if listing_id is None or listing_id == "":
+        return f"analyze_row_{index}"
+    return f"analyze_{listing_id}"
+
+
+def _format_map_price_label(listing: dict) -> str:
+    """Compact currency for map pins: $2,800, or $1.25M when price >= 1e6."""
+    price = listing.get("price")
+    if price is None:
+        return "—"
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return "—"
+    if value >= 1_000_000:
+        millions = value / 1_000_000
+        formatted = f"{millions:.2f}".rstrip("0").rstrip(".")
+        return f"${formatted}M"
+    return f"${int(round(value)):,}"
+
+
+def _render_clickable_address(address: str, listing_url: str) -> None:
+    """Address as a new-tab link when a listing URL is present (escaped like map markers)."""
+    label = html.escape(address or "—")
+    if listing_url:
+        st.markdown(
+            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener">{label}</a>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.write(address or "—")
+
+
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     """Build table-friendly rows: rank, photo, address, type, bed, bath, size, price,
     days on market, match score, tags, Proximity, URL.
@@ -335,9 +395,6 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        price = listing.get("price_display") or (
-            f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
-        )
         rows.append({
             "rank": listing.get("rank") if listing.get("rank") is not None else i + 1,
             "photo": listing.get("photo_url") or "",
@@ -346,7 +403,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "bed": _format_bedrooms(listing),
             "bath": f"{float(bath):g}" if bath is not None else "—",
             "size": str(int(sqft)) if sqft is not None else "—",
-            "price": price,
+            "price": _format_listing_price(listing),
             "days_on_market": _format_days_on_market(listing),
             "match_score": _format_match_score(listing),
             "tags": _format_tags(listing),
@@ -374,9 +431,6 @@ def _render_results_table(listings: list[dict]) -> None:
     for i, listing in enumerate(listings):
         bath = listing.get("bathrooms")
         sqft = listing.get("sqft")
-        price = listing.get("price_display") or (
-            f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
-        )
         url = listing.get("url") or ""
         photo_url = listing.get("photo_url") or ""
         prox = _format_proximity_display(listing.get("proximity"))
@@ -401,7 +455,7 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[6]:
             st.write(str(int(sqft)) if sqft is not None else "—")
         with row_cols[7]:
-            st.write(price)
+            st.write(_format_listing_price(listing))
         with row_cols[8]:
             st.write(_format_days_on_market(listing))
         with row_cols[9]:
@@ -411,10 +465,54 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[11]:
             st.caption(prox)
         with row_cols[12]:
-            if st.button("Analyze", key=f"analyze_{listing.get('id', i)}"):
+            if st.button("Analyze", key=_analyze_button_key(listing, i)):
                 st.session_state["analyze_listing_id"] = listing.get("id")
                 st.session_state["analyze_listing"] = listing
                 st.rerun()
+
+
+_CARDS_PER_ROW = 3
+
+
+def _render_results_cards(listings: list[dict]) -> None:
+    """Render search results as a 3-column card grid. Photo and address open the listing."""
+    if not listings:
+        return
+    for row_start in range(0, len(listings), _CARDS_PER_ROW):
+        cols = st.columns(_CARDS_PER_ROW)
+        chunk = listings[row_start : row_start + _CARDS_PER_ROW]
+        for offset, listing in enumerate(chunk):
+            with cols[offset]:
+                url = listing.get("url") or ""
+                photo_url = listing.get("photo_url") or ""
+                i = row_start + offset
+                rank = listing.get("rank") if listing.get("rank") is not None else i + 1
+                bath = listing.get("bathrooms")
+                sqft = listing.get("sqft")
+                bath_txt = f"{float(bath):g}" if bath is not None else "—"
+                size_txt = str(int(sqft)) if sqft is not None else "—"
+                with st.container(border=True):
+                    _render_clickable_photo(photo_url, url, width=220)
+                    st.caption(f"#{rank}")
+                    # Use st.write (not Markdown) so scraped price text cannot inject links.
+                    st.write(_format_listing_price(listing))
+                    _render_clickable_address(listing.get("address") or "—", url)
+                    st.caption(
+                        f"{_format_bedrooms(listing)} bed · {bath_txt} bath · {size_txt} sqft"
+                    )
+                    score = _format_match_score(listing)
+                    if score != "—":
+                        st.caption(f"Match {score}")
+                    tags = _format_tags(listing)
+                    if tags:
+                        st.caption(tags)
+                    prox = _format_proximity_display(listing.get("proximity"))
+                    if prox and prox != "—":
+                        st.caption(prox)
+                    if st.button("Analyze", key=_analyze_button_key(listing, i)):
+                        st.session_state["analyze_listing_id"] = listing.get("id")
+                        st.session_state["analyze_listing"] = listing
+                        st.rerun()
 
 
 def _listings_cache_key(listings: list[dict]) -> str:
@@ -422,45 +520,63 @@ def _listings_cache_key(listings: list[dict]) -> str:
     return json.dumps(listings, sort_keys=True, default=str)
 
 
+def _folium_marker_icon(label: str, url: str, label_mode: str):
+    """DivIcon for a map pin: circle+bold rank, or rectangle+normal-weight price."""
+    url_escaped = html.escape(url or "#")
+    label_escaped = html.escape(str(label))
+    if label_mode == "price":
+        marker_html = (
+            '<div style="font-size:12px;font-weight:normal;color:white;text-align:center;'
+            "line-height:20px;padding:1px 6px;min-width:54px;height:22px;border-radius:4px;"
+            'background-color:#4682B4;border:2px solid white;white-space:nowrap;">'
+            f'<a href="{url_escaped}" target="_blank" rel="noopener" '
+            f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+        )
+        return folium.DivIcon(icon_size=(72, 26), icon_anchor=(36, 13), html=marker_html)
+    marker_html = (
+        '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
+        "line-height:30px;width:30px;height:30px;border-radius:50%;"
+        'background-color:#4682B4;border:2px solid white;">'
+        f'<a href="{url_escaped}" target="_blank" rel="noopener" '
+        f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+    )
+    return folium.DivIcon(icon_size=(32, 32), icon_anchor=(16, 16), html=marker_html)
+
+
+def _add_folium_markers(m, map_points: list[dict], label_mode: str) -> None:
+    for pt in map_points:
+        folium.Marker(
+            location=[pt["lat"], pt["lon"]],
+            icon=_folium_marker_icon(pt["label"], pt.get("url") or "#", label_mode),
+        ).add_to(m)
+
+
 @st.cache_data(show_spinner=False)
-def _get_map_html_cached(listings_json: str) -> str | None:
+def _get_map_html_cached(listings_json: str, label_mode: str = "rank") -> str | None:
     """Build Folium map HTML from listings. Returns None if no map or Folium unavailable.
-    Cached by listings content so map is not rebuilt when results are unchanged."""
+    Cached by listings content and label_mode so toggling rank/price rebuilds pins."""
     if folium is None:
         return None
     listings = json.loads(listings_json) if listings_json else []
-    map_points, center_lat, center_lon = _build_map_data(listings)
+    map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
     if not map_points or center_lat is None or center_lon is None:
         return None
     m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-    for pt in map_points:
-        label = pt["label"]
-        url = pt.get("url") or "#"
-        url_escaped = html.escape(url)
-        folium.Marker(
-            location=[pt["lat"], pt["lon"]],
-            icon=folium.DivIcon(
-                icon_size=(32, 32),
-                icon_anchor=(16, 16),
-                html=(
-                    '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
-                    'line-height:30px;width:30px;height:30px;border-radius:50%;'
-                    'background-color:#4682B4;border:2px solid white;">'
-                    f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-                    'style="color:white;text-decoration:none;">{}</a>'
-                ).format(label),
-            ),
-        ).add_to(m)
+    _add_folium_markers(m, map_points, label_mode)
     return m._repr_html_()
 
 
-def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, float | None]:
+def _build_map_data(
+    listings: list[dict], label_mode: str = "rank"
+) -> tuple[list[dict], float | None, float | None]:
     """Build list of {lat, lon, label, url} for listings with valid coordinates.
     Returns (map_points, center_lat, center_lon). Center is None if no points.
 
-    Labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
+    Rank labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
     rather than position in this list, so map pin numbers stay correct even when this list
     has been locally reordered for display (e.g. the proximity closest-first safeguard).
+    Price labels use compact currency from _format_map_price_label. Default label_mode is
+    "rank" so existing unit tests stay valid; the UI passes the session value (price by default).
     """
     points = []
     lats, lons = [], []
@@ -476,7 +592,10 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
         url = listing.get("url") or ""
-        label = str(listing.get("rank")) if listing.get("rank") is not None else str(i + 1)
+        if label_mode == "price":
+            label = _format_map_price_label(listing)
+        else:
+            label = str(listing.get("rank")) if listing.get("rank") is not None else str(i + 1)
         points.append({"lat": lat, "lon": lon, "label": label, "url": url})
         lats.append(lat)
         lons.append(lon)
@@ -487,30 +606,17 @@ def _build_map_data(listings: list[dict]) -> tuple[list[dict], float | None, flo
     return points, center_lat, center_lon
 
 
-def _render_results_map(map_points: list[dict], center_lat: float, center_lon: float) -> None:
-    """Render a map with points labeled by each listing's rank (see _build_map_data).
+def _render_results_map(
+    map_points: list[dict],
+    center_lat: float,
+    center_lon: float,
+    label_mode: str = "rank",
+) -> None:
+    """Render a map with points labeled by rank or price (see _build_map_data).
     Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
     if folium is not None:
-        # Folium: markers with DivIcon so all numbers (1–9, 10, 11, ...) render correctly
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-        for pt in map_points:
-            label = pt["label"]
-            url = pt.get("url") or "#"
-            url_escaped = html.escape(url)
-            folium.Marker(
-                location=[pt["lat"], pt["lon"]],
-                icon=folium.DivIcon(
-                    icon_size=(32, 32),
-                    icon_anchor=(16, 16),
-                    html=(
-                        '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
-                        'line-height:30px;width:30px;height:30px;border-radius:50%;'
-                        'background-color:#4682B4;border:2px solid white;">'
-                        f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-                        'style="color:white;text-decoration:none;">{}</a>'
-                    ).format(label),
-                ),
-            ).add_to(m)
+        _add_folium_markers(m, map_points, label_mode)
         st.components.v1.html(m._repr_html_(), height=400, scrolling=False)
         return
     if pdk is not None:
@@ -550,6 +656,98 @@ def _render_results_map(map_points: list[dict], center_lat: float, center_lon: f
         )
         return
     st.caption("Map unavailable: install folium (recommended) or pydeck to show results on a map.")
+
+
+def _inject_chat_blob_css() -> None:
+    """Dock the chat launcher/panel to the viewport.
+
+    Use attribute selectors — Streamlit's st-key-* class may sit on a wrapper.
+    Prefer theme CSS variables for opaque backgrounds so light/dark both stay readable.
+    When the panel is open, reserve right padding so results are not covered.
+    """
+    chat_open = st.session_state.get("chat_open", True)
+    # Keep results clear of the fixed ~420px panel while chat is open.
+    pad_right = "min(440px, calc(100vw - 1.5rem))" if chat_open else "1rem"
+    st.markdown(
+        f"""
+        <style>
+        [class*="st-key-chat_blob"] {{
+            position: fixed !important;
+            /* Clear Streamlit's top toolbar (Deploy / Stop / menu) so the collapse
+               control is not covered. Header is typically ~2.875–3.5rem. */
+            top: 3.75rem !important;
+            right: 0.75rem !important;
+            bottom: 0.75rem !important;
+            left: auto !important;
+            height: auto !important;
+            max-height: none !important;
+            width: min(420px, calc(100vw - 1.5rem)) !important;
+            z-index: 10000 !important;
+            background-color: var(--secondary-background-color, #0e1117) !important;
+            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
+            padding: 0.6rem 0.75rem 0.75rem !important;
+            overflow: visible !important;
+        }}
+        [class*="st-key-chat_blob"] [data-testid="stVerticalBlock"],
+        [class*="st-key-chat_blob"] [data-testid="stVerticalBlockBorderWrapper"] {{
+            background-color: var(--secondary-background-color, #0e1117) !important;
+        }}
+        [class*="st-key-chat_history"] {{
+            height: calc(100vh - 16rem) !important;
+            max-height: calc(100vh - 16rem) !important;
+            overflow: auto !important;
+        }}
+        [data-baseweb="popover"],
+        [data-baseweb="menu"],
+        [data-testid="stSelectboxVirtualDropdown"],
+        [data-testid="stMultiSelect"] [data-baseweb="popover"] {{
+            z-index: 2147483647 !important;
+        }}
+        /* Exact launcher container only — do not match chat_open_btn / chat_close_btn. */
+        [class*="st-key-chat_launcher"] {{
+            position: fixed !important;
+            bottom: 1.25rem !important;
+            right: 1.25rem !important;
+            z-index: 10000 !important;
+            width: auto !important;
+            background-color: var(--secondary-background-color, #0e1117) !important;
+            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border-radius: 24px !important;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+            padding: 0.35rem 0.5rem !important;
+        }}
+        .block-container {{
+            padding-bottom: 6rem;
+            padding-right: {pad_right} !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _apply_listing_state(listing_state: dict | None) -> None:
+    """Copy listing_state from an agent step into session_state."""
+    if listing_state is None:
+        return
+    if listing_state.get("display_source") is not None:
+        st.session_state["display_list"] = listing_state.get("display_list", [])
+        st.session_state["display_source"] = listing_state.get("display_source")
+        st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
+    if "master_list" in listing_state:
+        st.session_state["master_list"] = listing_state.get("master_list") or []
+
+
+def _run_user_prompt(client, model, prompt: str) -> None:
+    """Append a user message, run one agent step, and rerun."""
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+    payload, listing_state = _run_agent_step_with_ui(client, model)
+    _apply_listing_state(listing_state)
+    if payload is not None:
+        st.session_state["pending_ask"] = payload
+    st.rerun()
 
 
 def _render_chat_history() -> None:
@@ -667,6 +865,10 @@ def _render_preferences_sidebar() -> None:
                 _save_preferences_to_file(new_prefs)
                 st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
                 st.rerun()
+        if not st.session_state.get("chat_open", True):
+            if st.button("Open chat", key="sidebar_chat_open"):
+                st.session_state["chat_open"] = True
+                st.rerun()
 
 
 def _render_ask_form(pending: dict) -> None:
@@ -674,17 +876,23 @@ def _render_ask_form(pending: dict) -> None:
     st.markdown(f"**{pending['prompt']}**")
     choices = pending.get("choices") or []
     allow_multiple = pending.get("allow_multiple", False)
+    # Include tool_call_id so widget state does not leak across different ask_user prompts.
+    ask_key = pending.get("tool_call_id") or "ask"
 
     with st.form("ask_user_form", clear_on_submit=True):
         if choices:
             if allow_multiple:
-                selected = st.multiselect("Select one or more", choices, key="ask_multiselect")
+                selected = st.multiselect(
+                    "Select one or more", choices, key=f"ask_multiselect_{ask_key}"
+                )
                 submit_val = selected
             else:
-                selected = st.selectbox("Choose one", [""] + choices, key="ask_selectbox")
+                selected = st.selectbox(
+                    "Choose one", [""] + choices, key=f"ask_selectbox_{ask_key}"
+                )
                 submit_val = selected if selected else None
         else:
-            submit_val = st.text_input("Your answer", key="ask_text")
+            submit_val = st.text_input("Your answer", key=f"ask_text_{ask_key}")
 
         submitted = st.form_submit_button("Submit")
         if submitted:
@@ -707,14 +915,7 @@ def _render_ask_form(pending: dict) -> None:
             # Run step in a loop until no more pending ask (or we get final reply)
             while True:
                 payload, listing_state = _run_agent_step_with_ui(client, model)
-                if listing_state is not None:
-                    if listing_state.get("display_source") is not None:
-                        # Always replace, including empty lists (zero-result search/filter).
-                        st.session_state["display_list"] = listing_state.get("display_list", [])
-                        st.session_state["display_source"] = listing_state.get("display_source")
-                        st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
-                    if "master_list" in listing_state:
-                        st.session_state["master_list"] = listing_state.get("master_list") or []
+                _apply_listing_state(listing_state)
                 if payload is not None:
                     st.session_state["pending_ask"] = payload
                     st.rerun()
@@ -722,12 +923,54 @@ def _render_ask_form(pending: dict) -> None:
             st.rerun()
 
 
+def _render_chat_panel(client, model) -> None:
+    """Collapsed FAB or open bottom-right chat panel (history + ask_user + send form)."""
+    if not st.session_state.get("chat_open", True):
+        with st.container(key="chat_launcher"):
+            label = "Chat •" if st.session_state.get("pending_ask") else "Open chat"
+            if st.button(label, key="chat_open_btn", type="primary"):
+                st.session_state["chat_open"] = True
+                st.rerun()
+        return
+
+    with st.container(key="chat_blob"):
+        head_col, collapse_col = st.columns([4, 1])
+        with head_col:
+            st.markdown("**Chat**")
+        with collapse_col:
+            if st.button("–", key="chat_close_btn", help="Collapse chat"):
+                st.session_state["chat_open"] = False
+                st.rerun()
+        # Height is driven by CSS on st-key-chat_history so short viewports do not fight
+        # a fixed 720px Python height against the full-height dock.
+        with st.container(key="chat_history"):
+            _render_chat_history()
+            pending_prompt = st.session_state.pop("pending_chat_prompt", None)
+            if pending_prompt:
+                _run_user_prompt(client, model, pending_prompt)
+        pending = st.session_state.get("pending_ask")
+        if pending is not None:
+            _render_ask_form(pending)
+            return
+        with st.form("chat_send_form", clear_on_submit=True):
+            prompt = st.text_input(
+                "Message",
+                label_visibility="collapsed",
+                placeholder="e.g. 2 bed rental in Vancouver under 3000",
+            )
+            submitted = st.form_submit_button("Send")
+            if submitted and (prompt or "").strip():
+                st.session_state["pending_chat_prompt"] = prompt.strip()
+                st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
-    st.title("Property Search Assistant")
-
     _ensure_env_loaded()
     _init_session_state()
+    _inject_chat_blob_css()
+    st.title("Property Search Assistant")
+
     _render_preferences_sidebar()
 
     client, model = _get_client_and_model()
@@ -735,195 +978,189 @@ def main() -> None:
         st.error("Set API_PROVIDER (openrouter or openai) and the corresponding API key (OPENROUTER_API_KEY or OPENAI_API_KEY) in .env to run the assistant.")
         st.stop()
 
-    col_content, col_chat = st.columns([2, 1], vertical_alignment="bottom")
-
-    with col_content:
-        prefs = st.session_state.get("user_preferences") or {}
-        listings = st.session_state.get("display_list") or []
-        proximity_text = (prefs.get("proximity_preferences") or "").strip()
-        display_source = st.session_state.get("display_source")
-        # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally.
-        # Note: this must NOT independently re-sort listings (e.g. "closest first") — the
-        # LLM is instructed (agent.py step 4p) to sort_by="proximity" itself as part of its
-        # post-enrich filter_listings call, so its canonical order (and each listing's
-        # 'rank', which the LLM uses for "listing N" references) is already nearest-first.
-        # A separate local sort here would visually reorder rows without renumbering rank,
-        # making the Rank column look unsorted even though it's still correctly identifying
-        # each listing.
-        if proximity_text and display_source == "enrich" and listings:
-            listings = _apply_proximity_filter_safeguard(listings, proximity_text)
-        # Default display sort: rank by match score (semantic_score) when available, so
-        # the best qualitative matches surface first in both the table and the map. This
-        # is display-only (see _apply_default_match_score_sort docstring re: 'rank').
-        # Bugbot regression guard: only apply this fallback when no *explicit* non-score
-        # sort is currently active (e.g. the agent just ran filter_listings with
-        # sort_by="price"/"proximity"/etc.) — otherwise this would silently clobber that
-        # explicit sort and desync the table from what the agent told the user it did.
-        last_sort_by = st.session_state.get("last_sort_by")
-        if last_sort_by is None or last_sort_by == "semantic_score":
-            listings = _apply_default_match_score_sort(listings)
-        if listings:
-            with st.expander("Search results table", expanded=True):
+    prefs = st.session_state.get("user_preferences") or {}
+    listings = st.session_state.get("display_list") or []
+    proximity_text = (prefs.get("proximity_preferences") or "").strip()
+    display_source = st.session_state.get("display_source")
+    # Optional safeguard: when display is from enrich and proximity prefs set, apply filter locally.
+    # Note: this must NOT independently re-sort listings (e.g. "closest first") — the
+    # LLM is instructed (agent.py step 4p) to sort_by="proximity" itself as part of its
+    # post-enrich filter_listings call, so its canonical order (and each listing's
+    # 'rank', which the LLM uses for "listing N" references) is already nearest-first.
+    # A separate local sort here would visually reorder rows without renumbering rank,
+    # making the Rank column look unsorted even though it's still correctly identifying
+    # each listing.
+    if proximity_text and display_source == "enrich" and listings:
+        listings = _apply_proximity_filter_safeguard(listings, proximity_text)
+    # Default display sort: rank by match score (semantic_score) when available, so
+    # the best qualitative matches surface first in both the table and the map. This
+    # is display-only (see _apply_default_match_score_sort docstring re: 'rank').
+    # Bugbot regression guard: only apply this fallback when no *explicit* non-score
+    # sort is currently active (e.g. the agent just ran filter_listings with
+    # sort_by="price"/"proximity"/etc.) — otherwise this would silently clobber that
+    # explicit sort and desync the table from what the agent told the user it did.
+    last_sort_by = st.session_state.get("last_sort_by")
+    if last_sort_by is None or last_sort_by == "semantic_score":
+        listings = _apply_default_match_score_sort(listings)
+    if listings:
+        st.segmented_control(
+            "Results view",
+            options=["cards", "table"],
+            format_func=lambda x: "Cards" if x == "cards" else "Table",
+            key="results_view",
+        )
+        with st.expander("Search results", expanded=True):
+            if st.session_state.get("results_view") == "table":
                 _render_results_table(listings)
-            # Analysis card: when user clicked Analyze, run analysis and show result
-            analyze_listing_id = st.session_state.get("analyze_listing_id")
-            analyze_listing = st.session_state.get("analyze_listing")
-            analysis_result = st.session_state.get("analysis_result", {})
-            if analyze_listing_id and analyze_listing:
-                prefs = st.session_state.get("user_preferences") or {}
-                qualitative = (prefs.get("qualitative_preferences") or "").strip()
-                proximity = (prefs.get("proximity_preferences") or "").strip()
-                preferences_text = qualitative
-                if proximity:
-                    preferences_text = (
-                        f"{preferences_text}\n\nProximity: {proximity}".strip()
-                        if preferences_text
-                        else f"Proximity: {proximity}"
-                    )
-                if not preferences_text:
-                    with st.expander("Analysis result", expanded=True):
-                        st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
-                        if st.button("Clear analysis"):
-                            st.session_state["analyze_listing_id"] = None
-                            st.session_state["analyze_listing"] = None
-                            st.rerun()
-                else:
-                    messages = st.session_state["messages"]
-                    current_count = len(messages)
-                    if st.session_state.get("chat_summary_message_count") != current_count:
-                        with st.spinner("Summarizing conversation..."):
-                            summary = summarize_conversation_for_preferences(messages)
-                            st.session_state["chat_summary"] = summary or ""
-                            st.session_state["chat_summary_message_count"] = current_count
-                            st.session_state["analysis_result"] = {}
+            else:
+                _render_results_cards(listings)
+        # Analysis card: when user clicked Analyze, run analysis and show result
+        analyze_listing_id = st.session_state.get("analyze_listing_id")
+        analyze_listing = st.session_state.get("analyze_listing")
+        analysis_result = st.session_state.get("analysis_result", {})
+        if analyze_listing_id and analyze_listing:
+            prefs = st.session_state.get("user_preferences") or {}
+            qualitative = (prefs.get("qualitative_preferences") or "").strip()
+            proximity = (prefs.get("proximity_preferences") or "").strip()
+            preferences_text = qualitative
+            if proximity:
+                preferences_text = (
+                    f"{preferences_text}\n\nProximity: {proximity}".strip()
+                    if preferences_text
+                    else f"Proximity: {proximity}"
+                )
+            if not preferences_text:
+                with st.expander("Analysis result", expanded=True):
+                    st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
+                    if st.button("Clear analysis"):
+                        st.session_state["analyze_listing_id"] = None
+                        st.session_state["analyze_listing"] = None
                         st.rerun()
-                    conversation_context = st.session_state.get("chat_summary") or ""
-                    if analyze_listing_id not in analysis_result:
-                        with st.spinner("Analyzing listing..."):
-                            try:
-                                # Build the same listing-blob-shaped embedding query
-                                # score_listings_by_preferences uses for the table's
-                                # semantic_score/"Match score" column (bed/bath/sqft/price/
-                                # location + qualitative preferences + proximity), reusing the
-                                # same message-history reconstruction so both surfaces stay
-                                # consistent for the same listing/preferences. preferences_text
-                                # above (which also folds in proximity) still drives the
-                                # narrative key_matches/key_gaps, unaffected by this override.
-                                chat_messages = st.session_state.get("messages") or []
-                                search_criteria = _get_active_search_criteria_from_messages(chat_messages)
-                                proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                                score_query_text = search_criteria_to_text_blob(
-                                    search_criteria, qualitative, proximity_rules
-                                )
-                                result = analyze_listing_against_preferences(
-                                    analyze_listing,
-                                    preferences_text,
-                                    conversation_context=conversation_context or None,
-                                    score_query_text=score_query_text or None,
-                                )
-                                st.session_state.setdefault("analysis_result", {})[
-                                    analyze_listing_id
-                                ] = result
-                            except Exception as e:
-                                st.session_state.setdefault("analysis_result", {})[
-                                    analyze_listing_id
-                                ] = {"error": str(e)}
-                        st.rerun()
-                    result = st.session_state["analysis_result"].get(analyze_listing_id)
-                    if result and isinstance(result, dict):
-                        if "error" in result:
-                            with st.expander("Analysis result", expanded=True):
-                                st.error(result["error"])
-                                if st.button("Clear analysis"):
-                                    st.session_state["analyze_listing_id"] = None
-                                    st.session_state["analyze_listing"] = None
-                                    st.session_state["analysis_result"] = {}
-                                    st.rerun()
-                        else:
-                            addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
-                            with st.expander(f"Analysis: {addr}", expanded=True):
-                                photo_url = analyze_listing.get("photo_url") or ""
-                                _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
-                                detail_bits = []
-                                if analyze_listing.get("id") and analyze_listing.get("url"):
-                                    mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
-                                    detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
-                                if analyze_listing.get("property_category"):
-                                    detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
-                                if analyze_listing.get("lot_size"):
-                                    detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
-                                if analyze_listing.get("listing_age_display"):
-                                    detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
-                                if analyze_listing.get("price_change_display"):
-                                    detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
-                                if analyze_listing.get("open_house"):
-                                    detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
-                                if analyze_listing.get("agent_name"):
-                                    agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
-                                    if analyze_listing.get("agent_phone"):
-                                        agent_bit += f" ({analyze_listing['agent_phone']})"
-                                    detail_bits.append(agent_bit)
-                                if analyze_listing.get("brokerage_name"):
-                                    detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
-                                if analyze_listing.get("video_url"):
-                                    detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
-                                if detail_bits:
-                                    st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
-                                st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
-                                col_matches, col_gaps = st.columns(2)
-                                with col_matches:
-                                    st.subheader("Key matches")
-                                    for m in result.get("key_matches") or []:
-                                        st.markdown(f"- {m}")
-                                with col_gaps:
-                                    st.subheader("Key gaps")
-                                    for g in result.get("key_gaps") or []:
-                                        st.markdown(f"- {g}")
-                                if st.button("Clear analysis"):
-                                    st.session_state["analyze_listing_id"] = None
-                                    st.session_state["analyze_listing"] = None
-                                    st.rerun()
-            map_points, center_lat, center_lon = _build_map_data(listings)
-            if map_points and center_lat is not None and center_lon is not None:
-                with st.expander("Search results map", expanded=True):
-                    if folium is not None:
-                        map_html = _get_map_html_cached(_listings_cache_key(listings))
-                        if map_html:
-                            st.components.v1.html(map_html, height=400, scrolling=False)
-                        else:
-                            _render_results_map(map_points, center_lat, center_lon)
+            else:
+                messages = st.session_state["messages"]
+                current_count = len(messages)
+                if st.session_state.get("chat_summary_message_count") != current_count:
+                    with st.spinner("Summarizing conversation..."):
+                        summary = summarize_conversation_for_preferences(messages)
+                        st.session_state["chat_summary"] = summary or ""
+                        st.session_state["chat_summary_message_count"] = current_count
+                        st.session_state["analysis_result"] = {}
+                    st.rerun()
+                conversation_context = st.session_state.get("chat_summary") or ""
+                if analyze_listing_id not in analysis_result:
+                    with st.spinner("Analyzing listing..."):
+                        try:
+                            # Build the same listing-blob-shaped embedding query
+                            # score_listings_by_preferences uses for the table's
+                            # semantic_score/"Match score" column (bed/bath/sqft/price/
+                            # location + qualitative preferences + proximity), reusing the
+                            # same message-history reconstruction so both surfaces stay
+                            # consistent for the same listing/preferences. preferences_text
+                            # above (which also folds in proximity) still drives the
+                            # narrative key_matches/key_gaps, unaffected by this override.
+                            chat_messages = st.session_state.get("messages") or []
+                            search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                            proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                            score_query_text = search_criteria_to_text_blob(
+                                search_criteria, qualitative, proximity_rules
+                            )
+                            result = analyze_listing_against_preferences(
+                                analyze_listing,
+                                preferences_text,
+                                conversation_context=conversation_context or None,
+                                score_query_text=score_query_text or None,
+                            )
+                            st.session_state.setdefault("analysis_result", {})[
+                                analyze_listing_id
+                            ] = result
+                        except Exception as e:
+                            st.session_state.setdefault("analysis_result", {})[
+                                analyze_listing_id
+                            ] = {"error": str(e)}
+                    st.rerun()
+                result = st.session_state["analysis_result"].get(analyze_listing_id)
+                if result and isinstance(result, dict):
+                    if "error" in result:
+                        with st.expander("Analysis result", expanded=True):
+                            st.error(result["error"])
+                            if st.button("Clear analysis"):
+                                st.session_state["analyze_listing_id"] = None
+                                st.session_state["analyze_listing"] = None
+                                st.session_state["analysis_result"] = {}
+                                st.rerun()
                     else:
-                        _render_results_map(map_points, center_lat, center_lon)
-            elif not map_points:
-                with st.expander("Search results map", expanded=False):
-                    st.caption("No map: addresses have no coordinates.")
-        else:
-            st.caption("Run a search to see results here.")
+                        addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
+                        with st.expander(f"Analysis: {addr}", expanded=True):
+                            photo_url = analyze_listing.get("photo_url") or ""
+                            _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
+                            detail_bits = []
+                            if analyze_listing.get("id") and analyze_listing.get("url"):
+                                mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
+                                detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
+                            if analyze_listing.get("property_category"):
+                                detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
+                            if analyze_listing.get("lot_size"):
+                                detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
+                            if analyze_listing.get("listing_age_display"):
+                                detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
+                            if analyze_listing.get("price_change_display"):
+                                detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
+                            if analyze_listing.get("open_house"):
+                                detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
+                            if analyze_listing.get("agent_name"):
+                                agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
+                                if analyze_listing.get("agent_phone"):
+                                    agent_bit += f" ({analyze_listing['agent_phone']})"
+                                detail_bits.append(agent_bit)
+                            if analyze_listing.get("brokerage_name"):
+                                detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
+                            if analyze_listing.get("video_url"):
+                                detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
+                            if detail_bits:
+                                st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
+                            st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
+                            col_matches, col_gaps = st.columns(2)
+                            with col_matches:
+                                st.subheader("Key matches")
+                                for m in result.get("key_matches") or []:
+                                    st.markdown(f"- {m}")
+                            with col_gaps:
+                                st.subheader("Key gaps")
+                                for g in result.get("key_gaps") or []:
+                                    st.markdown(f"- {g}")
+                            if st.button("Clear analysis"):
+                                st.session_state["analyze_listing_id"] = None
+                                st.session_state["analyze_listing"] = None
+                                st.rerun()
+        label_mode = st.session_state.get("map_label_mode") or "price"
+        map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
+        if map_points and center_lat is not None and center_lon is not None:
+            with st.expander("Search results map", expanded=True):
+                st.segmented_control(
+                    "Map labels",
+                    options=["price", "rank"],
+                    format_func=lambda x: "Price" if x == "price" else "Rank",
+                    key="map_label_mode",
+                )
+                label_mode = st.session_state.get("map_label_mode") or "price"
+                map_points, center_lat, center_lon = _build_map_data(
+                    listings, label_mode=label_mode
+                )
+                if folium is not None:
+                    map_html = _get_map_html_cached(_listings_cache_key(listings), label_mode)
+                    if map_html:
+                        st.components.v1.html(map_html, height=400, scrolling=False)
+                    else:
+                        _render_results_map(map_points, center_lat, center_lon, label_mode)
+                else:
+                    _render_results_map(map_points, center_lat, center_lon, label_mode)
+        elif not map_points:
+            with st.expander("Search results map", expanded=False):
+                st.caption("No map: addresses have no coordinates.")
+    else:
+        st.caption("Run a search to see results here.")
 
-    with col_chat:
-        st.subheader("Chat")
-        _render_chat_history()
-        pending = st.session_state.get("pending_ask")
-        if pending is not None:
-            with st.chat_message("assistant"):
-                _render_ask_form(pending)
-            return
-        if prompt := st.chat_input("e.g. 2 bed rental in Vancouver under 3000, or condo for sale in Toronto under 900k"):
-            st.session_state["messages"].append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            payload, listing_state = _run_agent_step_with_ui(client, model)
-            if listing_state is not None:
-                if listing_state.get("display_source") is not None:
-                    # Always replace, including empty lists (zero-result search/filter).
-                    st.session_state["display_list"] = listing_state.get("display_list", [])
-                    st.session_state["display_source"] = listing_state.get("display_source")
-                    st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
-                if "master_list" in listing_state:
-                    st.session_state["master_list"] = listing_state.get("master_list") or []
-            if payload is not None:
-                st.session_state["pending_ask"] = payload
-            st.rerun()
+    _render_chat_panel(client, model)
 
 
 def run_ui() -> None:

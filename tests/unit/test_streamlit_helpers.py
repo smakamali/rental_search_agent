@@ -10,12 +10,15 @@ import pytest
 from rental_search_agent.models import ProximityRule
 from rental_search_agent.streamlit_app import (
     PREF_KEYS,
+    _analyze_button_key,
     _apply_default_match_score_sort,
     _apply_proximity_filter_safeguard,
     _build_map_data,
     _escape_markdown_link_text,
     _format_bedrooms,
     _format_days_on_market,
+    _format_listing_price,
+    _format_map_price_label,
     _format_match_score,
     _listings_to_table_rows,
     _load_preferences_from_file,
@@ -175,6 +178,15 @@ class TestDisplayRankUsage:
         assert points[0]["label"] == "2"
         assert points[1]["label"] == "1"
 
+    def test_map_labels_use_compact_price_when_requested(self):
+        listings = [
+            {"id": "b", "rank": 2, "price": 2800, "latitude": 49.28, "longitude": -123.12},
+            {"id": "a", "rank": 1, "price": 1_250_000, "latitude": 49.29, "longitude": -123.13},
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="price")
+        assert points[0]["label"] == "$2,800"
+        assert points[1]["label"] == "$1.25M"
+
     def test_proximity_safeguard_preserves_rank_across_filter_roundtrip(self):
         rule = ProximityRule(location="downtown", mode="drive", max_minutes=30)
         listings = [
@@ -309,6 +321,44 @@ class TestEscapeMarkdownLinkText:
 
     def test_escapes_backslash(self):
         assert _escape_markdown_link_text("a\\b") == "a\\\\b"
+
+
+class TestFormatListingPrice:
+    def test_prefers_numeric_price_over_display(self):
+        assert _format_listing_price({"price": 2800, "price_display": "$2,800 [x](https://evil)"}) == "$2,800"
+
+    def test_falls_back_to_display_when_no_numeric_price(self):
+        assert _format_listing_price({"price_display": "$2,800/mo"}) == "$2,800/mo"
+
+    def test_missing_price_returns_dash(self):
+        assert _format_listing_price({}) == "—"
+
+
+class TestAnalyzeButtonKey:
+    def test_uses_listing_id_when_present(self):
+        assert _analyze_button_key({"id": "abc"}, 0) == "analyze_abc"
+
+    def test_falls_back_when_id_missing_or_empty(self):
+        assert _analyze_button_key({}, 3) == "analyze_row_3"
+        assert _analyze_button_key({"id": None}, 4) == "analyze_row_4"
+        assert _analyze_button_key({"id": ""}, 5) == "analyze_row_5"
+
+
+class TestFormatMapPriceLabel:
+    def test_formats_typical_rent(self):
+        assert _format_map_price_label({"price": 2800}) == "$2,800"
+
+    def test_formats_large_sale_as_millions(self):
+        assert _format_map_price_label({"price": 1_250_000}) == "$1.25M"
+
+    def test_formats_exact_million_without_decimals(self):
+        assert _format_map_price_label({"price": 1_000_000}) == "$1M"
+
+    def test_missing_price_returns_dash(self):
+        assert _format_map_price_label({}) == "—"
+
+    def test_non_numeric_price_returns_dash(self):
+        assert _format_map_price_label({"price": "n/a"}) == "—"
 
 
 class TestApplyDefaultMatchScoreSort:
