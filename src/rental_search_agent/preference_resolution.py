@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping, Optional
+import json
 
 from pydantic import BaseModel, Field
 
@@ -126,6 +128,42 @@ def is_placeholder_qualitative(text: str | None) -> bool:
     if not s:
         return True
     return s in PLACEHOLDER_QUALITATIVE
+
+
+def qualitative_from_preferences_text(text: str | None) -> str:
+    """Return qualitative prefs only: strip a trailing Proximity: block and placeholders.
+
+    Analyze/score tools often receive combined strings like
+    'balcony, parking\\n\\nProximity: 5 min walk to transit'. Proximity is scored from
+    parsed rules, so that section must not become qualitative_preferences (semantic/amenity).
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    for sep in ("\n\nProximity:", "\nProximity:"):
+        if sep in s:
+            s = s.split(sep, 1)[0].strip()
+            break
+    if is_placeholder_qualitative(s):
+        return ""
+    return s
+
+
+def preferences_file_path() -> Path:
+    return Path.home() / ".rental_search_agent" / "preferences.json"
+
+
+def load_stored_preferences() -> dict[str, str]:
+    """Load persisted Search Preferences JSON; empty strings for missing keys."""
+    default = {k: "" for k in PREF_KEYS}
+    path = preferences_file_path()
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text())
+        return {k: data.get(k, "") or "" for k in PREF_KEYS}
+    except Exception:
+        return default
 
 
 def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:

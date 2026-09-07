@@ -12,6 +12,7 @@ from rental_search_agent.preference_resolution import (
     EffectiveSearchPreferences,
     is_placeholder_qualitative,
     merge_chat_over_stored,
+    qualitative_from_preferences_text,
 )
 from rental_search_agent.semantic_scoring import listing_to_text_blob
 
@@ -65,12 +66,7 @@ def analyze_listing_against_preferences(
 
     chat = dict(chat_criteria or {})
     narrative_source = preferences_text
-    # Strip UI/agent placeholders and proximity narrative so they don't become qualitative.
-    qual_from_text = ""
-    if preferences_text:
-        head = preferences_text.split("\n\nProximity:")[0].strip()
-        if head and not is_placeholder_qualitative(head):
-            qual_from_text = head
+    qual_from_text = qualitative_from_preferences_text(preferences_text)
     if qual_from_text and not chat.get("qualitative_preferences"):
         chat.setdefault("qualitative_preferences", qual_from_text)
 

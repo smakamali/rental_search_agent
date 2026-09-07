@@ -38,6 +38,7 @@ from rental_search_agent.preference_resolution import (
     is_placeholder_qualitative,
     merge_chat_over_stored,
     preferences_block as _shared_preferences_block,
+    qualitative_from_preferences_text,
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
@@ -877,11 +878,11 @@ def run_tool(
         listings = current_listings if current_listings is not None else []
         if not listings:
             return json.dumps({"error": "No current search results to score. Run a search first."})
-        preferences_text = (arguments.get("preferences_text") or "").strip()
+        preferences_text = qualitative_from_preferences_text(arguments.get("preferences_text") or "")
         stored = _load_preferences_from_file()
         chat = dict(search_criteria or {})
         # Never treat agent/UI placeholders as qualitative overrides of stored prefs.
-        if preferences_text and not is_placeholder_qualitative(preferences_text):
+        if preferences_text:
             chat["qualitative_preferences"] = preferences_text
         elif (stored.get("qualitative_preferences") or "").strip():
             chat.setdefault(
@@ -922,10 +923,9 @@ def run_tool(
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
         stored = _load_preferences_from_file()
         chat = dict(search_criteria or {})
-        if preferences_text and not is_placeholder_qualitative(
-            preferences_text.split("\n\nProximity:")[0].strip()
-        ):
-            chat["qualitative_preferences"] = preferences_text
+        qual_head = qualitative_from_preferences_text(preferences_text)
+        if qual_head:
+            chat["qualitative_preferences"] = qual_head
         effective = merge_chat_over_stored(stored, chat)
         if is_placeholder_qualitative(effective.qualitative_preferences):
             effective = effective.model_copy(update={"qualitative_preferences": ""})

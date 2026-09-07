@@ -731,6 +731,8 @@ class TestRunToolAnalyzeListingPreferencesMultiMetric:
 
         assert captured["preferences_text"] == combined_preferences
         assert captured["kwargs"]["effective_prefs"].min_bedrooms == 3
+        assert captured["kwargs"]["effective_prefs"].qualitative_preferences == "must have balcony"
+        assert "Proximity" not in (captured["kwargs"]["chat_criteria"].get("qualitative_preferences") or "")
         assert captured["kwargs"]["proximity_rules"][0]["mode"] == "walk"
 
 

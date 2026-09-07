@@ -7,6 +7,7 @@ import pytest
 from rental_search_agent.adapter import SearchBackendError
 from rental_search_agent.models import Listing, RentalSearchResponse
 from rental_search_agent.server import (
+    analyze_listing_preferences,
     ask_user,
     calendar_create_event,
     calendar_delete_event,
@@ -17,6 +18,7 @@ from rental_search_agent.server import (
     filter_listings,
     modify_viewing_plan,
     rental_search,
+    score_listings_by_preferences,
     simulate_viewing_request,
     summarize_listings,
 )
@@ -296,3 +298,68 @@ class TestCalendarDeleteEvent:
         with patch("rental_search_agent.server.do_calendar_delete_event"):
             result = calendar_delete_event("ev123")
             assert result["deleted"] == "ev123"
+
+
+class TestScoreAndAnalyzeUseStoredPrefs:
+    def test_score_loads_stored_prefs_without_preferences_text(self):
+        listings = [l.model_dump() for l in sample_listings(1)]
+        stored = {
+            "budget_max": "3000",
+            "min_bedrooms": "2",
+            "max_bedrooms": "",
+            "min_bathrooms": "",
+            "require_den": "",
+            "min_sqft": "",
+            "proximity_preferences": "",
+            "qualitative_preferences": "",
+            "viewing_preference": "",
+            "name": "",
+            "email": "",
+            "phone": "",
+        }
+        captured = {}
+
+        def fake_score(listings_arg, preferences_text="", **kwargs):
+            captured["effective"] = kwargs.get("effective_prefs")
+            captured["proximity_rules"] = kwargs.get("proximity_rules")
+            return [dict(listings_arg[0], match_score=0.9)]
+
+        with patch("rental_search_agent.server.load_stored_preferences", return_value=stored):
+            with patch(
+                "rental_search_agent.server.do_score_listings_by_preferences",
+                side_effect=fake_score,
+            ):
+                result = score_listings_by_preferences(listings, preferences_text="")
+        assert result["total_count"] == 1
+        assert captured["effective"].budget_max == 3000
+        assert captured["effective"].min_bedrooms == 2
+        assert captured["proximity_rules"] == []
+
+    def test_analyze_strips_proximity_and_passes_rules(self):
+        captured = {}
+
+        def fake_analyze(listing, preferences_text, **kwargs):
+            captured["text"] = preferences_text
+            captured["kwargs"] = kwargs
+            return {"match_score_pct": 80, "key_matches": [], "key_gaps": []}
+
+        stored = {k: "" for k in (
+            "budget_max", "min_bedrooms", "max_bedrooms", "min_bathrooms",
+            "require_den", "min_sqft", "proximity_preferences", "qualitative_preferences",
+            "viewing_preference", "name", "email", "phone",
+        )}
+        stored["min_bedrooms"] = "2"
+        rules = [{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}]
+        with patch("rental_search_agent.server.load_stored_preferences", return_value=stored):
+            with patch(
+                "rental_search_agent.server.do_analyze_listing_against_preferences",
+                side_effect=fake_analyze,
+            ):
+                analyze_listing_preferences(
+                    {"id": "a", "title": "A", "url": "https://x", "address": "1", "price": 1, "bedrooms": 2},
+                    "balcony\n\nProximity: 5 min walk",
+                    proximity_rules=rules,
+                )
+        assert captured["kwargs"]["effective_prefs"].min_bedrooms == 2
+        assert captured["kwargs"]["effective_prefs"].qualitative_preferences == "balcony"
+        assert captured["kwargs"]["proximity_rules"] == rules

@@ -118,3 +118,16 @@ class TestPreferencesBlock:
     def test_has_score_relevant(self):
         assert EffectiveSearchPreferences(budget_max=2000).has_score_relevant_prefs()
         assert not EffectiveSearchPreferences().has_score_relevant_prefs()
+
+
+class TestQualitativeFromPreferencesText:
+    def test_strips_proximity_block(self):
+        from rental_search_agent.preference_resolution import qualitative_from_preferences_text
+
+        text = "must have balcony, parking\n\nProximity: 5 min walk to a transit station"
+        assert qualitative_from_preferences_text(text) == "must have balcony, parking"
+
+    def test_placeholder_becomes_empty(self):
+        from rental_search_agent.preference_resolution import qualitative_from_preferences_text
+
+        assert qualitative_from_preferences_text("Match my search preferences") == ""

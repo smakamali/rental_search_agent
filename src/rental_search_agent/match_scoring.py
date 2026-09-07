@@ -20,6 +20,7 @@ from rental_search_agent.preference_resolution import (
     EffectiveSearchPreferences,
     is_placeholder_qualitative,
     merge_chat_over_stored,
+    qualitative_from_preferences_text,
 )
 from rental_search_agent.scoring_config import (
     get_score_parallel_min_listings,
@@ -94,7 +95,7 @@ def _score_one_listing(
     coverage, checklist = evaluate_coverage(prefs, d, proximity_rules, amenity_features)
     structural = score_structural(prefs, d)
     proximity = score_proximity(d, proximity_rules)
-    amenity = score_amenity(d, amenity_features)
+    amenity = score_amenity(d, amenity_features, skip_ids={"den"} if prefs.require_den else None)
     components: Dict[str, Optional[float]] = {
         "coverage": round(coverage, 4) if coverage is not None else None,
         "structural": round(structural, 4) if structural is not None else None,
@@ -168,25 +169,20 @@ def score_listings_by_preferences(
     if effective_prefs is None:
         stored = dict(stored_prefs or {})
         chat = dict(chat_criteria or {})
-        qual = (preferences_text or "").strip()
+        qual = qualitative_from_preferences_text(preferences_text)
         if (
             qual
-            and not is_placeholder_qualitative(qual)
             and not (stored.get("qualitative_preferences") or chat.get("qualitative_preferences"))
         ):
             chat.setdefault("qualitative_preferences", qual)
         if query_text and not chat.get("qualitative_preferences"):
-            extra = (query_text or "").strip()
-            if extra and not is_placeholder_qualitative(extra):
+            extra = qualitative_from_preferences_text(query_text)
+            if extra:
                 chat["qualitative_preferences"] = (
                     (chat.get("qualitative_preferences") or "") + " " + extra
                 ).strip()
         effective_prefs = merge_chat_over_stored(stored, chat)
-        if (
-            not effective_prefs.qualitative_preferences
-            and qual
-            and not is_placeholder_qualitative(qual)
-        ):
+        if not effective_prefs.qualitative_preferences and qual:
             effective_prefs = effective_prefs.model_copy(update={"qualitative_preferences": qual})
     elif is_placeholder_qualitative(effective_prefs.qualitative_preferences):
         # Never embed / amenity-parse UI/agent placeholders.

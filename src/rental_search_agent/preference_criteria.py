@@ -12,6 +12,7 @@ from rental_search_agent.display_format import (
     format_sqft,
     proximity_criterion_name,
 )
+from rental_search_agent.filtering import _house_category_matches
 from rental_search_agent.preference_resolution import EffectiveSearchPreferences
 
 CriterionStatus = Literal["met", "partial", "unmet", "unknown"]
@@ -397,9 +398,7 @@ def build_structural_checklist(
                 required=required, detail="Not available",
             ))
         else:
-            wanted = {c.strip().lower() for c in prefs.house_categories if c and str(c).strip()}
-            # Simple contains / equality; filtering module has richer aliases — good enough for checklist
-            if cat.lower() in wanted or any(w in cat.lower() for w in wanted):
+            if _house_category_matches(cat, prefs.house_categories):
                 status, score = "met", 1.0
             else:
                 status, score = "unmet", 0.0
@@ -512,10 +511,9 @@ def score_structural(
             parts.append(float(den.score))
 
     if prefs.house_categories:
-        cat = (_listing_attr(listing, "house_category") or "").strip().lower()
-        wanted = {c.strip().lower() for c in prefs.house_categories if c and str(c).strip()}
-        if cat and wanted:
-            parts.append(1.0 if cat in wanted or any(w in cat for w in wanted) else 0.0)
+        cat = (_listing_attr(listing, "house_category") or "").strip()
+        if cat:
+            parts.append(1.0 if _house_category_matches(cat, prefs.house_categories) else 0.0)
 
     # Only include structural if we had targets; if targets exist but no listing fields, omit
     has_targets = any(
@@ -582,12 +580,20 @@ def score_proximity(
 def score_amenity(
     listing: Union[dict, Any],
     amenity_features: Sequence[AmenityFeature],
+    skip_ids: Optional[set[str]] = None,
 ) -> Optional[float]:
-    """Average of known amenity matches; unknown excluded. Omit if no features."""
+    """Average of known amenity matches; unknown excluded. Omit if no features.
+
+    skip_ids: feature ids already counted elsewhere (e.g. den when require_den is
+    scored in the structural component).
+    """
+    skip = skip_ids or set()
     if not amenity_features:
         return None
     known: List[float] = []
     for feat in amenity_features:
+        if feat.id in skip:
+            continue
         r = match_amenity_feature(listing, feat)
         if r.score is not None:
             known.append(float(r.score))

@@ -8,7 +8,9 @@ from rental_search_agent.match_scoring import (
 )
 from rental_search_agent.models import Listing
 from rental_search_agent.preference_criteria import (
+    build_structural_checklist,
     extract_amenity_features,
+    score_amenity,
     score_proximity,
     score_structural,
 )
@@ -204,3 +206,38 @@ class TestScoringConfig:
         weights = get_score_weights()
         assert weights == DEFAULT_WEIGHTS
         assert abs(sum(weights.values()) - 1.0) < 1e-6
+
+
+class TestHouseCategoryCanonicalMatch:
+    def test_house_does_not_match_townhouse(self):
+        prefs = EffectiveSearchPreferences(house_categories=["House"])
+        listing = _listing(house_category="Row / Townhouse")
+        item = next(c for c in build_structural_checklist(prefs, listing) if c.id == "house_category")
+        assert item.status == "unmet"
+        assert score_structural(prefs, listing) == 0.0
+
+    def test_house_matches_house(self):
+        prefs = EffectiveSearchPreferences(house_categories=["House"])
+        listing = _listing(house_category="House")
+        item = next(c for c in build_structural_checklist(prefs, listing) if c.id == "house_category")
+        assert item.status == "met"
+        assert score_structural(prefs, listing) == 1.0
+
+
+class TestDenNotDoubleCounted:
+    def test_amenity_skips_den_when_required_structurally(self):
+        listing = _listing(has_den=True, description="has a den")
+        feats = extract_amenity_features("need a den")
+        assert any(f.id == "den" for f in feats)
+        assert score_amenity(listing, feats) == 1.0
+        assert score_amenity(listing, feats, skip_ids={"den"}) is None
+
+    def test_score_listings_omits_amenity_den_when_require_den(self):
+        listing = _listing(has_den=True, description="has a den")
+        prefs = EffectiveSearchPreferences(require_den=True, qualitative_preferences="den")
+        scored = score_listings_by_preferences([listing], effective_prefs=prefs)
+        included = scored[0]["score_breakdown"]["included"]
+        assert "structural" in included
+        assert "amenity" not in included
+        den_rows = [c for c in scored[0]["score_breakdown"]["checklist"] if c["id"] == "den"]
+        assert len(den_rows) == 1
