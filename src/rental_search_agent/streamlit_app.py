@@ -161,8 +161,9 @@ def _init_session_state() -> None:
     if "map_label_mode" not in st.session_state:
         st.session_state["map_label_mode"] = "price"
     else:
-        mode = normalize_map_label_mode(st.session_state.get("map_label_mode"))
-        st.session_state["map_label_mode"] = mode if mode in ("price", "rank") else "price"
+        st.session_state["map_label_mode"] = normalize_map_label_mode(
+            st.session_state.get("map_label_mode")
+        )
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:

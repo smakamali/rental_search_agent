@@ -37,8 +37,11 @@ RESULTS_VIEW_ALIASES = {"cards": "grid"}
 VALID_RESULTS_VIEWS = ("grid", "table", "map")
 WIDGET_RESULTS_VIEWS = ("grid", "table", "map")
 VALID_MAP_LABEL_MODES = ("price", "match", "rank")
-WIDGET_MAP_LABEL_MODES = ("price", "rank")
+WIDGET_MAP_LABEL_MODES = ("price", "match", "rank")
 _VIEW_LABELS = {"grid": "Grid", "table": "Table", "map": "Map"}
+_MAP_LABEL_LABELS = {"price": "Price", "match": "Match", "rank": "Rank"}
+_MAP_SUMMARY_PER_ROW = 4
+_MAP_MARKER_BLUE = "#4682B4"
 
 _SORT_BY_LABELS = {
     "semantic_score": "Match",
@@ -126,12 +129,27 @@ def ordered_by_caption(sort_by: str | None) -> str | None:
 
 
 def prepare_map_label_widget_state(session_state: Any) -> str:
-    """Coerce persisted map_label_mode so the current Price/Rank control is always valid."""
+    """Coerce persisted map_label_mode so the Price/Match/Rank control is always valid."""
     mode = normalize_map_label_mode(session_state.get("map_label_mode"))
     if mode not in WIDGET_MAP_LABEL_MODES:
         mode = "price"
     session_state["map_label_mode"] = mode
     return mode
+
+
+def format_map_coverage(total: int, mapped: int) -> str:
+    """User-facing count of plotted vs unmappable listings."""
+    skipped = max(0, int(total) - int(mapped))
+    if skipped == 0:
+        if mapped == 1:
+            return "1 result on map"
+        return f"{mapped} results on map"
+    skipped_txt = (
+        "1 listing has no mappable location"
+        if skipped == 1
+        else f"{skipped} listings have no mappable location"
+    )
+    return f"{mapped} of {total} results on map · {skipped_txt}"
 
 
 def format_sort_by_label(sort_by: str | None) -> str | None:
@@ -620,6 +638,11 @@ def inject_results_css() -> None:
         .rsa-table-prox-unavail { opacity: 0.72; }
         .rsa-table-num { font-variant-numeric: tabular-nums; font-size: 0.88rem; }
         .rsa-table-rule { border-top: 1px solid rgba(128,128,128,0.22); margin: 0.2rem 0; }
+        .rsa-map-coverage { opacity: 0.72; font-size: 0.85rem; margin: 0.15rem 0 0.35rem; }
+        .rsa-map-summary-rank { font-size: 0.75rem; font-weight: 650; opacity: 0.75; }
+        .rsa-map-summary-price { font-weight: 700; font-size: 0.95rem; }
+        .rsa-map-summary-street { font-size: 0.82rem; font-weight: 600; line-height: 1.25; }
+        .rsa-map-summary-facts { font-size: 0.75rem; opacity: 0.75; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1003,24 +1026,59 @@ def _listings_cache_key(listings: list[dict]) -> str:
     return json.dumps(listings, sort_keys=True, default=str)
 
 
-def _folium_marker_icon(label: str, url: str, label_mode: str):
-    """DivIcon for a map pin: circle+bold rank, or rectangle+normal-weight price."""
-    safe_listing = safe_http_url(url) or ""
-    url_escaped = html.escape(safe_listing or "#")
-    label_escaped = html.escape(str(label))
+def _map_point_label(listing: dict, index: int, label_mode: str) -> str:
+    if label_mode == "price":
+        return _format_map_price_label(listing)
+    if label_mode == "match":
+        pct, _color = match_score_display(listing)
+        return "—" if pct is None else f"{pct}%"
+    return str(listing_rank(listing, index))
+
+
+def _folium_popup_html(point: dict) -> str:
+    street = html.escape(str(point.get("street") or "Listing"))
+    price = html.escape(str(point.get("price") or "—"))
+    match_pct = point.get("match_pct")
+    match_txt = "—" if match_pct is None else f"{int(match_pct)}%"
+    facts = html.escape(str(point.get("facts") or ""))
+    url = point.get("url") or ""
+    parts = [f"<strong>{street}</strong>", price, f"Match {html.escape(match_txt)}"]
+    if facts:
+        parts.append(facts)
+    if url:
+        parts.append(
+            f'<a href="{html.escape(url)}" target="_blank" rel="noopener">View listing</a>'
+        )
+    return "<br>".join(parts)
+
+
+def _folium_marker_icon(point: dict, label_mode: str):
+    """DivIcon: price rectangle, match pill (shared score color), or rank circle."""
+    url_escaped = html.escape(point.get("url") or "#")
+    label_escaped = html.escape(str(point.get("label") or ""))
     if label_mode == "price":
         marker_html = (
             '<div style="font-size:12px;font-weight:normal;color:white;text-align:center;'
             "line-height:20px;padding:1px 6px;min-width:54px;height:22px;border-radius:4px;"
-            'background-color:#4682B4;border:2px solid white;white-space:nowrap;">'
+            f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;white-space:nowrap;">'
             f'<a href="{url_escaped}" target="_blank" rel="noopener" '
             f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
         )
         return folium.DivIcon(icon_size=(72, 26), icon_anchor=(36, 13), html=marker_html)
+    if label_mode == "match":
+        bg = html.escape(str(point.get("match_color") or "#888888"))
+        marker_html = (
+            '<div style="font-size:12px;font-weight:650;color:white;text-align:center;'
+            "line-height:20px;padding:1px 7px;min-width:40px;height:22px;border-radius:999px;"
+            f'background-color:{bg};border:2px solid white;white-space:nowrap;">'
+            f'<a href="{url_escaped}" target="_blank" rel="noopener" '
+            f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+        )
+        return folium.DivIcon(icon_size=(56, 26), icon_anchor=(28, 13), html=marker_html)
     marker_html = (
         '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
         "line-height:30px;width:30px;height:30px;border-radius:50%;"
-        'background-color:#4682B4;border:2px solid white;">'
+        f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;">'
         f'<a href="{url_escaped}" target="_blank" rel="noopener" '
         f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
     )
@@ -1031,36 +1089,48 @@ def _add_folium_markers(m, map_points: list[dict], label_mode: str) -> None:
     for pt in map_points:
         folium.Marker(
             location=[pt["lat"], pt["lon"]],
-            icon=_folium_marker_icon(pt["label"], pt.get("url") or "#", label_mode),
+            icon=_folium_marker_icon(pt, label_mode),
+            popup=folium.Popup(_folium_popup_html(pt), max_width=240),
         ).add_to(m)
+
+
+def _make_folium_map(
+    map_points: list[dict],
+    center_lat: float,
+    center_lon: float,
+    label_mode: str,
+):
+    """Folium map fitted to result markers. One point uses a local zoom."""
+    if len(map_points) == 1:
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=14)
+    else:
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+        m.fit_bounds([[pt["lat"], pt["lon"]] for pt in map_points], padding=(28, 28))
+    _add_folium_markers(m, map_points, label_mode)
+    return m
 
 
 @st.cache_data(show_spinner=False)
 def _get_map_html_cached(listings_json: str, label_mode: str = "rank") -> str | None:
-    """Build Folium map HTML from listings. Returns None if no map or Folium unavailable.
-    Cached by listings content and label_mode so toggling rank/price rebuilds pins."""
+    """Build Folium map HTML from listings. Cached by listings content and label_mode."""
     if folium is None:
         return None
     listings = json.loads(listings_json) if listings_json else []
     map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
     if not map_points or center_lat is None or center_lon is None:
         return None
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-    _add_folium_markers(m, map_points, label_mode)
+    m = _make_folium_map(map_points, center_lat, center_lon, label_mode)
     return m._repr_html_()
 
 
 def _build_map_data(
     listings: list[dict], label_mode: str = "rank"
 ) -> tuple[list[dict], float | None, float | None]:
-    """Build list of {lat, lon, label, url} for listings with valid coordinates.
-    Returns (map_points, center_lat, center_lon). Center is None if no points.
+    """Build map points for listings with valid coordinates.
 
-    Rank labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
-    rather than position in this list, so map pin numbers stay correct even when this list
-    has been locally reordered for display (e.g. the proximity closest-first safeguard).
-    Price labels use compact currency from _format_map_price_label. Default label_mode is
-    "rank" so existing unit tests stay valid; the UI passes the session value (price by default).
+    Returns (map_points, center_lat, center_lon). Center is None if no points.
+    Rank labels use listing['rank'], not current list position. Price uses the
+    compact map formatter. Match uses match_score with semantic_score fallback.
     """
     points = []
     lats, lons = [], []
@@ -1075,12 +1145,25 @@ def _build_map_data(
             continue
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             continue
-        url = listing.get("url") or ""
-        if label_mode == "price":
-            label = _format_map_price_label(listing)
-        else:
-            label = str(listing_rank(listing, i))
-        points.append({"lat": lat, "lon": lon, "label": label, "url": url})
+        headline, locality = listing_address_parts(listing)
+        pct, color = match_score_display(listing)
+        points.append(
+            {
+                "id": listing.get("id"),
+                "rank": listing_rank(listing, i),
+                "lat": lat,
+                "lon": lon,
+                "label": _map_point_label(listing, i, label_mode),
+                "url": safe_http_url(listing.get("url")) or "",
+                "price": _format_listing_price(listing),
+                "match_pct": pct,
+                "match_color": color,
+                "street": headline,
+                "locality": locality,
+                "facts": format_property_basics(listing),
+                "photo_url": safe_http_url(listing.get("photo_url")) or "",
+            }
+        )
         lats.append(lat)
         lons.append(lon)
     if not points:
@@ -1096,15 +1179,12 @@ def _render_results_map(
     center_lon: float,
     label_mode: str = "rank",
 ) -> None:
-    """Render a map with points labeled by rank or price (see _build_map_data).
-    Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
+    """Render Folium (fitted bounds) or PyDeck fallback. Match labels must not crash."""
     if folium is not None:
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-        _add_folium_markers(m, map_points, label_mode)
+        m = _make_folium_map(map_points, center_lat, center_lon, label_mode)
         st.components.v1.html(m._repr_html_(), height=400, scrolling=False)
         return
     if pdk is not None:
-        # Fallback: PyDeck (labels 10+ may not render due to deck.gl TextLayer bug)
         scatter = pdk.Layer(
             "ScatterplotLayer",
             data=map_points,
@@ -1127,7 +1207,7 @@ def _render_results_map(
         view_state = pdk.ViewState(
             latitude=center_lat,
             longitude=center_lon,
-            zoom=11,
+            zoom=11 if len(map_points) > 1 else 13,
             pitch=0,
         )
         st.pydeck_chart(
@@ -1142,17 +1222,57 @@ def _render_results_map(
     st.caption("Map unavailable: install folium (recommended) or pydeck to show results on a map.")
 
 
+def _render_map_summaries(listings: list[dict]) -> None:
+    """Compact identity strip under the map. Not a second Grid."""
+    if not listings:
+        return
+    for row_start in range(0, len(listings), _MAP_SUMMARY_PER_ROW):
+        cols = st.columns(_MAP_SUMMARY_PER_ROW)
+        chunk = listings[row_start : row_start + _MAP_SUMMARY_PER_ROW]
+        for offset, listing in enumerate(chunk):
+            with cols[offset]:
+                i = row_start + offset
+                rank = listing_rank(listing, i)
+                headline, _locality = listing_address_parts(listing)
+                facts = format_property_basics(listing)
+                st.markdown(
+                    f'<div class="rsa-map-summary-rank">#{html.escape(str(rank))}</div>',
+                    unsafe_allow_html=True,
+                )
+                _render_table_photo(listing.get("photo_url") or "", listing.get("url") or "")
+                st.markdown(
+                    f'<div class="rsa-map-summary-price">'
+                    f"{html.escape(_format_listing_price(listing))}</div>",
+                    unsafe_allow_html=True,
+                )
+                render_compact_match_score(listing, size=24, show_label=False)
+                st.markdown(
+                    f'<div class="rsa-map-summary-street">{html.escape(headline)}</div>',
+                    unsafe_allow_html=True,
+                )
+                if facts:
+                    st.markdown(
+                        f'<div class="rsa-map-summary-facts">{html.escape(facts)}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+
 def _render_map_panel(listings: list[dict]) -> None:
-    """Existing map + Price/Rank labels. Visual Map redesign is a later step."""
+    """Map as the active results view: labels, coverage, Folium/PyDeck, summaries."""
     prepare_map_label_widget_state(st.session_state)
     st.segmented_control(
         "Map labels",
-        options=["price", "rank"],
-        format_func=lambda x: "Price" if x == "price" else "Rank",
+        options=list(WIDGET_MAP_LABEL_MODES),
+        format_func=lambda x: _MAP_LABEL_LABELS.get(x, x.title()),
         key="map_label_mode",
     )
     label_mode = prepare_map_label_widget_state(st.session_state)
     map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
+    st.markdown(
+        f'<div class="rsa-map-coverage">'
+        f"{html.escape(format_map_coverage(len(listings), len(map_points)))}</div>",
+        unsafe_allow_html=True,
+    )
     if map_points and center_lat is not None and center_lon is not None:
         if folium is not None:
             map_html = _get_map_html_cached(_listings_cache_key(listings), label_mode)
@@ -1164,25 +1284,11 @@ def _render_map_panel(listings: list[dict]) -> None:
             _render_results_map(map_points, center_lat, center_lon, label_mode)
     else:
         st.caption("No map: addresses have no coordinates.")
-
-
-def _render_map_expander(listings: list[dict]) -> None:
-    """Existing always-visible map expander (removed when Map is the active view)."""
-    if st.session_state.get("results_view") == "map":
-        return
-    prepare_map_label_widget_state(st.session_state)
-    label_mode = st.session_state.get("map_label_mode") or "price"
-    map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
-    if map_points and center_lat is not None and center_lon is not None:
-        with st.expander("Search results map", expanded=True):
-            _render_map_panel(listings)
-    elif not map_points:
-        with st.expander("Search results map", expanded=False):
-            st.caption("No map: addresses have no coordinates.")
+    _render_map_summaries(listings)
 
 
 def render_search_results(listings: list[dict]) -> None:
-    """Render the shared header and the active Grid/Table/Map view."""
+    """Render the shared header and exactly one of Grid, Table, or Map."""
     if not listings:
         return
     inject_results_css()
@@ -1195,4 +1301,3 @@ def render_search_results(listings: list[dict]) -> None:
         _render_map_panel(listings)
     else:
         _render_results_grid(listings)
-    _render_map_expander(listings)

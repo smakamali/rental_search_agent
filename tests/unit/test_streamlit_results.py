@@ -2,7 +2,9 @@
 
 from rental_search_agent.display_format import get_score_color
 from rental_search_agent.streamlit_results import (
+    _build_map_data,
     _format_match_score,
+    _format_map_price_label,
     _format_proximity_display,
     _listings_to_table_rows,
     compact_match_score_html,
@@ -22,6 +24,7 @@ from rental_search_agent.streamlit_results import (
     prepare_map_label_widget_state,
     prepare_results_widget_state,
     proximity_unavailable_summary,
+    format_map_coverage,
     table_column_schema,
     table_has_visible_tags,
 )
@@ -190,10 +193,10 @@ class TestMapLabelState:
         assert normalize_map_label_mode("rank") == "rank"
         assert normalize_map_label_mode("PRICE") == "price"
 
-    def test_widget_state_coerces_match_until_match_markers_exist(self):
+    def test_widget_state_keeps_match_and_falls_back_unknown(self):
         state = {"map_label_mode": "match"}
-        assert prepare_map_label_widget_state(state) == "price"
-        assert state["map_label_mode"] == "price"
+        assert prepare_map_label_widget_state(state) == "match"
+        assert state["map_label_mode"] == "match"
         state = {"map_label_mode": "weird"}
         assert prepare_map_label_widget_state(state) == "price"
 
@@ -343,3 +346,69 @@ class TestTableHelpers:
         assert "23 min to 800 Burrard St" in prox
         assert "2 min walk to transit" in prox
         assert "(some unknown)" not in prox
+
+
+class TestMapHelpers:
+    def test_price_mode_keeps_compact_currency_and_canonical_rank(self):
+        listings = [
+            {"id": "b", "rank": 2, "price": 2800, "latitude": 49.28, "longitude": -123.12},
+            {"id": "a", "rank": 1, "price": 1_250_000, "latitude": 49.29, "longitude": -123.13},
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="price")
+        assert points[0]["label"] == "$2,800"
+        assert points[0]["rank"] == 2
+        assert points[1]["label"] == "$1.25M"
+        assert points[1]["rank"] == 1
+        assert _format_map_price_label({"price": 1_730_000}) == "$1.73M"
+
+    def test_match_mode_prefers_match_score_over_semantic(self):
+        listings = [
+            {
+                "id": "b",
+                "rank": 2,
+                "match_score": 0.74,
+                "semantic_score": 0.4,
+                "latitude": 49.28,
+                "longitude": -123.12,
+            }
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="match")
+        assert points[0]["label"] == "74%"
+        assert points[0]["rank"] == 2
+        assert points[0]["match_pct"] == 74
+        assert points[0]["match_color"] == get_score_color(74)
+
+    def test_match_mode_falls_back_to_semantic_and_missing_is_safe(self):
+        listings = [
+            {"id": "a", "rank": 1, "semantic_score": 0.88, "latitude": 49.28, "longitude": -123.12},
+            {"id": "b", "rank": 3, "latitude": 49.29, "longitude": -123.13},
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="match")
+        assert points[0]["label"] == "88%"
+        assert points[1]["label"] == "—"
+        assert points[1]["match_pct"] is None
+        assert points[1]["rank"] == 3
+
+    def test_rank_mode_uses_canonical_rank_not_position(self):
+        listings = [
+            {"id": "b", "rank": 2, "latitude": 49.28, "longitude": -123.12},
+            {"id": "a", "rank": 1, "latitude": 49.29, "longitude": -123.13},
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="rank")
+        assert points[0]["label"] == "2"
+        assert points[1]["label"] == "1"
+
+    def test_invalid_coordinates_skipped_and_coverage_reported(self):
+        listings = [
+            {"id": "a", "rank": 1, "latitude": 49.28, "longitude": -123.12},
+            {"id": "b", "rank": 2},
+            {"id": "c", "rank": 3, "latitude": 999, "longitude": 0},
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="rank")
+        assert len(points) == 1
+        assert points[0]["rank"] == 1
+        assert format_map_coverage(3, len(points)) == (
+            "1 of 3 results on map · 2 listings have no mappable location"
+        )
+        assert format_map_coverage(5, 5) == "5 results on map"
+        assert format_map_coverage(1, 1) == "1 result on map"
