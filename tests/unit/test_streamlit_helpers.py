@@ -32,43 +32,40 @@ class TestPreferencesBlock:
     def test_empty_prefs(self):
         prefs = {k: "" for k in PREF_KEYS}
         result = _preferences_block(prefs)
-        assert "No stored user preferences" in result
-        assert "Ask for viewing preference" in result
+        assert "No stored search preferences" in result
 
-    def test_with_viewing_name_email(self):
+    def test_viewing_and_contact_prefs_not_injected(self):
+        prefs = {
+            "viewing_preference": "weekends 10am",
+            "name": "Jane",
+            "email": "jane@test.com",
+            "phone": "555-1234",
+            "proximity_preferences": "",
+            "qualitative_preferences": "",
+        }
+        result = _preferences_block(prefs)
+        assert "No stored search preferences" in result
+        assert "viewing_preference" not in result
+        assert "name = 'Jane'" not in result
+        assert "email = 'jane@test.com'" not in result
+        assert "phone = '555-1234'" not in result
+
+    def test_with_proximity_and_qualitative(self):
         prefs = {
             "viewing_preference": "weekends 10am",
             "name": "Jane",
             "email": "jane@test.com",
             "phone": "",
+            "proximity_preferences": "within 30 min of downtown",
+            "qualitative_preferences": "balcony, parking",
         }
         result = _preferences_block(prefs)
         assert "Stored user preferences" in result
-        assert "viewing_preference = 'weekends 10am'" in result
-        assert "name = 'Jane'" in result
-        assert "email = 'jane@test.com'" in result
-        assert "do not ask the user for these again" in result
-
-    def test_with_phone(self):
-        prefs = {
-            "viewing_preference": "",
-            "name": "Bob",
-            "email": "bob@test.com",
-            "phone": "555-1234",
-        }
-        result = _preferences_block(prefs)
-        assert "phone = '555-1234'" in result
-
-    def test_only_name_email_no_viewing(self):
-        prefs = {
-            "viewing_preference": "",
-            "name": "Alice",
-            "email": "alice@test.com",
-            "phone": "",
-        }
-        result = _preferences_block(prefs)
-        assert "name = 'Alice'" in result
-        assert "email = 'alice@test.com'" in result
+        assert "proximity_preferences = 'within 30 min of downtown'" in result
+        assert "qualitative_preferences = 'balcony, parking'" in result
+        assert "do not ask the user for these again" in result.lower()
+        assert "viewing_preference" not in result
+        assert "simulate_viewing_request" not in result
 
     def test_with_qualitative_preferences(self):
         prefs = {

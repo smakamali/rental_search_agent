@@ -185,6 +185,15 @@ class ListingFilterCriteria(BaseModel):
     price_max: Optional[float] = Field(
         None, ge=0, description="Maximum price (CAD/month for rent; list price for sale)."
     )
+    house_categories: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Allowed property/building types matching Listing.house_category "
+            "(e.g. 'Apartment', 'House', 'Row / Townhouse'). OR match: listing kept if its "
+            "type matches any entry (case-insensitive; common aliases like condo→Apartment, "
+            "townhouse→Row / Townhouse). Omit or empty to not filter by type."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_min_max(self) -> "ListingFilterCriteria":

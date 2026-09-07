@@ -51,6 +51,32 @@ class TestListingMatches:
         d = sample_listing(bedrooms=2).model_dump()
         assert _listing_matches(d, criteria) is True
 
+    def test_house_categories_match(self):
+        criteria = ListingFilterCriteria(house_categories=["Apartment"])
+        assert _listing_matches(sample_listing(house_category="Apartment"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="House"), criteria) is False
+        assert _listing_matches(sample_listing(house_category=None), criteria) is False
+
+    def test_house_categories_aliases_and_case(self):
+        criteria = ListingFilterCriteria(house_categories=["condo", "townhouse"])
+        assert _listing_matches(sample_listing(house_category="Apartment"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="Row / Townhouse"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="HOUSE"), criteria) is False
+
+    def test_house_categories_plurals(self):
+        criteria = ListingFilterCriteria(house_categories=["Apartments", "Townhouses"])
+        assert _listing_matches(sample_listing(house_category="Apartment"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="Row / Townhouse"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="House"), criteria) is False
+        houses = ListingFilterCriteria(house_categories=["Houses"])
+        assert _listing_matches(sample_listing(house_category="House"), houses) is True
+
+    def test_house_categories_or_match(self):
+        criteria = ListingFilterCriteria(house_categories=["House", "Row / Townhouse"])
+        assert _listing_matches(sample_listing(house_category="House"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="Row / Townhouse"), criteria) is True
+        assert _listing_matches(sample_listing(house_category="Apartment"), criteria) is False
+
 
 class TestGetSortKey:
     def test_numeric_price(self):
@@ -93,6 +119,16 @@ class TestFilterListings:
         result = filter_listings(listings, ListingFilterCriteria(min_bedrooms=2))
         assert result.total_count == 2
         assert all(l.bedrooms >= 2 for l in result.listings)
+
+    def test_filter_by_house_categories(self):
+        listings = [
+            sample_listing(id="1", house_category="Apartment"),
+            sample_listing(id="2", house_category="House"),
+            sample_listing(id="3", house_category="Row / Townhouse"),
+        ]
+        result = filter_listings(listings, ListingFilterCriteria(house_categories=["Apartment"]))
+        assert result.total_count == 1
+        assert result.listings[0].id == "1"
 
     def test_sort_by_price_ascending(self):
         listings = [

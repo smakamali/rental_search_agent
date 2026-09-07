@@ -225,8 +225,8 @@ def search_criteria_to_text_blob(
 
     Args:
         criteria: dict with keys min_bedrooms, max_bedrooms, min_bathrooms, max_bathrooms,
-            min_sqft, max_sqft, price_min, price_max, location, listing_type — the same
-            shape as RentalSearchFilters/ListingFilterCriteria plus location/listing_type.
+            min_sqft, max_sqft, price_min, price_max, house_categories, location, listing_type —
+            the same shape as RentalSearchFilters/ListingFilterCriteria plus location/listing_type.
         qualitative_preferences: user's qualitative preferences text (e.g. "balcony, parking,
             storage"), included as-is (like a listing's description/amenities text).
         proximity_rules: optional list of parsed ProximityRule dicts (location, mode,
@@ -252,6 +252,11 @@ def search_criteria_to_text_blob(
     price = _format_price_range(criteria.get("price_min"), criteria.get("price_max"), listing_type)
     if price:
         structured_parts.append(price)
+    house_categories = criteria.get("house_categories") or []
+    if isinstance(house_categories, list):
+        cats = [str(c).strip() for c in house_categories if c and str(c).strip()]
+        if cats:
+            structured_parts.append(" or ".join(cats))
     structured_line = ", ".join(structured_parts)
 
     proximity_text = _proximity_rules_to_query_text(proximity_rules)

@@ -563,7 +563,7 @@ class TestGetActiveSearchCriteriaFromMessages:
         criteria = _get_active_search_criteria_from_messages([])
         assert criteria["location"] is None
         assert criteria["listing_type"] is None
-        for key in ("min_bedrooms", "max_bedrooms", "min_bathrooms", "max_bathrooms", "min_sqft", "max_sqft", "price_min", "price_max"):
+        for key in ("min_bedrooms", "max_bedrooms", "min_bathrooms", "max_bathrooms", "min_sqft", "max_sqft", "price_min", "price_max", "house_categories"):
             assert criteria[key] is None
 
     def test_proximity_only_filter_listings_call_does_not_blank_out_earlier_structural_criteria(self):

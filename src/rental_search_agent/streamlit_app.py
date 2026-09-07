@@ -64,30 +64,18 @@ def _save_preferences_to_file(prefs: dict) -> None:
 
 
 def _preferences_block(prefs: dict) -> str:
-    """Build the preferences block to inject into the system message."""
-    viewing = (prefs.get("viewing_preference") or "").strip()
-    name = (prefs.get("name") or "").strip()
-    email = (prefs.get("email") or "").strip()
-    phone = (prefs.get("phone") or "").strip()
+    """Build the search-relevant preferences block to inject into the system message."""
     proximity = (prefs.get("proximity_preferences") or "").strip()
     qualitative = (prefs.get("qualitative_preferences") or "").strip()
-    if not viewing and not name and not email and not proximity and not qualitative:
-        return "No stored user preferences. Ask for viewing preference and for name/email when needed."
+    if not proximity and not qualitative:
+        return "No stored search preferences (proximity or qualitative)."
     parts = []
-    if viewing:
-        parts.append(f"viewing_preference = {viewing!r}")
-    if name:
-        parts.append(f"name = {name!r}")
-    if email:
-        parts.append(f"email = {email!r}")
-    if phone:
-        parts.append(f"phone = {phone!r}")
     if proximity:
         parts.append(f"proximity_preferences = {proximity!r}")
     if qualitative:
         parts.append(f"qualitative_preferences = {qualitative!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
+    block += ". Do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
     return block
 
 
@@ -828,7 +816,10 @@ def _render_preferences_sidebar() -> None:
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
     with st.sidebar:
         st.subheader("Your details")
-        st.caption("Optional. If set, the assistant will use these and not ask again.")
+        st.caption(
+            "Proximity and listing preferences are used by the chat assistant for search and ranking. "
+            "Preferred viewing times and contact details are saved for upcoming booking features and are not used in chat."
+        )
         with st.form("preferences_form"):
             viewing = st.text_input(
                 "Preferred viewing times",
@@ -1002,6 +993,127 @@ def main() -> None:
     last_sort_by = st.session_state.get("last_sort_by")
     if last_sort_by is None or last_sort_by == "semantic_score":
         listings = _apply_default_match_score_sort(listings)
+
+    # Analysis card at top: when user clicked Analyze, run analysis and show result
+    # before the search results so the detail view is immediately visible.
+    analyze_listing_id = st.session_state.get("analyze_listing_id")
+    analyze_listing = st.session_state.get("analyze_listing")
+    analysis_result = st.session_state.get("analysis_result", {})
+    if analyze_listing_id and analyze_listing:
+        prefs = st.session_state.get("user_preferences") or {}
+        qualitative = (prefs.get("qualitative_preferences") or "").strip()
+        proximity = (prefs.get("proximity_preferences") or "").strip()
+        preferences_text = qualitative
+        if proximity:
+            preferences_text = (
+                f"{preferences_text}\n\nProximity: {proximity}".strip()
+                if preferences_text
+                else f"Proximity: {proximity}"
+            )
+        if not preferences_text:
+            with st.expander("Analysis result", expanded=True):
+                st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
+                if st.button("Clear analysis"):
+                    st.session_state["analyze_listing_id"] = None
+                    st.session_state["analyze_listing"] = None
+                    st.rerun()
+        else:
+            messages = st.session_state["messages"]
+            current_count = len(messages)
+            if st.session_state.get("chat_summary_message_count") != current_count:
+                with st.spinner("Summarizing conversation..."):
+                    summary = summarize_conversation_for_preferences(messages)
+                    st.session_state["chat_summary"] = summary or ""
+                    st.session_state["chat_summary_message_count"] = current_count
+                    st.session_state["analysis_result"] = {}
+                st.rerun()
+            conversation_context = st.session_state.get("chat_summary") or ""
+            if analyze_listing_id not in analysis_result:
+                with st.spinner("Analyzing listing..."):
+                    try:
+                        # Build the same listing-blob-shaped embedding query
+                        # score_listings_by_preferences uses for the table's
+                        # semantic_score/"Match score" column (bed/bath/sqft/price/
+                        # location + qualitative preferences + proximity), reusing the
+                        # same message-history reconstruction so both surfaces stay
+                        # consistent for the same listing/preferences. preferences_text
+                        # above (which also folds in proximity) still drives the
+                        # narrative key_matches/key_gaps, unaffected by this override.
+                        chat_messages = st.session_state.get("messages") or []
+                        search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                        proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                        score_query_text = search_criteria_to_text_blob(
+                            search_criteria, qualitative, proximity_rules
+                        )
+                        result = analyze_listing_against_preferences(
+                            analyze_listing,
+                            preferences_text,
+                            conversation_context=conversation_context or None,
+                            score_query_text=score_query_text or None,
+                        )
+                        st.session_state.setdefault("analysis_result", {})[
+                            analyze_listing_id
+                        ] = result
+                    except Exception as e:
+                        st.session_state.setdefault("analysis_result", {})[
+                            analyze_listing_id
+                        ] = {"error": str(e)}
+                st.rerun()
+            result = st.session_state["analysis_result"].get(analyze_listing_id)
+            if result and isinstance(result, dict):
+                if "error" in result:
+                    with st.expander("Analysis result", expanded=True):
+                        st.error(result["error"])
+                        if st.button("Clear analysis"):
+                            st.session_state["analyze_listing_id"] = None
+                            st.session_state["analyze_listing"] = None
+                            st.session_state["analysis_result"] = {}
+                            st.rerun()
+                else:
+                    addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
+                    with st.expander(f"Analysis: {addr}", expanded=True):
+                        photo_url = analyze_listing.get("photo_url") or ""
+                        _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
+                        detail_bits = []
+                        if analyze_listing.get("id") and analyze_listing.get("url"):
+                            mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
+                            detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
+                        if analyze_listing.get("property_category"):
+                            detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
+                        if analyze_listing.get("lot_size"):
+                            detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
+                        if analyze_listing.get("listing_age_display"):
+                            detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
+                        if analyze_listing.get("price_change_display"):
+                            detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
+                        if analyze_listing.get("open_house"):
+                            detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
+                        if analyze_listing.get("agent_name"):
+                            agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
+                            if analyze_listing.get("agent_phone"):
+                                agent_bit += f" ({analyze_listing['agent_phone']})"
+                            detail_bits.append(agent_bit)
+                        if analyze_listing.get("brokerage_name"):
+                            detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
+                        if analyze_listing.get("video_url"):
+                            detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
+                        if detail_bits:
+                            st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
+                        st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
+                        col_matches, col_gaps = st.columns(2)
+                        with col_matches:
+                            st.subheader("Key matches")
+                            for m in result.get("key_matches") or []:
+                                st.markdown(f"- {m}")
+                        with col_gaps:
+                            st.subheader("Key gaps")
+                            for g in result.get("key_gaps") or []:
+                                st.markdown(f"- {g}")
+                        if st.button("Clear analysis"):
+                            st.session_state["analyze_listing_id"] = None
+                            st.session_state["analyze_listing"] = None
+                            st.rerun()
+
     if listings:
         st.segmented_control(
             "Results view",
@@ -1014,124 +1126,6 @@ def main() -> None:
                 _render_results_table(listings)
             else:
                 _render_results_cards(listings)
-        # Analysis card: when user clicked Analyze, run analysis and show result
-        analyze_listing_id = st.session_state.get("analyze_listing_id")
-        analyze_listing = st.session_state.get("analyze_listing")
-        analysis_result = st.session_state.get("analysis_result", {})
-        if analyze_listing_id and analyze_listing:
-            prefs = st.session_state.get("user_preferences") or {}
-            qualitative = (prefs.get("qualitative_preferences") or "").strip()
-            proximity = (prefs.get("proximity_preferences") or "").strip()
-            preferences_text = qualitative
-            if proximity:
-                preferences_text = (
-                    f"{preferences_text}\n\nProximity: {proximity}".strip()
-                    if preferences_text
-                    else f"Proximity: {proximity}"
-                )
-            if not preferences_text:
-                with st.expander("Analysis result", expanded=True):
-                    st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
-                    if st.button("Clear analysis"):
-                        st.session_state["analyze_listing_id"] = None
-                        st.session_state["analyze_listing"] = None
-                        st.rerun()
-            else:
-                messages = st.session_state["messages"]
-                current_count = len(messages)
-                if st.session_state.get("chat_summary_message_count") != current_count:
-                    with st.spinner("Summarizing conversation..."):
-                        summary = summarize_conversation_for_preferences(messages)
-                        st.session_state["chat_summary"] = summary or ""
-                        st.session_state["chat_summary_message_count"] = current_count
-                        st.session_state["analysis_result"] = {}
-                    st.rerun()
-                conversation_context = st.session_state.get("chat_summary") or ""
-                if analyze_listing_id not in analysis_result:
-                    with st.spinner("Analyzing listing..."):
-                        try:
-                            # Build the same listing-blob-shaped embedding query
-                            # score_listings_by_preferences uses for the table's
-                            # semantic_score/"Match score" column (bed/bath/sqft/price/
-                            # location + qualitative preferences + proximity), reusing the
-                            # same message-history reconstruction so both surfaces stay
-                            # consistent for the same listing/preferences. preferences_text
-                            # above (which also folds in proximity) still drives the
-                            # narrative key_matches/key_gaps, unaffected by this override.
-                            chat_messages = st.session_state.get("messages") or []
-                            search_criteria = _get_active_search_criteria_from_messages(chat_messages)
-                            proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                            score_query_text = search_criteria_to_text_blob(
-                                search_criteria, qualitative, proximity_rules
-                            )
-                            result = analyze_listing_against_preferences(
-                                analyze_listing,
-                                preferences_text,
-                                conversation_context=conversation_context or None,
-                                score_query_text=score_query_text or None,
-                            )
-                            st.session_state.setdefault("analysis_result", {})[
-                                analyze_listing_id
-                            ] = result
-                        except Exception as e:
-                            st.session_state.setdefault("analysis_result", {})[
-                                analyze_listing_id
-                            ] = {"error": str(e)}
-                    st.rerun()
-                result = st.session_state["analysis_result"].get(analyze_listing_id)
-                if result and isinstance(result, dict):
-                    if "error" in result:
-                        with st.expander("Analysis result", expanded=True):
-                            st.error(result["error"])
-                            if st.button("Clear analysis"):
-                                st.session_state["analyze_listing_id"] = None
-                                st.session_state["analyze_listing"] = None
-                                st.session_state["analysis_result"] = {}
-                                st.rerun()
-                    else:
-                        addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
-                        with st.expander(f"Analysis: {addr}", expanded=True):
-                            photo_url = analyze_listing.get("photo_url") or ""
-                            _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
-                            detail_bits = []
-                            if analyze_listing.get("id") and analyze_listing.get("url"):
-                                mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
-                                detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
-                            if analyze_listing.get("property_category"):
-                                detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
-                            if analyze_listing.get("lot_size"):
-                                detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
-                            if analyze_listing.get("listing_age_display"):
-                                detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
-                            if analyze_listing.get("price_change_display"):
-                                detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
-                            if analyze_listing.get("open_house"):
-                                detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
-                            if analyze_listing.get("agent_name"):
-                                agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
-                                if analyze_listing.get("agent_phone"):
-                                    agent_bit += f" ({analyze_listing['agent_phone']})"
-                                detail_bits.append(agent_bit)
-                            if analyze_listing.get("brokerage_name"):
-                                detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
-                            if analyze_listing.get("video_url"):
-                                detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
-                            if detail_bits:
-                                st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
-                            st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
-                            col_matches, col_gaps = st.columns(2)
-                            with col_matches:
-                                st.subheader("Key matches")
-                                for m in result.get("key_matches") or []:
-                                    st.markdown(f"- {m}")
-                            with col_gaps:
-                                st.subheader("Key gaps")
-                                for g in result.get("key_gaps") or []:
-                                    st.markdown(f"- {g}")
-                            if st.button("Clear analysis"):
-                                st.session_state["analyze_listing_id"] = None
-                                st.session_state["analyze_listing"] = None
-                                st.rerun()
         label_mode = st.session_state.get("map_label_mode") or "price"
         map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
         if map_points and center_lat is not None and center_lon is not None:

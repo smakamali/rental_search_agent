@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sys
-import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
@@ -88,30 +87,18 @@ def _load_preferences_from_file() -> dict:
 
 
 def _preferences_block(prefs: dict) -> str:
-    """Build the preferences block to inject into the system message (same logic as Streamlit)."""
-    viewing = (prefs.get("viewing_preference") or "").strip()
-    name = (prefs.get("name") or "").strip()
-    email = (prefs.get("email") or "").strip()
-    phone = (prefs.get("phone") or "").strip()
+    """Build the search-relevant preferences block to inject into the system message (same logic as Streamlit)."""
     proximity = (prefs.get("proximity_preferences") or "").strip()
     qualitative = (prefs.get("qualitative_preferences") or "").strip()
-    if not viewing and not name and not email and not proximity and not qualitative:
-        return "No stored user preferences. Ask for viewing preference and for name/email when needed."
+    if not proximity and not qualitative:
+        return "No stored search preferences (proximity or qualitative)."
     parts = []
-    if viewing:
-        parts.append(f"viewing_preference = {viewing!r}")
-    if name:
-        parts.append(f"name = {name!r}")
-    if email:
-        parts.append(f"email = {email!r}")
-    if phone:
-        parts.append(f"phone = {phone!r}")
     if proximity:
         parts.append(f"proximity_preferences = {proximity!r}")
     if qualitative:
         parts.append(f"qualitative_preferences = {qualitative!r}")
     block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Use these values when calling simulate_viewing_request or when presenting options; do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
+    block += ". Do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
     return block
 
 
@@ -121,7 +108,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "ask_user",
-            "description": "Ask the user for clarification or approval. Single answer (allow_multiple=False) or multi-select (allow_multiple=True). When asking which listings to request viewings for, you MUST provide choices (one per listing with id, e.g. '[1] 123 Main St — $2800 (id: xyz)') so the user gets a dropdown—never ask for listing numbers in chat.",
+            "description": "Ask the user for clarification or approval. Single answer (allow_multiple=False) or multi-select (allow_multiple=True). Prefer choices for yes/no or refine-or-accept prompts so the user gets a dropdown.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -129,7 +116,7 @@ TOOLS = [
                     "choices": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Predefined options for dropdown/multiselect. REQUIRED when asking which listings to request viewings for—provide one choice per listing (e.g. '[1] 123 Main St — $2800 (id: xyz)'). Omit only for free-text questions.",
+                        "description": "Predefined options for dropdown/multiselect. Omit for free-text questions.",
                     },
                     "allow_multiple": {
                         "type": "boolean",
@@ -187,6 +174,16 @@ TOOLS = [
                     "max_sqft": {"type": "integer", "minimum": 0, "description": "Maximum square footage."},
                     "price_min": {"type": "number", "minimum": 0, "description": "Minimum price (CAD/month for rent; list price for sale)."},
                     "price_max": {"type": "number", "minimum": 0, "description": "Maximum price (CAD/month for rent; list price for sale)."},
+                    "house_categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Allowed property/building types (Listing.house_category), e.g. "
+                            "['Apartment'], ['House', 'Row / Townhouse']. OR match; case-insensitive; "
+                            "aliases: condo→Apartment, townhouse→Row / Townhouse. Prefer values from "
+                            "summarize_listings house_category keys when available."
+                        ),
+                    },
                     "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity, listing_age_hours). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Use 'listing_age_hours' with ascending=true to show newest first. Omit for no sort."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
@@ -457,6 +454,23 @@ TOOLS = [
     },
 ]
 
+# Booking/calendar tools stay in TOOLS for later UI use; chat agent only sees search/refine tools.
+CHAT_DISABLED_TOOL_NAMES = frozenset(
+    {
+        "simulate_viewing_request",
+        "calendar_get_available_slots",
+        "calendar_list_events",
+        "calendar_create_event",
+        "calendar_update_event",
+        "calendar_delete_event",
+        "draft_viewing_plan",
+        "modify_viewing_plan",
+    }
+)
+AGENT_TOOLS = [
+    t for t in TOOLS if t.get("function", {}).get("name") not in CHAT_DISABLED_TOOL_NAMES
+]
+
 
 def _get_current_listings_from_messages(messages: list[dict]) -> list[dict]:
     """Return the listings array from the most recent tool result that has 'listings' (rental_search or filter_listings)."""
@@ -517,6 +531,7 @@ _STRUCTURAL_CRITERIA_KEYS = (
     "max_sqft",
     "price_min",
     "price_max",
+    "house_categories",
 )
 
 
@@ -526,8 +541,8 @@ def _get_active_search_criteria_from_messages(messages: list[dict]) -> dict:
     analyze_listing_preferences.
 
     location and listing_type always come from the most recent rental_search call, since
-    filter_listings never carries either (it only narrows bed/bath/sqft/price). Bed/bath/sqft/
-    price start from that same rental_search call's own filters, then get overlaid — per
+    filter_listings never carries either (it only narrows bed/bath/sqft/price/house_categories). Bed/bath/sqft/
+    price/house_categories start from that same rental_search call's own filters, then get overlaid — per
     field, not wholesale — by any later filter_listings call(s) that explicitly supply that
     field.
 
@@ -766,7 +781,17 @@ def run_tool(
             return json.dumps({"error": "No current search results to filter or sort. Run a search first."})
         sort_by = arguments.get("sort_by")
         ascending = arguments.get("ascending", True)
-        criteria_keys = {"min_bathrooms", "max_bathrooms", "min_bedrooms", "max_bedrooms", "min_sqft", "max_sqft", "price_min", "price_max"}
+        criteria_keys = {
+            "min_bathrooms",
+            "max_bathrooms",
+            "min_bedrooms",
+            "max_bedrooms",
+            "min_sqft",
+            "max_sqft",
+            "price_min",
+            "price_max",
+            "house_categories",
+        }
         criteria_dict = {k: v for k, v in arguments.items() if k in criteria_keys and v is not None}
         proximity_rules_raw = arguments.get("proximity_rules") or []
         if not criteria_dict and not sort_by and not proximity_rules_raw:
@@ -1175,7 +1200,7 @@ def _stream_llm_call(client: OpenAI, model: str, messages: list[dict]) -> Iterat
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
-        tools=TOOLS,
+        tools=AGENT_TOOLS,
         tool_choice="auto",
         stream=True,
     )
@@ -1224,7 +1249,7 @@ def _llm_call_with_fallback(client: OpenAI, model: str, messages: list[dict]) ->
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
-        tools=TOOLS,
+        tools=AGENT_TOOLS,
         tool_choice="auto",
     )
     if not resp or not resp.choices:
@@ -1254,7 +1279,7 @@ def _call_llm(client: OpenAI, model: str, messages: list[dict], *, stream: bool)
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
-        tools=TOOLS,
+        tools=AGENT_TOOLS,
         tool_choice="auto",
     )
     if not resp or not resp.choices:
@@ -1367,15 +1392,25 @@ def run_agent_step_events(
                     filter_source = current_listings
                 else:
                     filter_source = None
-                result_str = run_tool(
-                    name,
-                    args,
-                    current_listings=filter_source,
-                    current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
-                    available_slots=available_slots if name == "modify_viewing_plan" else None,
-                    search_criteria=active_search_criteria,
-                    proximity_rules_for_query=parsed_proximity_rules,
-                )
+                if name in CHAT_DISABLED_TOOL_NAMES:
+                    result_str = json.dumps(
+                        {
+                            "error": (
+                                f"Tool {name!r} is not available in chat. "
+                                "Viewing booking is not handled by the chat agent."
+                            )
+                        }
+                    )
+                else:
+                    result_str = run_tool(
+                        name,
+                        args,
+                        current_listings=filter_source,
+                        current_plan_entries=current_plan_entries if name == "modify_viewing_plan" else None,
+                        available_slots=available_slots if name == "modify_viewing_plan" else None,
+                        search_criteria=active_search_criteria,
+                        proximity_rules_for_query=parsed_proximity_rules,
+                    )
                 ok = True
                 try:
                     parsed_result = json.loads(result_str)
@@ -1513,49 +1548,7 @@ def run_agent_step_events(
             }
             messages = messages + [assistant_msg] + tool_results
             continue
-        # No tool calls: final assistant reply (or enforce draft_viewing_plan after calendar_get_available_slots)
-        if _last_completed_tool_name(messages) == "calendar_get_available_slots":
-            slots = _get_available_slots_from_messages(messages)
-            listings = _get_selected_listings_from_messages(messages)
-            if slots and listings:
-                logger.debug("Auto-calling draft_viewing_plan (LLM returned no tool calls after calendar_get_available_slots)")
-                seq += 1
-                label = TOOL_STATUS_LABELS.get("draft_viewing_plan")
-                if label:
-                    yield {"type": "tool_start", "name": "draft_viewing_plan", "label": label, "seq": seq}
-                try:
-                    result_str = run_tool("draft_viewing_plan", {"listings": listings, "available_slots": slots})
-                    ok = True
-                    try:
-                        parsed_result = json.loads(result_str)
-                        ok = not (isinstance(parsed_result, dict) and "error" in parsed_result)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                except Exception as e:
-                    logger.debug("draft_viewing_plan auto-call failed: %s", e)
-                    result_str = json.dumps({"error": str(e)})
-                    ok = False
-                if label:
-                    yield {"type": "tool_end", "name": "draft_viewing_plan", "label": label, "ok": ok, "seq": seq}
-                synthetic_id = f"call_auto_draft_viewing_plan_{uuid.uuid4().hex}"
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": content or "",
-                    "tool_calls": [
-                        {
-                            "id": synthetic_id,
-                            "type": "function",
-                            "function": {
-                                "name": "draft_viewing_plan",
-                                "arguments": json.dumps({"listings": listings, "available_slots": slots}),
-                            },
-                        }
-                    ],
-                }
-                tool_results = [{"role": "tool", "tool_call_id": synthetic_id, "content": result_str}]
-                messages = messages + [assistant_msg] + tool_results
-                continue
-        # Normal final assistant reply: use in-memory state from last tool batch if available
+        # No tool calls: final assistant reply
         messages = messages + [{"role": "assistant", "content": content or ""}]
         listing_state = last_listing_state if last_listing_state is not None else _listing_state_from_messages(messages)
         yield {"type": "done", "messages": messages, "ask_user_payload": None, "listing_state": listing_state}
