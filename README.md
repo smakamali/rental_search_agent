@@ -55,7 +55,7 @@ Or:
 python -m rental_search_agent.server
 ```
 
-The server exposes tools including `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, and `modify_viewing_plan`. It uses stdio by default.
+The server exposes tools including `ask_user`, `expand_search_region`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, and `modify_viewing_plan`. It uses stdio by default.
 
 ### Chat client (CLI)
 
@@ -103,6 +103,10 @@ Calendar tools (`calendar_get_available_slots`, `calendar_create_event`, etc.) u
 4. On first use, a browser will open for OAuth; the token is saved at `.rental_search_agent/token.json`.
 
 Without credentials, calendar tools return an error; the agent can fall back to a simulated-only flow (no events created).
+
+## Multi-city / metro search
+
+A named metro (e.g. Metro Vancouver, GTA) is expanded with `expand_search_region`, then confirmed with `ask_user` (multi-select of municipalities). One `rental_search` then accepts `location` as a list of cities; the adapter scrapes those cities in parallel and returns a single deduped master list. Explicit city lists (e.g. "Vancouver and Burnaby") skip the metro picker. A bare city name remains a single-city search.
 
 ## Proximity preferences (optional)
 

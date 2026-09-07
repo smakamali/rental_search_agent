@@ -31,6 +31,8 @@ from rental_search_agent.models import (
     ListingFilterCriteria,
     ProximityRule,
     RentalSearchFilters,
+    location_as_display,
+    MAX_SEARCH_LOCATIONS,
 )
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
@@ -43,6 +45,7 @@ from rental_search_agent.preference_resolution import (
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.match_scoring import score_listings_by_preferences as do_score_listings_by_preferences
+from rental_search_agent.search_regions import expand_search_region as do_expand_search_region
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -115,6 +118,21 @@ def _with_display_rank(listings: list[dict]) -> list[dict]:
     return out
 
 
+def _merge_listing_dicts(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    """Combine listing dicts by id (first wins). Empty ids are kept, not collapsed."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for listing in existing + incoming:
+        d = dict(listing) if isinstance(listing, dict) else listing
+        lid = str(d.get("id") or "").strip() if isinstance(d, dict) else ""
+        if lid:
+            if lid in seen:
+                continue
+            seen.add(lid)
+        out.append(d)
+    return _with_display_rank(out)
+
+
 # Tool definitions for the LLM (OpenAI function-calling format)
 TOOLS = [
     {
@@ -144,14 +162,31 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "expand_search_region",
+            "description": "Expand a named Canadian metro/region (e.g. Metro Vancouver, GTA) into municipality labels and search_location strings. Call this when the user names a metro or greater area, then ask_user (allow_multiple=true) with the labels before rental_search. Do not use for a bare city name. Returns { region, cities: [{ label, search_location }] } or { error }.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "region": {
+                        "type": "string",
+                        "description": "Metro or region name (e.g. 'Metro Vancouver', 'Greater Toronto Area').",
+                    },
+                },
+                "required": ["region"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rental_search",
-            "description": "Run a single property search on Realtor.ca (Canada). Supports for_rent and for_sale. Requires min_bedrooms and location in filters.",
+            "description": "Run a single property search on Realtor.ca (Canada). Supports for_rent and for_sale. Requires min_bedrooms and location in filters. location may be one city or a list of cities (scraped in parallel and merged). Do not pass a metro name; expand_search_region then ask_user first.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filters": {
                         "type": "object",
-                        "description": "Search filters: min_bedrooms (int), location (str) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, price_min, price_max (price bounds: monthly rent for for_rent, list price for for_sale), listing_type (for_rent or for_sale). For exact bedroom count (e.g. '2 bed'), set both min_bedrooms and max_bedrooms. For 'at least N', set only min_bedrooms. Prefer location as 'City, Province' when known (e.g. Vancouver, BC).",
+                        "description": "Search filters: min_bedrooms (int), location (string or array of city strings) required; optional max_bedrooms, min/max_bathrooms, min/max_sqft, price_min, price_max (price bounds: monthly rent for for_rent, list price for for_sale), listing_type (for_rent or for_sale). For exact bedroom count (e.g. '2 bed'), set both min_bedrooms and max_bedrooms. For 'at least N', set only min_bedrooms. Prefer location as 'City, Province' when known (e.g. Vancouver, BC). After a metro picker, pass the selected search_location values as a list. Do not call this tool once per city.",
                         "properties": {
                             "min_bedrooms": {"type": "integer", "minimum": 0},
                             "max_bedrooms": {"type": "integer", "minimum": 0},
@@ -161,7 +196,18 @@ TOOLS = [
                             "max_sqft": {"type": "integer", "minimum": 0},
                             "price_min": {"type": "number", "minimum": 0},
                             "price_max": {"type": "number", "minimum": 0},
-                            "location": {"type": "string"},
+                            "location": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "minItems": 1,
+                                        "maxItems": MAX_SEARCH_LOCATIONS,
+                                    },
+                                ],
+                                "description": "One city or a list of cities (search_location values from expand_search_region). Not a metro name.",
+                            },
                             "listing_type": {"type": "string", "enum": ["for_rent", "for_sale"]},
                         },
                         "required": ["min_bedrooms", "location"],
@@ -585,7 +631,11 @@ def _get_active_search_criteria_from_messages(messages: list[dict]) -> dict:
             if name == "rental_search":
                 # A new search fully resets everything, including location/listing_type.
                 filters = args.get("filters") or {}
-                criteria = {"location": filters.get("location"), "listing_type": filters.get("listing_type")}
+                loc = filters.get("location")
+                criteria = {
+                    "location": location_as_display(loc) if loc else None,
+                    "listing_type": filters.get("listing_type"),
+                }
                 for key in _STRUCTURAL_CRITERIA_KEYS:
                     criteria[key] = filters.get(key)
             else:
@@ -776,6 +826,9 @@ def run_tool(
             "choices": arguments.get("choices") or [],
             "allow_multiple": arguments.get("allow_multiple", False),
         })
+    if name == "expand_search_region":
+        region = arguments.get("region") or ""
+        return json.dumps(do_expand_search_region(region if isinstance(region, str) else str(region)))
     if name == "rental_search":
         try:
             f = RentalSearchFilters.model_validate(arguments["filters"])
@@ -783,7 +836,9 @@ def run_tool(
             return json.dumps({"error": f"Invalid filters: {e}"})
         # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
         try:
-            _persist_fill_in_from_chat(f.model_dump(exclude_none=True))
+            dumped = f.model_dump(exclude_none=True)
+            dumped["location"] = f.location_display()
+            _persist_fill_in_from_chat(dumped)
         except Exception:
             pass
         try:
@@ -1395,10 +1450,10 @@ def run_agent_step_events(
             current_plan_entries = _get_viewing_plan_from_messages(messages)
             available_slots = _get_available_slots_from_messages(messages)
             # Used to build the search_criteria_to_text_blob() embedding query for
-            # score_listings_by_preferences / analyze_listing_preferences (see run_tool),
-            # so scoring queries a listing-blob-shaped text instead of bare preferences.
+            # score_listings_by_preferences / analyze_listing_preferences (see run_tool).
             active_search_criteria = _get_active_search_criteria_from_messages(messages)
             parsed_proximity_rules = _get_parsed_proximity_rules_from_messages(messages)
+            batch_search_count = 0
             for tc in tool_calls_raw:
                 name = tc["name"]
                 seq += 1
@@ -1457,21 +1512,35 @@ def run_agent_step_events(
                     try:
                         data = json.loads(result_str)
                         if isinstance(data, dict) and isinstance(data.get("listings"), list):
-                            # Drop proximity/score master from a previous search so filter/score
-                            # use the new results rather than a stale enriched set.
-                            enriched_master = []
-                            master_listings = data["listings"]
+                            new_listings = data["listings"]
+                            search_filters = args.get("filters") or {}
+                            loc = search_filters.get("location")
+                            loc_disp = location_as_display(loc) if loc else None
+                            if batch_search_count > 0:
+                                # Same-turn parallel per-city calls: merge instead of
+                                # last-write-wins, which would drop earlier cities.
+                                master_listings = _merge_listing_dicts(
+                                    master_listings, new_listings
+                                )
+                                prev_loc = active_search_criteria.get("location")
+                                if prev_loc and loc_disp and loc_disp not in str(prev_loc):
+                                    active_search_criteria["location"] = f"{prev_loc}, {loc_disp}"
+                                elif loc_disp:
+                                    active_search_criteria["location"] = loc_disp
+                            else:
+                                # Drop proximity/score master from a previous search so
+                                # filter/score use the new results rather than a stale set.
+                                enriched_master = []
+                                master_listings = new_listings
+                                last_sort_by = None
+                                active_search_criteria = {
+                                    "location": loc_disp,
+                                    "listing_type": search_filters.get("listing_type"),
+                                    **{k: search_filters.get(k) for k in _STRUCTURAL_CRITERIA_KEYS},
+                                }
+                            batch_search_count += 1
                             current_listings = master_listings
                             display_source = "search"
-                            last_sort_by = None
-                            # A new search resets everything, mirroring
-                            # _get_active_search_criteria_from_messages.
-                            search_filters = args.get("filters") or {}
-                            active_search_criteria = {
-                                "location": search_filters.get("location"),
-                                "listing_type": search_filters.get("listing_type"),
-                                **{k: search_filters.get(k) for k in _STRUCTURAL_CRITERIA_KEYS},
-                            }
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":

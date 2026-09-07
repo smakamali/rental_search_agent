@@ -202,6 +202,26 @@ class TestRunTool:
             assert len(data["listings"]) == 1
             assert data["listings"][0]["rank"] == 1
 
+    def test_expand_search_region_known(self):
+        result = run_tool("expand_search_region", {"region": "Metro Vancouver"})
+        data = json.loads(result)
+        assert data["region"] == "Metro Vancouver"
+        assert any(c["label"] == "Burnaby" for c in data["cities"])
+
+    def test_expand_search_region_unknown(self):
+        result = run_tool("expand_search_region", {"region": "the Prairies"})
+        data = json.loads(result)
+        assert "error" in data
+
+    def test_rental_search_location_schema_accepts_array(self):
+        search_tool = next(t for t in TOOLS if t["function"]["name"] == "rental_search")
+        loc_schema = search_tool["function"]["parameters"]["properties"]["filters"]["properties"]["location"]
+        assert "anyOf" in loc_schema
+        from rental_search_agent.models import MAX_SEARCH_LOCATIONS
+
+        array_schema = next(s for s in loc_schema["anyOf"] if s.get("type") == "array")
+        assert array_schema["maxItems"] == MAX_SEARCH_LOCATIONS
+
     def test_unknown_tool_returns_error(self):
         result = run_tool("unknown_tool", {})
         data = json.loads(result)
@@ -531,6 +551,21 @@ class TestGetActiveSearchCriteriaFromMessages:
         assert criteria["max_bedrooms"] == 3
         assert criteria["price_max"] == 1000000
         assert criteria["price_min"] is None
+
+    def test_location_list_is_joined_for_criteria_blob(self):
+        messages = [
+            _assistant_tool_call_msg(
+                "rental_search",
+                {
+                    "filters": {
+                        "min_bedrooms": 2,
+                        "location": ["Vancouver, BC", "Burnaby, BC"],
+                    }
+                },
+            )
+        ]
+        criteria = _get_active_search_criteria_from_messages(messages)
+        assert criteria["location"] == "Vancouver, BC, Burnaby, BC"
 
     def test_filter_listings_after_search_overrides_structural_criteria_only(self):
         messages = [

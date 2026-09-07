@@ -15,6 +15,7 @@ from rental_search_agent.server import (
     calendar_list_events,
     calendar_update_event,
     draft_viewing_plan,
+    expand_search_region,
     filter_listings,
     modify_viewing_plan,
     rental_search,
@@ -47,6 +48,21 @@ class TestAskUser:
             ask_user(prompt="Q", choices="not a list")
 
 
+class TestExpandSearchRegion:
+    def test_known_region(self):
+        result = expand_search_region("GTA")
+        assert result["region"] == "Greater Toronto Area"
+        assert any(c["search_location"] == "Toronto, ON" for c in result["cities"])
+
+    def test_unknown_region_returns_error(self):
+        result = expand_search_region("the Prairies")
+        assert "error" in result
+
+    def test_empty_region_raises(self):
+        with pytest.raises(ValueError, match="region is required"):
+            expand_search_region("  ")
+
+
 class TestRentalSearch:
     def test_valid_filters_returns_response(self):
         sample = RentalSearchResponse(
@@ -70,6 +86,18 @@ class TestRentalSearch:
         with patch("rental_search_agent.server.search", side_effect=SearchBackendError("unavailable")):
             with pytest.raises(ValueError, match="unavailable"):
                 rental_search({"min_bedrooms": 2, "location": "Vancouver"})
+
+    def test_location_list_accepted(self):
+        sample = RentalSearchResponse(
+            listings=[sample_listing()],
+            total_count=1,
+            searched_locations=["Vancouver, BC", "Burnaby, BC"],
+        )
+        with patch("rental_search_agent.server.search", return_value=sample):
+            result = rental_search(
+                {"min_bedrooms": 2, "location": ["Vancouver, BC", "Burnaby, BC"]}
+            )
+            assert result.searched_locations == ["Vancouver, BC", "Burnaby, BC"]
 
 
 class TestFilterListings:

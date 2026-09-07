@@ -1,0 +1,129 @@
+Status: [x] done  |  [] open  |  [Deprecated] implemented then removed, retired, or disabled from the product surface
+
+================================================================================
+SEARCH RESULTS DISPLAY
+================================================================================
+
+[x] Show results on a map with each point labeled with the rental price
+
+[x] Present search results optionally as a cards grid in addition to the table view (grid vs list toggle). Cards are clickable and open the listing in a new tab; map is preserved.
+
+[x] Map labels: optional price vs rank toggle. Rank uses a circle with a large bold number; price uses a rectangle with smaller non-bold font.
+
+[x] Store the currently displayed result set as a variable (display_list / master_list), rather than looking it up from the latest chat message. The dataframe and map always point at that result set.
+
+[x] When filtering, keep a master list of all listings from the search API and a filtered list when filters are applied. Relaxing filters reuses the master list without calling the search API again unless necessary.
+
+[x] Show a score column in the results table when available. The column is now "Match score" (overall match_score, falling back to semantic_score).
+
+[x] Give the agent the ability to search multiple locations at once and combine the results into a single list. This would require calling the search tool multiple times (in parallel) and merging the results.
+
+================================================================================
+SEARCH MARKETS / BACKENDS
+================================================================================
+
+[Deprecated] Open the search tool to US and India cities in addition to Canada (all countries supported by pyRealtor).
+    pyRealtor was retired (bot protection / reliability). The current backend is Apify Realtor.ca (Canada only). SEARCH_MARKET=us is reserved in backends/base.py but not implemented; India is not planned.
+
+================================================================================
+PREFERENCES
+================================================================================
+
+[x] Store user search preferences and reuse them so the agent does not re-ask (budget, beds, baths, den, size, proximity, qualitative). Persisted to ~/.rental_search_agent/preferences.json.
+
+[x] Extend preferences to capture geographic proximity as open text (e.g. max 30 min drive to downtown, max 5 min walk to a SkyTrain station, 20 min drive to a work address). The LLM parses this into structured rules.
+
+[x] Extend preferences to capture unstructured listing preferences (e.g. balcony, parking, gym).
+
+[Deprecated] Store viewing-time / name / email in the preferences UI so the agent does not re-ask for bookings.
+    Contact keys (viewing_preference, name, email, phone) are still persisted in preferences.json but are hidden from the sidebar and are not injected into the agent system prompt. Chat booking is disabled.
+
+================================================================================
+PROXIMITY
+================================================================================
+
+[x] Geocode locations referenced in proximity preferences (once at the start of a search, and again after proximity prefs change).
+
+[x] Geocoding needs a real address. The LLM is instructed to disambiguate terms such as "Downtown Vancouver" to an actual address.
+
+[x] Measure proximity (km, minutes walk / drive / transit) of listings to preferred locations and append those measures to search results (enrich_listings_with_proximity).
+
+[x] Filter results using those proximity measures via filter_listings (proximity_rules).
+
+[x] Nearest transit / train station geolocations.
+    Implemented via Google Places Nearby Search at enrichment time (not a static placeholder). "nearest transit station" is skipped during geocoding and resolved per listing.
+
+================================================================================
+SCORING AND ANALYSIS
+================================================================================
+
+[x] Apply user preferences to search results (structural filters, proximity, qualitative).
+
+[x] Semantic scoring from the user query/preferences vs listing description (cosine similarity).
+
+[x] Complement cosine similarity with other scoring methods.
+    Multi-metric match_score: structural, proximity, amenity, and semantic components (match_scoring.py). Ranking by preferences is optional because it is expensive.
+
+[x] LLM-based listing analysis against preferences (Analyze link → dedicated analysis card).
+    Shows match score (%), key matches, and key gaps.
+
+================================================================================
+VIEWING AND CALENDAR
+================================================================================
+
+[Deprecated] Force the agent to show a dropdown for selecting listings to submit a viewing request for.
+    ask_user dropdown/multiselect still exists for search clarification. The viewing shortlist flow (build_approval_choices) is unused: chat is search/refine only.
+
+[Deprecated] Google Calendar tools (list / create / update / delete events) and book viewings from preferred timeslots before submitting a viewing request.
+    Tools still exist in server.py / client.py TOOLS, but they are excluded from the chat agent (CHAT_DISABLED_TOOL_NAMES). MCP server still exposes them.
+
+[Deprecated] Let the user adjust a draft viewing schedule (add/remove listings, change viewing time).
+    modify_viewing_plan still exists but is chat-disabled (same as calendar tools).
+
+[] Implement a true viewing_request tool. Today booking uses simulate_viewing_request (simulated; also chat-disabled). Real flow: listing URL → "Request a showing" → fill personal details and time → check "I'm not a robot" → submit.
+
+[] Each result card should have a "Request a viewing" button, disabled if the listing is already on the viewing schedule. Clicking it should: check calendar for slots in preferred viewing times, present slots for approval, book the selected slot, then submit a viewing request.
+
+================================================================================
+UX
+================================================================================
+
+[x] Streaming agent responses in the chat interface.
+
+[x] Status indicators while tools run (e.g. "Searching for listings...", "Filtering listings...", "Ranking listings by your preferences...").
+
+[x] Chat in a floating panel on the bottom-right that scrolls independently of the results panel.
+
+================================================================================
+BUGS (PROXIMITY / RANKING)
+================================================================================
+
+[x] Proximity limits were computed but not applied as a filter.
+    Fixed: filter_listings with proximity_rules after enrich_listings_with_proximity.
+
+[x] Ranking by proximity did not work ("rank the listings by their proximity to my work location").
+    Fixed in code: filter_listings sort_by="proximity"; agent instructions require nearest-first sort after enrich; UI no longer clobbers that sort with match_score when last_sort_by is proximity.
+
+[x] When proximity preferences are not provided, the agent still called parse_proximity_preferences, geocode_proximity_references, and enrich_listings_with_proximity.
+    Fixed: step 4p has an explicit entry condition.
+
+[x] When applying proximity preferences, enrich_listings_with_proximity was occasionally skipped, so proximity data was missing.
+    Fixed: step 4p requires enrich before filter_listings with proximity_rules.
+
+[x] Filter on cheap structural features (beds, baths, size, rent) before expensive enrich_listings_with_proximity / score_listings_by_preferences.
+    Fixed: step 3b structural narrow (predicate push-down).
+
+================================================================================
+SESSION AND AUTH
+================================================================================
+
+[] User session with Google authentication, with preferences saved per user.
+
+================================================================================
+TESTING AND MCP
+================================================================================
+
+[x] Create unit tests (tests/unit and tests/integration).
+
+[Deprecated] Figure out why the MCP version of the app in streamlit_app_mcp.py does not work.
+    streamlit_app_mcp.py was removed. The working UI is streamlit_app.py with in-process tools. The MCP server (rental-search-mcp / server.py) still exists; see docs/mcp-ui-investigation-report.md if an MCP client UI is revived.

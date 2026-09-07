@@ -176,6 +176,12 @@ class TestSearchCriteriaToTextBlob:
         blob = search_criteria_to_text_blob({"location": "Vancouver, BC"})
         assert blob == "Vancouver, BC"
 
+    def test_joins_location_list(self):
+        blob = search_criteria_to_text_blob(
+            {"location": ["Vancouver, BC", "Burnaby, BC"]}
+        )
+        assert blob.startswith("Vancouver, BC, Burnaby, BC")
+
     def test_empty_criteria_and_preferences_returns_empty_string(self):
         assert search_criteria_to_text_blob({}) == ""
 

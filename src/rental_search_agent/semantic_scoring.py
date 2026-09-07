@@ -236,7 +236,11 @@ def search_criteria_to_text_blob(
         Joined blob string: location, structured bed/bath/sqft/price line, qualitative
         preferences, proximity text — omitting any part with no data.
     """
-    location = (criteria.get("location") or "").strip()
+    loc_raw = criteria.get("location")
+    if isinstance(loc_raw, list):
+        location = ", ".join(str(x).strip() for x in loc_raw if x and str(x).strip())
+    else:
+        location = (loc_raw or "").strip()
     listing_type = criteria.get("listing_type")
 
     structured_parts: List[str] = []

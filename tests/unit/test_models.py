@@ -78,6 +78,40 @@ class TestRentalSearchFilters:
         assert f.max_bedrooms == 2
         assert f.price_max == 2000
 
+    def test_location_list_two_cities(self):
+        f = RentalSearchFilters(min_bedrooms=1, location=["Vancouver, BC", "Burnaby, BC"])
+        assert f.location == ["Vancouver, BC", "Burnaby, BC"]
+        assert f.location_list() == ["Vancouver, BC", "Burnaby, BC"]
+        assert f.location_display() == "Vancouver, BC, Burnaby, BC"
+
+    def test_location_list_of_one_collapses_to_string(self):
+        f = RentalSearchFilters(min_bedrooms=1, location=["Vancouver, BC"])
+        assert f.location == "Vancouver, BC"
+
+    def test_location_list_dedupes_case_insensitively(self):
+        f = RentalSearchFilters(
+            min_bedrooms=1,
+            location=["Vancouver, BC", "  vancouver, bc  ", "Burnaby, BC"],
+        )
+        assert f.location == ["Vancouver, BC", "Burnaby, BC"]
+
+    def test_empty_location_list_rejected(self):
+        with pytest.raises(ValidationError, match="at least one"):
+            RentalSearchFilters(min_bedrooms=1, location=["  ", ""])
+
+    def test_location_list_cap_enforced(self):
+        from rental_search_agent.models import MAX_SEARCH_LOCATIONS
+
+        cities = [f"City {i}, BC" for i in range(MAX_SEARCH_LOCATIONS + 1)]
+        with pytest.raises(ValidationError, match="at most"):
+            RentalSearchFilters(min_bedrooms=1, location=cities)
+
+    def test_location_entry_too_long_rejected(self):
+        from rental_search_agent.models import MAX_SEARCH_LOCATION_CHARS
+
+        with pytest.raises(ValidationError, match="at most"):
+            RentalSearchFilters(min_bedrooms=1, location="X" * (MAX_SEARCH_LOCATION_CHARS + 1))
+
 
 class TestListing:
     def test_to_short_label_with_index(self):
@@ -237,6 +271,8 @@ class TestResponseModels:
         r2 = RentalSearchResponse.model_validate(d)
         assert r2.total_count == 1
         assert r2.listings[0].id == "m1"
+        assert r2.searched_locations == []
+        assert r2.failed_locations == []
 
     def test_ask_user_answer_response(self):
         r = AskUserAnswerResponse(answer="Yes")

@@ -31,6 +31,7 @@ flowchart TB
 
     subgraph MCP["MCP Server"]
         T1[ask_user]
+        T1b[expand_search_region]
         T2[rental_search]
         T2b[filter_listings]
         T2c[summarize_listings]
@@ -83,8 +84,8 @@ flowchart TB
 | **User** | Supplies natural-language search, answers clarification and approval prompts (via Chat UI), receives shortlist and confirmation. |
 | **Chat UI** | Renders conversation and agent prompts; sends user messages and tool answers (e.g. from `ask_user`) to the agent. |
 | **LLM Agent** | Parses intent, orchestrates the flow (§7), calls MCP tools (`ask_user`, `rental_search`, `simulate_viewing_request`), presents shortlist and final summary. |
-| **MCP Server** | Exposes tools including `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
-| **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into the configured search backend; maps backend output to [§4.2](#42-listing-item-in-search-results) Listing shape. |
+| **MCP Server** | Exposes tools including `ask_user`, `expand_search_region`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, `modify_viewing_plan`. Handles tool invocation and return values. |
+| **Adapter** | Translates [§4.1](#41-rental-search-filters-input-to-rental_search) filters into the configured search backend (one city per backend call). Multi-city `location` lists are fanned out in parallel here, then merged and deduped by listing id. |
 | **ApifyRealtorCaBackend** | Calls Apify actor `igolaizola/realtor-canada-scraper-ppe` for Canada rent/sale search. |
 | **REALTOR.CA** | External listing source (Canada); listing data scraped via Apify. |
 
@@ -228,10 +229,11 @@ classDiagram
 
 | Layer | Module | Key types / functions |
 |-------|--------|------------------------|
-| **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `ProximityRule`, `GeocodedReference`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
+| **Models** | `models.py` | `RentalSearchFilters`, `Listing`, `UserDetails`, `ListingFilterCriteria`, `ProximityRule`, `GeocodedReference`, `FailedSearchLocation`, `RentalSearchResponse`, `AskUserAnswerResponse`, `AskUserSelectedResponse`, `SimulateViewingRequestResponse`, `AvailableSlot`, `ViewingPlanEntry`, `ViewingPlan` |
 | **Agent** | `agent.py` | `AgentState` (dataclass), `flow_instructions()`, `build_approval_choices()`, `selected_to_listings()` |
-| **Adapter** | `adapter.py` | `search(filters)` (thin wrapper over `get_search_backend()`), re-exports `SearchBackendError` |
+| **Adapter** | `adapter.py` | `search(filters)` (single-city or parallel multi-city fan-out + merge), `merge_listings_by_id()`, re-exports `SearchBackendError` |
 | **Backends** | `backends/` | `SearchBackend` (Protocol), `get_search_backend()`, `ApifyRealtorCaBackend`, `SearchBackendError` (defined in `backends/errors.py`) |
+| **Search regions** | `search_regions.py` | `expand_search_region()`, metro → municipality catalog |
 | **Filtering** | `filtering.py` | `filter_listings(listings, criteria, sort_by, ascending, proximity_rules)` |
 | **Geocoding** | `geocoding.py` | `geocode_location()`, `geocode_proximity_references()` |
 | **Proximity** | `proximity.py` | `get_nearest_transit_station()`, `enrich_listings_with_proximity()` |
@@ -239,7 +241,7 @@ classDiagram
 | **Summarizer** | `summarizer.py` | `summarize_listings(listings)` |
 | **Viewing plan** | `viewing_plan.py` | `draft_viewing_plan(listings, available_slots)` |
 | **Calendar** | `calendar_service.py` | `get_available_slots()`, `list_events()`, `create_event()`, `update_event()`, `delete_event()` |
-| **MCP Server** | `server.py` | FastMCP tools: `ask_user`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_*`, `draft_viewing_plan` |
+| **MCP Server** | `server.py` | FastMCP tools: `ask_user`, `expand_search_region`, `rental_search`, `filter_listings`, `summarize_listings`, `simulate_viewing_request`, `calendar_*`, `draft_viewing_plan` |
 | **Client** | `client.py` | `run_agent_step()`, `run_agent_loop()` — orchestrates LLM + tool calls |
 
 ### 2.2 Google Calendar (optional)
@@ -257,7 +259,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 - **Currency:** CAD. All rent values in documents and APIs are in CAD/month unless otherwise noted.
 - **Area:** Square feet (sqft). Optional field; omit if backend does not provide it.
 - **IDs:** Listings use an opaque `id` (string) and a `url` (string). The agent uses both for display and for `simulate_viewing_request(listing_url, ...)`.
-- **Location:** Free-form string (e.g. `"Vancouver"`, `"City of Vancouver"`, `"Metro Vancouver"`). Backend interprets. For **proximity preferences**, locations are geocoded via Google Geocoding API; "nearest transit station" is resolved per listing via Google Places (type=transit_station).
+- **Location:** A city string (e.g. `"Vancouver"`, `"Vancouver, BC"`) or a list of cities for one logical multi-city search. Metro names such as `"Metro Vancouver"` are **not** passed to the backend — the agent calls `expand_search_region`, confirms municipalities with `ask_user`, then `rental_search` with the selected `search_location` list. The adapter fans out parallel per-city scrapes and merges/dedupes by listing id. For **proximity preferences**, locations are geocoded via Google Geocoding API; "nearest transit station" is resolved per listing via Google Places (type=transit_station).
 
 ---
 
@@ -275,7 +277,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | `max_sqft` | number (integer) | No | Maximum square footage. Omit for no upper limit. |
 | `price_min` | number | No | Minimum rent (CAD/month). |
 | `price_max` | number | No | Maximum rent (CAD/month). At least one of `price_min` or `price_max` should be set if user gave a range. |
-| `location` | string | Yes | Location string (e.g. city or area name). |
+| `location` | string or array of strings | Yes | One city (`"Vancouver, BC"`) or a list of cities for a multi-city search. Not a metro name. Max 22 cities. |
 | `listing_type` | string | No | Transaction type: `"for_rent"` or `"for_sale"`. Default `"for_rent"`. |
 
 **Example:**
@@ -429,7 +431,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 
 ### 5.2 `rental_search`
 
-**Purpose:** Run a single logical search against the one supported rental backend; return a list of listings (shortlist).
+**Purpose:** Run a single logical search against the one supported rental backend; return a list of listings (shortlist). `filters.location` may be one city or a list of cities. The adapter scrapes those cities in parallel, merges results, and dedupes by listing id. Do not pass a metro name; use `expand_search_region` then `ask_user` first.
 
 **Arguments (JSON schema):**
 
@@ -444,14 +446,18 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
   "listings": [
     { "id": "...", "title": "...", "url": "...", "address": "...", "price": 0, "bedrooms": 0, "sqft": 0, "source": "..." }
   ],
-  "total_count": 0
+  "total_count": 0,
+  "searched_locations": ["Vancouver, BC"],
+  "failed_locations": []
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `listings` | array of [Listing](#42-listing-item-in-search-results) | List of listings (may be empty). Order is backend-defined (e.g. relevance, price). |
-| `total_count` | number | Total number of listings matching the query. May equal `listings.length` if no pagination; if backend paginates, may be larger. MVP: agent performs one logical call; backend may perform multiple API calls internally and return a single merged list. |
+| `total_count` | number | Total number of unique listings in `listings` after merge/dedupe. |
+| `searched_locations` | array of strings | Cities whose scrapes succeeded. |
+| `failed_locations` | array of `{ location, error }` | Cities whose scrapes failed; empty when every city succeeded. If **all** cities fail, the tool returns an error instead of this payload. |
 
 **Pagination (backend):**
 
@@ -698,9 +704,9 @@ For production/ToS-safe access, consider CREA DDF or vendors such as Repliers (b
 
 ### 7.2 Flow and tool-call sequence
 
-1. **Parse** user message → extract filters (and note if location is ambiguous).
-2. **Clarify geography (optional)** → If location ambiguous, `ask_user` for geography. Do not ask for viewing times yet.
-3. **Search** → `rental_search(filters)`. If error → inform user, optionally retry once (see MVP error states). If empty list → do not call approval; suggest relaxing filters and offer to search again.
+1. **Parse** user message → extract filters (and note if location is a metro, a list of cities, or a single city).
+2. **Clarify geography** → If the user named a known metro/region, `expand_search_region` then `ask_user` (multi-select of municipalities). If location is otherwise ambiguous, `ask_user` for geography. Explicit city lists skip the metro picker. Bare city names are single-city searches.
+3. **Search** → one `rental_search(filters)` with `location` as a string or array of selected `search_location` values (not N separate searches). If error → inform user, optionally retry once (see MVP error states). If empty list → do not call approval; suggest relaxing filters and offer to search again. Mention `searched_locations` / `failed_locations` when present.
 4. **Present** → Call `summarize_listings` to get statistics, then produce a bullet-point summary (Count, Price, Bedrooms, Bathrooms, Size, Property types). Results are shown in a table (and optionally a map when coordinates exist). Point user to the table.
 4p. **Proximity (optional)** → If the user has set or stated proximity preferences: call `parse_proximity_preferences`, then `geocode_proximity_references`, then `enrich_listings_with_proximity`, then `filter_listings(proximity_rules=rules)`. Listings with unknown proximity are kept. Add a Proximity bullet to the summary when presenting.
 5. **Narrow/sort (optional)** → If user asks to filter or sort, call `filter_listings` with criteria and/or sort options (and optionally `proximity_rules`), then `summarize_listings` again and re-present.
@@ -753,7 +759,7 @@ For implementers who want to validate inputs/outputs, below are minimal JSON Sch
     "max_sqft": { "type": "number", "minimum": 0 },
     "price_min": { "type": "number", "minimum": 0 },
     "price_max": { "type": "number", "minimum": 0 },
-    "location": { "type": "string", "minLength": 1 },
+    "location": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 22 }] },
     "listing_type": { "type": "string", "enum": ["for_rent", "for_sale"] }
   }
 }

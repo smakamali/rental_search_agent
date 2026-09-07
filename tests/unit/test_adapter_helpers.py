@@ -281,6 +281,14 @@ class TestFiltersToRunInput:
         with pytest.raises(SearchBackendError, match="for_rent"):
             filters_to_run_input(filters, max_items=10)
 
+    def test_list_location_uses_first_city_only(self):
+        filters = RentalSearchFilters(
+            min_bedrooms=1,
+            location=["Vancouver, BC", "Burnaby, BC"],
+        )
+        run_input = filters_to_run_input(filters, max_items=10)
+        assert run_input["location"] == "Vancouver, BC"
+
 
 class TestPostFilter:
     def test_filters_by_rent_max(self):
