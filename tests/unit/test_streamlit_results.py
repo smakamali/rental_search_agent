@@ -3,6 +3,9 @@
 from rental_search_agent.display_format import get_score_color
 from rental_search_agent.streamlit_results import (
     _build_map_data,
+    _format_bedrooms,
+    _format_days_on_market,
+    _format_listing_price,
     _format_match_score,
     _format_map_price_label,
     _format_proximity_display,
@@ -12,6 +15,7 @@ from rental_search_agent.streamlit_results import (
     format_proximity_caption,
     format_sort_by_label,
     listing_address_parts,
+    listing_result_identity,
     listing_tag_labels,
     ordered_by_caption,
     proximity_card_lines,
@@ -412,3 +416,101 @@ class TestMapHelpers:
         )
         assert format_map_coverage(5, 5) == "5 results on map"
         assert format_map_coverage(1, 1) == "1 result on map"
+
+    def test_rejects_non_http_listing_urls(self):
+        listings = [
+            {
+                "id": "a",
+                "rank": 1,
+                "url": "javascript:alert(1)",
+                "photo_url": "data:image/gif;base64,AAAA",
+                "latitude": 49.28,
+                "longitude": -123.12,
+            }
+        ]
+        points, _, _ = _build_map_data(listings, label_mode="rank")
+        assert points[0]["url"] == ""
+        assert points[0]["photo_url"] == ""
+        assert _listings_to_table_rows(listings)[0]["URL"] == ""
+
+
+class TestCrossViewIdentity:
+    def test_out_of_order_rank_and_match_are_shared(self):
+        listings = [
+            {
+                "id": "b",
+                "rank": 2,
+                "match_score": 0.4,
+                "semantic_score": 0.9,
+                "price": 2800,
+                "latitude": 49.28,
+                "longitude": -123.12,
+            },
+            {
+                "id": "a",
+                "rank": 1,
+                "match_score": 0.8,
+                "price": 1_730_000,
+                "latitude": 49.29,
+                "longitude": -123.13,
+            },
+        ]
+        identities = [listing_result_identity(item, i) for i, item in enumerate(listings)]
+        rows = _listings_to_table_rows(listings)
+        rank_points, _, _ = _build_map_data(listings, label_mode="rank")
+        match_points, _, _ = _build_map_data(listings, label_mode="match")
+
+        assert [item["rank"] for item in identities] == [2, 1]
+        assert [row["rank"] for row in rows] == [2, 1]
+        assert [point["rank"] for point in rank_points] == [2, 1]
+        assert [point["label"] for point in rank_points] == ["2", "1"]
+
+        assert identities[0]["match_pct"] == 40
+        assert identities[1]["match_pct"] == 80
+        assert rows[0]["match_score"] == "40%"
+        assert rows[1]["match_score"] == "80%"
+        assert match_points[0]["label"] == "40%"
+        assert match_points[1]["label"] == "80%"
+        assert identities[0]["match_color"] == get_score_color(40)
+        assert match_points[0]["match_color"] == get_score_color(40)
+        assert rows[0]["price"] == "$2,800"
+        assert rows[1]["price"] == "$1,730,000"
+        assert _format_map_price_label(listings[1]) == "$1.73M"
+
+
+class TestMissingDataDisplay:
+    def test_never_exposes_none_nan_or_null_tokens(self):
+        listing = {
+            "id": "x",
+            "rank": float("nan"),
+            "address": None,
+            "postal_code": "null",
+            "price": float("nan"),
+            "price_display": "NaN",
+            "house_category": None,
+            "bedrooms": float("nan"),
+            "bedrooms_display": "None",
+            "bathrooms": None,
+            "sqft": float("nan"),
+            "match_score": None,
+            "semantic_score": "null",
+            "listing_age_hours": float("inf"),
+            "proximity": None,
+        }
+        rows = _listings_to_table_rows([listing])
+        blob = " ".join(str(value) for value in rows[0].values())
+        for token in ("None", "NaN", "nan", "null"):
+            assert token not in blob
+        assert rows[0]["rank"] == 1
+        assert rows[0]["address"] == "—"
+        assert rows[0]["type"] == "—"
+        assert rows[0]["bed"] == "—"
+        assert rows[0]["price"] == "—"
+        assert rows[0]["match_score"] == "—"
+        assert rows[0]["days_on_market"] == "—"
+        assert listing_address_parts(listing)[0] == "—"
+        assert format_property_basics(listing) == ""
+        assert _format_listing_price(listing) == "—"
+        assert _format_bedrooms(listing) == "—"
+        assert _format_days_on_market(listing) == "—"
+        assert _format_match_score(listing) == "—"

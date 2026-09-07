@@ -37,8 +37,8 @@ from rental_search_agent.streamlit_results import (
     _format_listing_price,
     _format_map_price_label,
     _format_match_score,
-    _format_proximity_display,
     _listings_to_table_rows,
+    listing_match_score,
     normalize_map_label_mode,
     normalize_results_view,
     render_search_results,
@@ -210,23 +210,14 @@ def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
     field is unchanged — displayed order changes, but 'rank' still identifies
     listings for "listing N" references.
     """
-    if not any(
-        isinstance(item, dict)
-        and (item.get("match_score") is not None or item.get("semantic_score") is not None)
-        for item in listings
-    ):
+    if not any(listing_match_score(item) is not None for item in listings):
         return listings
 
     def _key(item: dict) -> tuple:
-        if not isinstance(item, dict):
+        score = listing_match_score(item)
+        if score is None:
             return (1, -1.0)
-        ms = item.get("match_score")
-        if ms is not None:
-            return (0, -float(ms))
-        ss = item.get("semantic_score")
-        if ss is not None:
-            return (0, -float(ss))
-        return (1, -1.0)
+        return (0, -score)
 
     return sorted(listings, key=_key)
 

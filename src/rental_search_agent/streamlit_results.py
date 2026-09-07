@@ -70,6 +70,7 @@ _MODE_WORDS = {
     "driving": "drive",
     "transit": "transit",
 }
+_UNAVAILABLE_TOKENS = frozenset({"none", "nan", "null", "n/a", "nat"})
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -86,6 +87,21 @@ def _finite_or_none(value: Any) -> float | None:
     if not _is_finite_number(value):
         return None
     return float(value)
+
+
+def _plain_display_text(value: Any, fallback: str = "—") -> str:
+    """Coerce scraped values for UI. Never returns None/NaN/null tokens."""
+    if value is None or isinstance(value, bool):
+        return fallback
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            return fallback
+        text = str(int(value)) if float(value) == int(value) else str(value)
+    else:
+        text = str(value).strip()
+    if not text or text.lower() in _UNAVAILABLE_TOKENS:
+        return fallback
+    return text
 
 
 def normalize_results_view(value: str | None) -> str:
@@ -240,19 +256,37 @@ def listing_address_parts(listing: dict) -> tuple[str, str]:
     """Street / locality using split_listing_address. Empty address stays '—'."""
     address = listing.get("address") if isinstance(listing, dict) else None
     postal = listing.get("postal_code") if isinstance(listing, dict) else None
-    if not (address or "").strip():
-        return ("—", (postal or "").strip())
-    return split_listing_address(address, postal)
+    address_text = _plain_display_text(address, fallback="")
+    postal_text = _plain_display_text(postal, fallback="")
+    if not address_text:
+        return ("—", postal_text)
+    return split_listing_address(address_text, postal_text or None)
 
 
 def listing_rank(listing: dict, fallback_index: int) -> Any:
     """Authoritative listing['rank']; position is only a missing-field fallback."""
     rank = listing.get("rank") if isinstance(listing, dict) else None
-    return rank if rank is not None else fallback_index + 1
+    if rank is None or rank == "":
+        return fallback_index + 1
+    if _is_finite_number(rank):
+        n = float(rank)
+        return int(n) if n == int(n) else n
+    return fallback_index + 1
+
+
+def listing_result_identity(listing: dict, fallback_index: int) -> dict[str, Any]:
+    """Canonical rank/Match shared by Grid, Table, and Map for one listing."""
+    pct, color = match_score_display(listing)
+    return {
+        "id": listing.get("id") if isinstance(listing, dict) else None,
+        "rank": listing_rank(listing, fallback_index),
+        "match_pct": pct,
+        "match_color": color,
+    }
 
 
 def request_listing_analysis(listing: dict) -> None:
-    """Shared Analyze action: same session keys as the existing cards/table buttons."""
+    """Shared Analyze action: same session keys as Grid/Table Analyze buttons."""
     st.session_state["analyze_listing_id"] = listing.get("id")
     st.session_state["analyze_listing"] = listing
     st.rerun()
@@ -404,44 +438,34 @@ def listing_tag_labels(listing: dict) -> list[str]:
     return badges
 
 
-_TABLE_TAG_LABELS = {
-    "New": "🆕 New",
-    "Open house": "🏠 Open house",
-    "Reduced": "↓ Reduced",
-}
-
-
 def _format_tags(listing: dict) -> str:
-    """Table-compatible joined tags; empty string when none apply."""
-    return " · ".join(_TABLE_TAG_LABELS.get(tag, tag) for tag in listing_tag_labels(listing))
+    """Joined tags using the same labels as Grid; empty string when none apply."""
+    return " · ".join(listing_tag_labels(listing))
 
 
 def _format_days_on_market(listing: dict) -> str:
     """'Days on Market', approximated from listing_age_hours (parsed from the actor's
     relative freshness text, e.g. '18 hours ago') — the actor has no exact DOM field."""
-    age_hours = listing.get("listing_age_hours")
-    if age_hours is None:
+    hours = _finite_or_none(listing.get("listing_age_hours"))
+    if hours is None:
         return "—"
-    try:
-        return f"{round(float(age_hours) / 24)}d"
-    except (TypeError, ValueError):
-        return "—"
+    return f"{round(hours / 24)}d"
 
 
 def _format_bedrooms(listing: dict) -> str:
     """Bedroom count for display, preserving the source's den notation (e.g. '2 + 1')."""
-    display = listing.get("bedrooms_display")
+    display = _plain_display_text(listing.get("bedrooms_display"), fallback="")
     if display:
-        return str(display)
+        return display
     bedrooms = listing.get("bedrooms")
-    if bedrooms is None:
+    if bedrooms is None or bedrooms == "":
         return "—"
     if _is_finite_number(bedrooms):
         n = float(bedrooms)
         if n == int(n):
             return str(int(n))
         return f"{n:g}"
-    return str(bedrooms)
+    return _plain_display_text(bedrooms)
 
 
 def format_property_basics(listing: dict) -> str:
@@ -474,7 +498,7 @@ def proximity_card_lines(items: list[ProximityDisplayItem]) -> list[tuple[str, s
 
 
 def _format_listing_price(listing: dict) -> str:
-    """Human-readable price for table/cards.
+    """Human-readable price for Grid/Table.
 
     Prefer the numeric ``price`` field so scraped ``price_display`` cannot inject
     Markdown links into any Markdown render path. Fall back to plain display text.
@@ -484,10 +508,7 @@ def _format_listing_price(listing: dict) -> str:
         formatted = format_currency(price)
         if formatted != "—":
             return formatted
-    raw = listing.get("price_display")
-    if not raw:
-        return "—"
-    return str(raw)
+    return _plain_display_text(listing.get("price_display"))
 
 
 def _analyze_button_key(listing: dict, index: int) -> str:
@@ -539,9 +560,9 @@ def inject_results_css() -> None:
             opacity: 0.75;
             font-family: inherit;
         }
-        .rsa-results-header { margin-bottom: 0.35rem; }
-        .rsa-results-title { font-size: 1.35rem; font-weight: 700; line-height: 1.25; }
-        .rsa-results-meta { opacity: 0.72; font-size: 0.9rem; margin-top: 0.15rem; }
+        .rsa-results-header { margin-bottom: 0.35rem; min-width: 0; }
+        .rsa-results-title { font-size: 1.35rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+        .rsa-results-meta { opacity: 0.72; font-size: 0.9rem; margin-top: 0.15rem; overflow-wrap: anywhere; }
         .rsa-card-photo {
             position: relative;
             width: 100%;
@@ -589,11 +610,11 @@ def inject_results_css() -> None:
         }
         .rsa-card-match { display: flex; justify-content: flex-end; align-items: center; }
         .rsa-card-address { min-height: 2.55rem; margin-top: 0.15rem; }
-        .rsa-card-street { font-weight: 600; line-height: 1.3; }
+        .rsa-card-street { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
         .rsa-card-street a { color: inherit; text-decoration: none; }
         .rsa-card-street a:hover { text-decoration: underline; }
-        .rsa-card-locality { opacity: 0.7; font-size: 0.85rem; line-height: 1.35; margin-top: 0.1rem; }
-        .rsa-card-facts { min-height: 1.25rem; opacity: 0.82; font-size: 0.9rem; margin: 0.25rem 0 0.15rem; }
+        .rsa-card-locality { opacity: 0.7; font-size: 0.85rem; line-height: 1.35; margin-top: 0.1rem; overflow-wrap: anywhere; }
+        .rsa-card-facts { min-height: 1.25rem; opacity: 0.82; font-size: 0.9rem; margin: 0.25rem 0 0.15rem; overflow-wrap: anywhere; }
         .rsa-card-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.2rem 0 0.15rem; }
         .rsa-card-tag {
             font-size: 0.7rem;
@@ -605,13 +626,16 @@ def inject_results_css() -> None:
             border-radius: 999px;
             white-space: nowrap;
         }
-        .rsa-card-prox { min-height: 3.1rem; margin: 0.35rem 0 0.15rem; font-size: 0.85rem; line-height: 1.4; }
+        .rsa-card-prox { min-height: 3.1rem; margin: 0.35rem 0 0.15rem; font-size: 0.85rem; line-height: 1.4; overflow-wrap: anywhere; }
         .rsa-card-prox-ok { opacity: 0.9; }
         .rsa-card-prox-unavail { opacity: 0.72; }
-        .rsa-table-photo { width: 64px; }
+        .rsa-card-photo, .rsa-card-photo img, .rsa-card-photo-img { max-width: 100%; }
+        .rsa-card-price { overflow-wrap: anywhere; }
+        .rsa-table-photo { width: 64px; max-width: 100%; }
         .rsa-table-photo-img {
             display: block;
             width: 64px;
+            max-width: 100%;
             aspect-ratio: 16 / 10;
             object-fit: cover;
             border-radius: 0.3rem;
@@ -629,11 +653,11 @@ def inject_results_css() -> None:
             font-size: 0.7rem;
             opacity: 0.7;
         }
-        .rsa-table-street { font-weight: 600; font-size: 0.82rem; line-height: 1.25; }
+        .rsa-table-street { font-weight: 600; font-size: 0.82rem; line-height: 1.25; overflow-wrap: anywhere; word-break: break-word; }
         .rsa-table-street a { color: inherit; text-decoration: none; }
         .rsa-table-street a:hover { text-decoration: underline; }
-        .rsa-table-locality { opacity: 0.68; font-size: 0.72rem; line-height: 1.25; margin-top: 0.05rem; }
-        .rsa-table-prox { font-size: 0.75rem; line-height: 1.3; }
+        .rsa-table-locality { opacity: 0.68; font-size: 0.72rem; line-height: 1.25; margin-top: 0.05rem; overflow-wrap: anywhere; }
+        .rsa-table-prox { font-size: 0.75rem; line-height: 1.3; overflow-wrap: anywhere; }
         .rsa-table-prox-ok { opacity: 0.9; }
         .rsa-table-prox-unavail { opacity: 0.72; }
         .rsa-table-num { font-variant-numeric: tabular-nums; font-size: 0.88rem; }
@@ -641,51 +665,13 @@ def inject_results_css() -> None:
         .rsa-map-coverage { opacity: 0.72; font-size: 0.85rem; margin: 0.15rem 0 0.35rem; }
         .rsa-map-summary-rank { font-size: 0.75rem; font-weight: 650; opacity: 0.75; }
         .rsa-map-summary-price { font-weight: 700; font-size: 0.95rem; }
-        .rsa-map-summary-street { font-size: 0.82rem; font-weight: 600; line-height: 1.25; }
-        .rsa-map-summary-facts { font-size: 0.75rem; opacity: 0.75; }
+        .rsa-map-summary-street { font-size: 0.82rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+        .rsa-map-summary-facts { font-size: 0.75rem; opacity: 0.75; overflow-wrap: anywhere; }
+        .rsa-map-summary-price { overflow-wrap: anywhere; }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-
-def _render_clickable_photo(photo_url: str, listing_url: str, width: int) -> None:
-    """Render the listing photo as a clickable link to the listing (st.image can't be
-    wrapped as a link directly, so this uses escaped raw HTML — same escaping pattern as
-    the existing folium map marker links). Falls back to a plain "View" link button when
-    there's no photo, so every row/card keeps some click-through to the listing even
-    without a photo (this is the table's only click-through now that MLS id is removed)."""
-    safe_listing = safe_http_url(listing_url) or ""
-    safe_photo = safe_http_url(photo_url) or ""
-    if safe_photo:
-        if safe_listing:
-            st.markdown(
-                f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">'
-                f'<img src="{html.escape(safe_photo)}" width="{width}"></a>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<img src="{html.escape(safe_photo)}" width="{width}">',
-                unsafe_allow_html=True,
-            )
-    elif safe_listing:
-        st.link_button("View", safe_listing)
-    else:
-        st.write("—")
-
-
-def _render_clickable_address(address: str, listing_url: str) -> None:
-    """Address as a new-tab link when a listing URL is present (escaped like map markers)."""
-    label = html.escape(address or "—")
-    safe_listing = safe_http_url(listing_url) or ""
-    if safe_listing:
-        st.markdown(
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{label}</a>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.write(address or "—")
 
 
 @dataclass(frozen=True)
@@ -745,9 +731,9 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     for i, listing in enumerate(listings):
         rows.append({
             "rank": listing_rank(listing, i),
-            "photo": listing.get("photo_url") or "",
-            "address": listing.get("address") or "—",
-            "type": listing.get("house_category") or "—",
+            "photo": safe_http_url(listing.get("photo_url")) or "",
+            "address": _plain_display_text(listing.get("address")),
+            "type": _plain_display_text(listing.get("house_category")),
             "bed": _format_bedrooms(listing),
             "bath": format_count(listing.get("bathrooms")),
             "size": format_sqft(listing.get("sqft")),
@@ -758,7 +744,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "Proximity": format_proximity_caption(
                 parse_proximity_display(listing.get("proximity"))
             ),
-            "URL": listing.get("url") or "",
+            "URL": safe_http_url(listing.get("url")) or "",
         })
     return rows
 
@@ -833,7 +819,7 @@ def _render_table_cell(column_key: str, listing: dict, index: int) -> None:
         _render_table_address(listing)
         return
     if column_key == "type":
-        st.write(listing.get("house_category") or "—")
+        st.write(_plain_display_text(listing.get("house_category")))
         return
     if column_key == "bed":
         st.write(_format_bedrooms(listing))
@@ -982,7 +968,7 @@ def _render_grid_card(listing: dict, index: int) -> None:
             request_listing_analysis(listing)
 
 
-def _render_results_cards(listings: list[dict]) -> None:
+def _render_results_grid(listings: list[dict]) -> None:
     """Render search results as a 3-column Grid. Photo and street open the listing."""
     if not listings:
         return
@@ -992,9 +978,6 @@ def _render_results_cards(listings: list[dict]) -> None:
         for offset, listing in enumerate(chunk):
             with cols[offset]:
                 _render_grid_card(listing, row_start + offset)
-
-
-_render_results_grid = _render_results_cards
 
 
 def _render_results_header(listings: list[dict]) -> None:
@@ -1294,7 +1277,7 @@ def render_search_results(listings: list[dict]) -> None:
     inject_results_css()
     prepare_results_widget_state(st.session_state)
     _render_results_header(listings)
-    view = st.session_state.get("results_view") or "grid"
+    view = prepare_results_widget_state(st.session_state)
     if view == "table":
         _render_results_table(listings)
     elif view == "map":
