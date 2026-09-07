@@ -214,6 +214,23 @@ class TestAmenityExtract:
         assert "parking" in ids
         assert "gym" in ids
 
+    def test_extracts_swimming_pool(self):
+        from rental_search_agent.preference_criteria import match_amenity_feature
+
+        feats = extract_amenity_features("balcony, parking, storage, swimming pool")
+        ids = {f.id for f in feats}
+        assert ids >= {"balcony", "parking", "storage", "pool"}
+        assert extract_amenity_features("whirlpool tub") == []
+        pool = next(f for f in feats if f.id == "pool")
+        assert match_amenity_feature(
+            _listing(description="Residents enjoy the shared outdoor pool.", ammenities=""),
+            pool,
+        ).status == "met"
+        assert match_amenity_feature(
+            _listing(description="Renovated kitchen with whirlpool tub.", ammenities=""),
+            pool,
+        ).status == "unmet"
+
 
 class TestScoreListings:
     def test_structural_only_no_embedding(self):
