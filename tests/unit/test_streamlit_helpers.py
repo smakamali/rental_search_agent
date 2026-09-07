@@ -10,12 +10,14 @@ import pytest
 from rental_search_agent.models import ProximityRule
 from rental_search_agent.streamlit_app import (
     PREF_KEYS,
+    _analyze_button_key,
     _apply_default_match_score_sort,
     _apply_proximity_filter_safeguard,
     _build_map_data,
     _escape_markdown_link_text,
     _format_bedrooms,
     _format_days_on_market,
+    _format_listing_price,
     _format_map_price_label,
     _format_match_score,
     _listings_to_table_rows,
@@ -319,6 +321,27 @@ class TestEscapeMarkdownLinkText:
 
     def test_escapes_backslash(self):
         assert _escape_markdown_link_text("a\\b") == "a\\\\b"
+
+
+class TestFormatListingPrice:
+    def test_prefers_numeric_price_over_display(self):
+        assert _format_listing_price({"price": 2800, "price_display": "$2,800 [x](https://evil)"}) == "$2,800"
+
+    def test_falls_back_to_display_when_no_numeric_price(self):
+        assert _format_listing_price({"price_display": "$2,800/mo"}) == "$2,800/mo"
+
+    def test_missing_price_returns_dash(self):
+        assert _format_listing_price({}) == "—"
+
+
+class TestAnalyzeButtonKey:
+    def test_uses_listing_id_when_present(self):
+        assert _analyze_button_key({"id": "abc"}, 0) == "analyze_abc"
+
+    def test_falls_back_when_id_missing_or_empty(self):
+        assert _analyze_button_key({}, 3) == "analyze_row_3"
+        assert _analyze_button_key({"id": None}, 4) == "analyze_row_4"
+        assert _analyze_button_key({"id": ""}, 5) == "analyze_row_5"
 
 
 class TestFormatMapPriceLabel:

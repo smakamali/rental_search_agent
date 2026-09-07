@@ -328,10 +328,29 @@ def _format_match_score(listing: dict) -> str:
 
 
 def _format_listing_price(listing: dict) -> str:
-    """Human-readable price for table/cards; prefers the listing's price_display."""
-    return listing.get("price_display") or (
-        f"${int(listing.get('price', 0)):,}" if listing.get("price") is not None else "—"
-    )
+    """Human-readable price for table/cards.
+
+    Prefer the numeric ``price`` field so scraped ``price_display`` cannot inject
+    Markdown links into any Markdown render path. Fall back to plain display text.
+    """
+    price = listing.get("price")
+    if price is not None:
+        try:
+            return f"${int(float(price)):,}"
+        except (TypeError, ValueError):
+            pass
+    raw = listing.get("price_display")
+    if not raw:
+        return "—"
+    return str(raw)
+
+
+def _analyze_button_key(listing: dict, index: int) -> str:
+    """Stable unique widget key for Analyze. Empty/None ids must not collide."""
+    listing_id = listing.get("id")
+    if listing_id is None or listing_id == "":
+        return f"analyze_row_{index}"
+    return f"analyze_{listing_id}"
 
 
 def _format_map_price_label(listing: dict) -> str:
@@ -446,7 +465,7 @@ def _render_results_table(listings: list[dict]) -> None:
         with row_cols[11]:
             st.caption(prox)
         with row_cols[12]:
-            if st.button("Analyze", key=f"analyze_{listing.get('id', i)}"):
+            if st.button("Analyze", key=_analyze_button_key(listing, i)):
                 st.session_state["analyze_listing_id"] = listing.get("id")
                 st.session_state["analyze_listing"] = listing
                 st.rerun()
@@ -475,7 +494,8 @@ def _render_results_cards(listings: list[dict]) -> None:
                 with st.container(border=True):
                     _render_clickable_photo(photo_url, url, width=220)
                     st.caption(f"#{rank}")
-                    st.markdown(f"**{_format_listing_price(listing)}**")
+                    # Use st.write (not Markdown) so scraped price text cannot inject links.
+                    st.write(_format_listing_price(listing))
                     _render_clickable_address(listing.get("address") or "—", url)
                     st.caption(
                         f"{_format_bedrooms(listing)} bed · {bath_txt} bath · {size_txt} sqft"
@@ -489,7 +509,7 @@ def _render_results_cards(listings: list[dict]) -> None:
                     prox = _format_proximity_display(listing.get("proximity"))
                     if prox and prox != "—":
                         st.caption(prox)
-                    if st.button("Analyze", key=f"analyze_{listing.get('id', i)}"):
+                    if st.button("Analyze", key=_analyze_button_key(listing, i)):
                         st.session_state["analyze_listing_id"] = listing.get("id")
                         st.session_state["analyze_listing"] = listing
                         st.rerun()
@@ -639,32 +659,67 @@ def _render_results_map(
 
 
 def _inject_chat_blob_css() -> None:
-    """Dock the chat FAB/panel to the bottom-right without overlaying the results column."""
+    """Dock the chat launcher/panel to the viewport.
+
+    Use attribute selectors — Streamlit's st-key-* class may sit on a wrapper.
+    Prefer theme CSS variables for opaque backgrounds so light/dark both stay readable.
+    When the panel is open, reserve right padding so results are not covered.
+    """
+    chat_open = st.session_state.get("chat_open", True)
+    # Keep results clear of the fixed ~420px panel while chat is open.
+    pad_right = "min(440px, calc(100vw - 1.5rem))" if chat_open else "1rem"
     st.markdown(
-        """
+        f"""
         <style>
-        .st-key-chat_blob {
+        [class*="st-key-chat_blob"] {{
             position: fixed !important;
-            bottom: 1.5rem;
-            right: 1.5rem;
-            z-index: 1000;
-            width: 400px;
-            max-width: calc(100vw - 2rem);
-            background-color: var(--background-color);
-            border: 1px solid rgba(49, 51, 63, 0.2);
-            border-radius: 12px;
-            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
-            padding: 0.6rem 0.75rem 0.75rem;
-        }
-        .st-key-chat_fab {
+            top: 0.75rem !important;
+            right: 0.75rem !important;
+            bottom: 0.75rem !important;
+            left: auto !important;
+            height: auto !important;
+            max-height: none !important;
+            width: min(420px, calc(100vw - 1.5rem)) !important;
+            z-index: 10000 !important;
+            background-color: var(--secondary-background-color, #0e1117) !important;
+            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
+            padding: 0.6rem 0.75rem 0.75rem !important;
+            overflow: visible !important;
+        }}
+        [class*="st-key-chat_blob"] [data-testid="stVerticalBlock"],
+        [class*="st-key-chat_blob"] [data-testid="stVerticalBlockBorderWrapper"] {{
+            background-color: var(--secondary-background-color, #0e1117) !important;
+        }}
+        [class*="st-key-chat_history"] {{
+            height: calc(100vh - 16rem) !important;
+            max-height: calc(100vh - 16rem) !important;
+            overflow: auto !important;
+        }}
+        [data-baseweb="popover"],
+        [data-baseweb="menu"],
+        [data-testid="stSelectboxVirtualDropdown"],
+        [data-testid="stMultiSelect"] [data-baseweb="popover"] {{
+            z-index: 2147483647 !important;
+        }}
+        /* Exact launcher container only — do not match chat_open_btn / chat_close_btn. */
+        [class*="st-key-chat_launcher"] {{
             position: fixed !important;
-            bottom: 1.5rem;
-            right: 1.5rem;
-            z-index: 1000;
-        }
-        .block-container {
+            bottom: 1.25rem !important;
+            right: 1.25rem !important;
+            z-index: 10000 !important;
+            width: auto !important;
+            background-color: var(--secondary-background-color, #0e1117) !important;
+            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border-radius: 24px !important;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+            padding: 0.35rem 0.5rem !important;
+        }}
+        .block-container {{
             padding-bottom: 6rem;
-        }
+            padding-right: {pad_right} !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -808,6 +863,10 @@ def _render_preferences_sidebar() -> None:
                 _save_preferences_to_file(new_prefs)
                 st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
                 st.rerun()
+        if not st.session_state.get("chat_open", True):
+            if st.button("Open chat", key="sidebar_chat_open"):
+                st.session_state["chat_open"] = True
+                st.rerun()
 
 
 def _render_ask_form(pending: dict) -> None:
@@ -815,17 +874,23 @@ def _render_ask_form(pending: dict) -> None:
     st.markdown(f"**{pending['prompt']}**")
     choices = pending.get("choices") or []
     allow_multiple = pending.get("allow_multiple", False)
+    # Include tool_call_id so widget state does not leak across different ask_user prompts.
+    ask_key = pending.get("tool_call_id") or "ask"
 
     with st.form("ask_user_form", clear_on_submit=True):
         if choices:
             if allow_multiple:
-                selected = st.multiselect("Select one or more", choices, key="ask_multiselect")
+                selected = st.multiselect(
+                    "Select one or more", choices, key=f"ask_multiselect_{ask_key}"
+                )
                 submit_val = selected
             else:
-                selected = st.selectbox("Choose one", [""] + choices, key="ask_selectbox")
+                selected = st.selectbox(
+                    "Choose one", [""] + choices, key=f"ask_selectbox_{ask_key}"
+                )
                 submit_val = selected if selected else None
         else:
-            submit_val = st.text_input("Your answer", key="ask_text")
+            submit_val = st.text_input("Your answer", key=f"ask_text_{ask_key}")
 
         submitted = st.form_submit_button("Submit")
         if submitted:
@@ -859,9 +924,9 @@ def _render_ask_form(pending: dict) -> None:
 def _render_chat_panel(client, model) -> None:
     """Collapsed FAB or open bottom-right chat panel (history + ask_user + send form)."""
     if not st.session_state.get("chat_open", True):
-        with st.container(key="chat_fab"):
-            label = "Chat •" if st.session_state.get("pending_ask") else "Chat"
-            if st.button(label, key="chat_fab_open"):
+        with st.container(key="chat_launcher"):
+            label = "Chat •" if st.session_state.get("pending_ask") else "Open chat"
+            if st.button(label, key="chat_open_btn", type="primary"):
                 st.session_state["chat_open"] = True
                 st.rerun()
         return
@@ -871,10 +936,12 @@ def _render_chat_panel(client, model) -> None:
         with head_col:
             st.markdown("**Chat**")
         with collapse_col:
-            if st.button("–", key="chat_fab_close", help="Collapse chat"):
+            if st.button("–", key="chat_close_btn", help="Collapse chat"):
                 st.session_state["chat_open"] = False
                 st.rerun()
-        with st.container(height=360):
+        # Height is driven by CSS on st-key-chat_history so short viewports do not fight
+        # a fixed 720px Python height against the full-height dock.
+        with st.container(key="chat_history"):
             _render_chat_history()
             pending_prompt = st.session_state.pop("pending_chat_prompt", None)
             if pending_prompt:
@@ -897,11 +964,11 @@ def _render_chat_panel(client, model) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
+    _ensure_env_loaded()
+    _init_session_state()
     _inject_chat_blob_css()
     st.title("Property Search Assistant")
 
-    _ensure_env_loaded()
-    _init_session_state()
     _render_preferences_sidebar()
 
     client, model = _get_client_and_model()
