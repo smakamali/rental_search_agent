@@ -28,11 +28,20 @@ from rental_search_agent.client import (
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
+from rental_search_agent.preference_resolution import (
+    PREF_KEYS,
+    is_placeholder_qualitative,
+    merge_chat_over_stored,
+    preferences_block as _shared_preferences_block,
+)
 from rental_search_agent.proximity_parser import parse_proximity_preferences
-from rental_search_agent.semantic_scoring import search_criteria_to_text_blob
+from rental_search_agent.streamlit_analysis import render_listing_analysis
+from urllib.parse import urlparse
 
-# Keys for stored user preferences (viewing time, name, email, phone, proximity, listing preferences)
-PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
+
+def _preferences_block(prefs: dict) -> str:
+    """Build the search-relevant preferences block to inject into the system message."""
+    return _shared_preferences_block(prefs)
 
 
 def _preferences_file() -> Path:
@@ -63,26 +72,43 @@ def _save_preferences_to_file(prefs: dict) -> None:
         pass
 
 
-def _preferences_block(prefs: dict) -> str:
-    """Build the search-relevant preferences block to inject into the system message."""
-    proximity = (prefs.get("proximity_preferences") or "").strip()
-    qualitative = (prefs.get("qualitative_preferences") or "").strip()
-    if not proximity and not qualitative:
-        return "No stored search preferences (proximity or qualitative)."
-    parts = []
-    if proximity:
-        parts.append(f"proximity_preferences = {proximity!r}")
-    if qualitative:
-        parts.append(f"qualitative_preferences = {qualitative!r}")
-    block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
-    return block
-
-
 def _build_system_content() -> str:
     """System message content: current date + flow instructions + current preferences block."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
     return current_date_context() + flow_instructions() + "\n\n" + _preferences_block(prefs)
+
+
+def _sync_preferences_from_file() -> dict:
+    """Reload preferences.json into session so chat fill-in is visible to UI/Analyze."""
+    loaded = _load_preferences_from_file()
+    st.session_state["user_preferences"] = loaded
+    if st.session_state.get("messages"):
+        st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
+    return loaded
+
+
+def _safe_http_url(url: str | None) -> str | None:
+    """Return url if it is http(s); else None (blocks javascript: and other schemes)."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None
+    if not parsed.netloc:
+        return None
+    return raw
+
+
+def _escape_markdown_plain(text: str) -> str:
+    """Escape markdown metacharacters in scraped/LLM text rendered via st.markdown."""
+    out = str(text)
+    for ch in ("\\", "`", "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", "-", ".", "!", "|"):
+        out = out.replace(ch, "\\" + ch)
+    return out
 
 
 def _ensure_env_loaded() -> None:
@@ -212,22 +238,31 @@ _TABLE_COL_WIDTHS = [0.5, 0.6, 1.8, 0.8, 0.4, 0.4, 0.6, 0.8, 0.8, 0.8, 1.0, 1.1,
 
 
 def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
-    """Display-only: sort by semantic_score desc when at least one listing has one,
-    else leave order as-is (nothing to sort by, e.g. no qualitative preferences set yet).
+    """Display-only: sort by match_score (fallback semantic_score) desc when available.
 
-    This is a pure Python list sort (no filter_listings/model_dump round-trip), so it
-    does not touch each listing's 'rank' field — displayed order changes, but 'rank'
-    still correctly identifies each listing for "listing N" references, same guarantee
-    the existing proximity closest-first safeguard (_apply_proximity_filter_safeguard)
-    provides for that case.
+    Pure Python list sort (no filter_listings round-trip), so each listing's 'rank'
+    field is unchanged — displayed order changes, but 'rank' still identifies
+    listings for "listing N" references.
     """
-    if not any(isinstance(item, dict) and item.get("semantic_score") is not None for item in listings):
+    if not any(
+        isinstance(item, dict)
+        and (item.get("match_score") is not None or item.get("semantic_score") is not None)
+        for item in listings
+    ):
         return listings
-    return sorted(
-        listings,
-        key=lambda item: item.get("semantic_score") if isinstance(item, dict) and item.get("semantic_score") is not None else -1,
-        reverse=True,
-    )
+
+    def _key(item: dict) -> tuple:
+        if not isinstance(item, dict):
+            return (1, -1.0)
+        ms = item.get("match_score")
+        if ms is not None:
+            return (0, -float(ms))
+        ss = item.get("semantic_score")
+        if ss is not None:
+            return (0, -float(ss))
+        return (1, -1.0)
+
+    return sorted(listings, key=_key)
 
 
 def _escape_markdown_link_text(text: str) -> str:
@@ -304,9 +339,10 @@ def _format_bedrooms(listing: dict) -> str:
 
 
 def _format_match_score(listing: dict) -> str:
-    """Match score display: semantic_score (0-1) as a whole percentage, or '—' when
-    scoring hasn't run yet (e.g. no qualitative preferences set)."""
-    score = listing.get("semantic_score")
+    """Match score display: overall match_score (fallback semantic_score) as %, or '—'."""
+    score = listing.get("match_score")
+    if score is None:
+        score = listing.get("semantic_score")
     if score is None:
         return "—"
     try:
@@ -726,6 +762,8 @@ def _apply_listing_state(listing_state: dict | None) -> None:
         st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
     if "master_list" in listing_state:
         st.session_state["master_list"] = listing_state.get("master_list") or []
+    # Chat fill-in writes preferences.json; keep session + system prompt in sync.
+    _sync_preferences_from_file()
 
 
 def _run_user_prompt(client, model, prompt: str) -> None:
@@ -812,24 +850,54 @@ def _build_answer_json(pending: dict, answer_value: str | list[str]) -> str:
 
 
 def _render_preferences_sidebar() -> None:
-    """Sidebar form to set or edit viewing time, name, email, phone. Saves to session and optional file."""
+    """Sidebar Search Preferences form. Contact/viewing fields stay persisted but hidden."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
     with st.sidebar:
-        st.subheader("Your details")
+        st.subheader("Search Preferences")
         st.caption(
-            "Proximity and listing preferences are used by the chat assistant for search and ranking. "
-            "Preferred viewing times and contact details are saved for upcoming booking features and are not used in chat."
+            "Used as defaults for search, filtering, and match scoring. "
+            "Criteria stated in chat override these for that search. "
+            "Empty fields may be filled from chat when you search."
         )
         with st.form("preferences_form"):
-            viewing = st.text_input(
-                "Preferred viewing times",
-                value=prefs.get("viewing_preference", ""),
-                placeholder="e.g. weekday evenings 6–8pm",
-                key="pref_viewing",
+            budget = st.text_input(
+                "Budget max (CAD)",
+                value=prefs.get("budget_max", ""),
+                placeholder="e.g. 2800",
+                key="pref_budget_max",
             )
-            name = st.text_input("Name", value=prefs.get("name", ""), key="pref_name")
-            email = st.text_input("Email", value=prefs.get("email", ""), key="pref_email")
-            phone = st.text_input("Phone (optional)", value=prefs.get("phone", ""), key="pref_phone")
+            col_beds = st.columns(2)
+            with col_beds[0]:
+                min_beds = st.text_input(
+                    "Beds min",
+                    value=prefs.get("min_bedrooms", ""),
+                    placeholder="e.g. 2",
+                    key="pref_min_bedrooms",
+                )
+            with col_beds[1]:
+                max_beds = st.text_input(
+                    "Beds max",
+                    value=prefs.get("max_bedrooms", ""),
+                    placeholder="optional",
+                    key="pref_max_bedrooms",
+                )
+            min_baths = st.text_input(
+                "Baths min",
+                value=prefs.get("min_bathrooms", ""),
+                placeholder="e.g. 1.5",
+                key="pref_min_bathrooms",
+            )
+            require_den = st.checkbox(
+                "Require den",
+                value=str(prefs.get("require_den") or "").strip().lower() in ("1", "true", "yes", "y", "on"),
+                key="pref_require_den",
+            )
+            min_sqft = st.text_input(
+                "Size min (sqft)",
+                value=prefs.get("min_sqft", ""),
+                placeholder="e.g. 700",
+                key="pref_min_sqft",
+            )
             proximity = st.text_area(
                 "Proximity preferences",
                 value=prefs.get("proximity_preferences", ""),
@@ -844,14 +912,20 @@ def _render_preferences_sidebar() -> None:
             )
             submitted = st.form_submit_button("Save")
             if submitted:
-                new_prefs = {
-                    "viewing_preference": (viewing or "").strip(),
-                    "name": (name or "").strip(),
-                    "email": (email or "").strip(),
-                    "phone": (phone or "").strip(),
-                    "proximity_preferences": (proximity or "").strip(),
-                    "qualitative_preferences": (qualitative or "").strip(),
-                }
+                # Preserve hidden contact/viewing keys from existing prefs
+                new_prefs = {k: str(prefs.get(k, "") or "") for k in PREF_KEYS}
+                new_prefs.update(
+                    {
+                        "budget_max": (budget or "").strip(),
+                        "min_bedrooms": (min_beds or "").strip(),
+                        "max_bedrooms": (max_beds or "").strip(),
+                        "min_bathrooms": (min_baths or "").strip(),
+                        "require_den": "true" if require_den else "",
+                        "min_sqft": (min_sqft or "").strip(),
+                        "proximity_preferences": (proximity or "").strip(),
+                        "qualitative_preferences": (qualitative or "").strip(),
+                    }
+                )
                 st.session_state["user_preferences"] = new_prefs
                 _save_preferences_to_file(new_prefs)
                 st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
@@ -991,7 +1065,7 @@ def main() -> None:
     # sort_by="price"/"proximity"/etc.) — otherwise this would silently clobber that
     # explicit sort and desync the table from what the agent told the user it did.
     last_sort_by = st.session_state.get("last_sort_by")
-    if last_sort_by is None or last_sort_by == "semantic_score":
+    if last_sort_by is None or last_sort_by in ("semantic_score", "match_score"):
         listings = _apply_default_match_score_sort(listings)
 
     # Analysis card at top: when user clicked Analyze, run analysis and show result
@@ -1000,7 +1074,7 @@ def main() -> None:
     analyze_listing = st.session_state.get("analyze_listing")
     analysis_result = st.session_state.get("analysis_result", {})
     if analyze_listing_id and analyze_listing:
-        prefs = st.session_state.get("user_preferences") or {}
+        prefs = _sync_preferences_from_file()
         qualitative = (prefs.get("qualitative_preferences") or "").strip()
         proximity = (prefs.get("proximity_preferences") or "").strip()
         preferences_text = qualitative
@@ -1011,13 +1085,20 @@ def main() -> None:
                 else f"Proximity: {proximity}"
             )
         if not preferences_text:
-            with st.expander("Analysis result", expanded=True):
-                st.warning("Set listing or proximity preferences in the sidebar first, then click Analyze again.")
-                if st.button("Clear analysis"):
-                    st.session_state["analyze_listing_id"] = None
-                    st.session_state["analyze_listing"] = None
-                    st.rerun()
-        else:
+            # Allow analyze when any score-relevant stored preference exists
+            from rental_search_agent.preference_resolution import stored_prefs_to_effective
+
+            if not stored_prefs_to_effective(prefs).has_score_relevant_prefs():
+                with st.expander("Analysis result", expanded=True):
+                    st.warning("Set Search Preferences in the sidebar first, then click Analyze again.")
+                    if st.button("Clear analysis"):
+                        st.session_state["analyze_listing_id"] = None
+                        st.session_state["analyze_listing"] = None
+                        st.rerun()
+                preferences_text = ""
+            else:
+                preferences_text = "Match my search preferences"
+        if preferences_text:
             messages = st.session_state["messages"]
             current_count = len(messages)
             if st.session_state.get("chat_summary_message_count") != current_count:
@@ -1031,25 +1112,23 @@ def main() -> None:
             if analyze_listing_id not in analysis_result:
                 with st.spinner("Analyzing listing..."):
                     try:
-                        # Build the same listing-blob-shaped embedding query
-                        # score_listings_by_preferences uses for the table's
-                        # semantic_score/"Match score" column (bed/bath/sqft/price/
-                        # location + qualitative preferences + proximity), reusing the
-                        # same message-history reconstruction so both surfaces stay
-                        # consistent for the same listing/preferences. preferences_text
-                        # above (which also folds in proximity) still drives the
-                        # narrative key_matches/key_gaps, unaffected by this override.
                         chat_messages = st.session_state.get("messages") or []
                         search_criteria = _get_active_search_criteria_from_messages(chat_messages)
                         proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                        score_query_text = search_criteria_to_text_blob(
-                            search_criteria, qualitative, proximity_rules
-                        )
+                        chat = dict(search_criteria or {})
+                        if qualitative and not is_placeholder_qualitative(qualitative):
+                            chat["qualitative_preferences"] = qualitative
+                        effective = merge_chat_over_stored(prefs, chat)
+                        if is_placeholder_qualitative(effective.qualitative_preferences):
+                            effective = effective.model_copy(update={"qualitative_preferences": ""})
                         result = analyze_listing_against_preferences(
                             analyze_listing,
                             preferences_text,
                             conversation_context=conversation_context or None,
-                            score_query_text=score_query_text or None,
+                            stored_prefs=prefs,
+                            chat_criteria=chat,
+                            proximity_rules=proximity_rules or [],
+                            effective_prefs=effective,
                         )
                         st.session_state.setdefault("analysis_result", {})[
                             analyze_listing_id
@@ -1072,43 +1151,7 @@ def main() -> None:
                 else:
                     addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
                     with st.expander(f"Analysis: {addr}", expanded=True):
-                        photo_url = analyze_listing.get("photo_url") or ""
-                        _render_clickable_photo(photo_url, analyze_listing.get("url") or "", width=240)
-                        detail_bits = []
-                        if analyze_listing.get("id") and analyze_listing.get("url"):
-                            mls_label = _escape_markdown_link_text(str(analyze_listing["id"]))
-                            detail_bits.append(f"**MLS:** [{mls_label}]({analyze_listing['url']})")
-                        if analyze_listing.get("property_category"):
-                            detail_bits.append(f"**Type:** {analyze_listing['property_category']}")
-                        if analyze_listing.get("lot_size"):
-                            detail_bits.append(f"**Lot size:** {analyze_listing['lot_size']}")
-                        if analyze_listing.get("listing_age_display"):
-                            detail_bits.append(f"**Listed:** {analyze_listing['listing_age_display']}")
-                        if analyze_listing.get("price_change_display"):
-                            detail_bits.append(f"**Price change:** {analyze_listing['price_change_display']}")
-                        if analyze_listing.get("open_house"):
-                            detail_bits.append(f"**Open house:** {analyze_listing['open_house']}")
-                        if analyze_listing.get("agent_name"):
-                            agent_bit = f"**Listing agent:** {analyze_listing['agent_name']}"
-                            if analyze_listing.get("agent_phone"):
-                                agent_bit += f" ({analyze_listing['agent_phone']})"
-                            detail_bits.append(agent_bit)
-                        if analyze_listing.get("brokerage_name"):
-                            detail_bits.append(f"**Brokerage:** {analyze_listing['brokerage_name']}")
-                        if analyze_listing.get("video_url"):
-                            detail_bits.append(f"[Video / virtual tour]({analyze_listing['video_url']})")
-                        if detail_bits:
-                            st.markdown(" &nbsp;|&nbsp; ".join(detail_bits))
-                        st.metric("Match score", f"{result.get('match_score_pct', 0)}%")
-                        col_matches, col_gaps = st.columns(2)
-                        with col_matches:
-                            st.subheader("Key matches")
-                            for m in result.get("key_matches") or []:
-                                st.markdown(f"- {m}")
-                        with col_gaps:
-                            st.subheader("Key gaps")
-                            for g in result.get("key_gaps") or []:
-                                st.markdown(f"- {g}")
+                        render_listing_analysis(analyze_listing, result)
                         if st.button("Clear analysis"):
                             st.session_state["analyze_listing_id"] = None
                             st.session_state["analyze_listing"] = None

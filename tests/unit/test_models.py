@@ -129,6 +129,21 @@ class TestListing:
                 semantic_score=-0.1,
             )
 
+    def test_match_score_and_breakdown_round_trip(self):
+        d = Listing(
+            id="mls-1",
+            title="Test",
+            url="https://example.com",
+            address="123 Main St",
+            price=2800,
+            bedrooms=2,
+            match_score=0.75,
+            score_breakdown={"components": {"structural": 0.75}, "included": ["structural"]},
+        ).model_dump()
+        restored = Listing.model_validate(d)
+        assert restored.match_score == 0.75
+        assert restored.score_breakdown["included"] == ["structural"]
+
     def test_has_den_and_bedrooms_display_default_to_none(self):
         l = Listing(id="mls-1", title="Test", url="https://example.com", address="123 Main St", price=2800, bedrooms=2)
         assert l.has_den is None

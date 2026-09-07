@@ -32,10 +32,16 @@ from rental_search_agent.models import (
     ProximityRule,
     RentalSearchFilters,
 )
+from rental_search_agent.preference_resolution import (
+    PREF_KEYS,
+    fill_empty_stored_from_chat,
+    is_placeholder_qualitative,
+    merge_chat_over_stored,
+    preferences_block as _shared_preferences_block,
+)
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
-from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
-from rental_search_agent.semantic_scoring import search_criteria_to_text_blob as do_search_criteria_to_text_blob
+from rental_search_agent.match_scoring import score_listings_by_preferences as do_score_listings_by_preferences
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.server import (
     calendar_create_event,
@@ -47,25 +53,6 @@ from rental_search_agent.server import (
     draft_viewing_plan,
     modify_viewing_plan,
 )
-
-# Keys for stored user preferences (same as Streamlit; shared preferences.json)
-PREF_KEYS = ("viewing_preference", "name", "email", "phone", "proximity_preferences", "qualitative_preferences")
-
-
-def _with_display_rank(listings: list[dict]) -> list[dict]:
-    """Attach an explicit 1-based 'rank' to each listing dict, matching the exact array
-    order the UI renders (see streamlit_app._listings_to_table_rows, which numbers rows
-    by position in this same array). Without an explicit field, the LLM has to infer
-    'listing N' by counting position in a large embedded JSON blob — which smaller/faster
-    models can get wrong (e.g. answering about listing 10 when asked about listing 1).
-    Recomputed fresh on every tool result, since filtering/sorting/enrichment changes order.
-    """
-    out = []
-    for i, listing in enumerate(listings):
-        d = dict(listing) if isinstance(listing, dict) else listing
-        d["rank"] = i + 1
-        out.append(d)
-    return out
 
 
 def _preferences_file() -> Path:
@@ -86,20 +73,45 @@ def _load_preferences_from_file() -> dict:
         return default
 
 
+def _save_preferences_to_file(prefs: dict) -> None:
+    """Write preferences to file. No-op on failure."""
+    path = _preferences_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
+    except Exception:
+        pass
+
+
 def _preferences_block(prefs: dict) -> str:
-    """Build the search-relevant preferences block to inject into the system message (same logic as Streamlit)."""
-    proximity = (prefs.get("proximity_preferences") or "").strip()
-    qualitative = (prefs.get("qualitative_preferences") or "").strip()
-    if not proximity and not qualitative:
-        return "No stored search preferences (proximity or qualitative)."
-    parts = []
-    if proximity:
-        parts.append(f"proximity_preferences = {proximity!r}")
-    if qualitative:
-        parts.append(f"qualitative_preferences = {qualitative!r}")
-    block = "Stored user preferences: " + "; ".join(parts)
-    block += ". Do not ask the user for these again unless they are missing or the user asks to change them. When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. When qualitative_preferences is set, use it for scoring/ranking listings (e.g. call score_listings_by_preferences); do not ask again unless the user changes them."
-    return block
+    """Build the search-relevant preferences block to inject into the system message."""
+    return _shared_preferences_block(prefs)
+
+
+def _persist_fill_in_from_chat(chat_criteria: dict | None) -> None:
+    """Fill empty stored search preference fields from chat criteria; never overwrite non-empty."""
+    if not chat_criteria:
+        return
+    stored = _load_preferences_from_file()
+    filled = fill_empty_stored_from_chat(stored, chat_criteria)
+    if filled != stored:
+        _save_preferences_to_file(filled)
+
+
+def _with_display_rank(listings: list[dict]) -> list[dict]:
+    """Attach an explicit 1-based 'rank' to each listing dict, matching the exact array
+    order the UI renders (see streamlit_app._listings_to_table_rows, which numbers rows
+    by position in this same array). Without an explicit field, the LLM has to infer
+    'listing N' by counting position in a large embedded JSON blob — which smaller/faster
+    models can get wrong (e.g. answering about listing 10 when asked about listing 1).
+    Recomputed fresh on every tool result, since filtering/sorting/enrichment changes order.
+    """
+    out = []
+    for i, listing in enumerate(listings):
+        d = dict(listing) if isinstance(listing, dict) else listing
+        d["rank"] = i + 1
+        out.append(d)
+    return out
 
 
 # Tool definitions for the LLM (OpenAI function-calling format)
@@ -184,7 +196,7 @@ TOOLS = [
                             "summarize_listings house_category keys when available."
                         ),
                     },
-                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by (price, bedrooms, bathrooms, sqft, address, id, title, semantic_score, proximity, listing_age_hours). Use 'proximity' to sort by nearest first (ascending=true) — requires enrich_listings_with_proximity to have been called. Use 'listing_age_hours' with ascending=true to show newest first. Omit for no sort."},
+                    "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "match_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by. Use match_score (preferred) or semantic_score with ascending=false for best preference match first. Use proximity with ascending=true for nearest first. Use listing_age_hours with ascending=true for newest first."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
                     "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
                 },
@@ -260,13 +272,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "score_listings_by_preferences",
-            "description": "Score and rank listings by semantic similarity to the user's qualitative preferences (e.g. balcony, parking, gym). Pass current listings and preferences_text (from stored qualitative_preferences or user message). Returns listings with semantic_score added, sorted by score descending. Call when qualitative_preferences is set and you have search results to rank.",
+            "description": "Score and rank listings by multi-metric match to the user's search preferences (budget, beds/baths/size/den, proximity, amenities, and qualitative text). Pass current listings and preferences_text (qualitative portion from stored preferences or user message; structural prefs are merged from stored Search Preferences and active search criteria). Returns listings with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Call when any score-relevant preference is set (or the user asks to rank by preferences).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "listings": {"type": "array", "items": {"type": "object"}, "description": "Current listing objects (from rental_search, filter_listings, or enrich_listings_with_proximity)."},
-                    "preferences_text": {"type": "string", "description": "User's qualitative/listing preferences (e.g. balcony, parking, gym, pet-friendly). From stored qualitative_preferences or user message."},
-                    "query_text": {"type": "string", "description": "Optional. Additional query context (e.g. user's search message) to include when scoring. Omit to use only preferences_text."},
+                    "preferences_text": {"type": "string", "description": "User's qualitative/listing preferences (e.g. balcony, parking, gym, pet-friendly). From stored qualitative_preferences or user message. Structural targets (budget, beds, etc.) are taken from stored Search Preferences and active search criteria."},
+                    "query_text": {"type": "string", "description": "Optional. Additional query context. Prefer omitting; structural criteria are merged automatically."},
                 },
                 "required": ["listings", "preferences_text"],
             },
@@ -768,6 +780,11 @@ def run_tool(
             f = RentalSearchFilters.model_validate(arguments["filters"])
         except Exception as e:
             return json.dumps({"error": f"Invalid filters: {e}"})
+        # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
+        try:
+            _persist_fill_in_from_chat(f.model_dump(exclude_none=True))
+        except Exception:
+            pass
         try:
             resp = search(f)
         except SearchBackendError as e:
@@ -861,21 +878,38 @@ def run_tool(
         if not listings:
             return json.dumps({"error": "No current search results to score. Run a search first."})
         preferences_text = (arguments.get("preferences_text") or "").strip()
-        if not preferences_text:
-            return json.dumps({"error": "preferences_text is required and must be non-empty."})
-        # Build the embedding query in the same "shape" as listing_to_text_blob (bed/bath/
-        # sqft/price/location + qualitative preferences + proximity) rather than embedding
-        # the bare preferences text alone — see search_criteria_to_text_blob for rationale.
-        query_blob = do_search_criteria_to_text_blob(
-            search_criteria or {},
-            preferences_text,
-            proximity_rules_for_query,
-        )
-        extra_query_text = (arguments.get("query_text") or "").strip()
-        if extra_query_text:
-            query_blob = f"{query_blob} {extra_query_text}".strip()
+        stored = _load_preferences_from_file()
+        chat = dict(search_criteria or {})
+        # Never treat agent/UI placeholders as qualitative overrides of stored prefs.
+        if preferences_text and not is_placeholder_qualitative(preferences_text):
+            chat["qualitative_preferences"] = preferences_text
+        elif (stored.get("qualitative_preferences") or "").strip():
+            chat.setdefault(
+                "qualitative_preferences",
+                (stored.get("qualitative_preferences") or "").strip(),
+            )
+        # Persist empty-field fill-in from chat/search criteria (never overwrite non-empty).
+        _persist_fill_in_from_chat({**(search_criteria or {}), **chat})
+        stored = _load_preferences_from_file()
+        effective = merge_chat_over_stored(stored, chat)
+        # Allow scoring when any score-relevant preference exists (not only qualitative text).
+        if not effective.has_score_relevant_prefs() and not proximity_rules_for_query:
+            if not preferences_text:
+                return json.dumps(
+                    {
+                        "error": "preferences_text is required when no stored/search "
+                        "score-relevant preferences are available."
+                    }
+                )
         try:
-            scored = do_score_listings_by_preferences(listings, query_blob)
+            scored = do_score_listings_by_preferences(
+                listings,
+                preferences_text=preferences_text
+                or effective.qualitative_preferences
+                or "",
+                effective_prefs=effective,
+                proximity_rules=proximity_rules_for_query or [],
+            )
             return json.dumps({"listings": _with_display_rank(scored), "total_count": len(scored)})
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -886,24 +920,23 @@ def run_tool(
             return json.dumps({"error": "listing is required and must be a non-empty object."})
         if not preferences_text:
             return json.dumps({"error": "preferences_text is required and must be non-empty."})
-        # preferences_text (whatever the LLM passed, which per this tool's description may
-        # already combine qualitative + proximity text) still drives the narrative
-        # key_matches/key_gaps unchanged. For the numeric match_score_pct, fold in the
-        # deterministic structural criteria (bed/bath/sqft/price/location) the same way
-        # score_listings_by_preferences does, for table/Analyze-card consistency — but don't
-        # also inject proximity_rules_for_query here, since preferences_text may already
-        # contain a proximity phrase per this tool's own contract and doubling it up would
-        # skew the score.
-        query_blob = do_search_criteria_to_text_blob(
-            search_criteria or {},
-            preferences_text,
-            proximity_rules=None,
-        )
+        stored = _load_preferences_from_file()
+        chat = dict(search_criteria or {})
+        if preferences_text and not is_placeholder_qualitative(
+            preferences_text.split("\n\nProximity:")[0].strip()
+        ):
+            chat["qualitative_preferences"] = preferences_text
+        effective = merge_chat_over_stored(stored, chat)
+        if is_placeholder_qualitative(effective.qualitative_preferences):
+            effective = effective.model_copy(update={"qualitative_preferences": ""})
         try:
             result = do_analyze_listing_against_preferences(
                 listing,
                 preferences_text,
-                score_query_text=query_blob or None,
+                stored_prefs=stored,
+                chat_criteria=chat,
+                proximity_rules=proximity_rules_for_query or [],
+                effective_prefs=effective,
             )
             return json.dumps(result)
         except ValueError as e:
@@ -1117,9 +1150,9 @@ def _infer_last_sort_by(messages: list[dict]) -> str | None:
     display order, mirroring the live tracking in run_agent_step_events. Used to reconstruct
     listing_state on turns where no tool ran this step (see _listing_state_from_messages).
 
-    Returns: the explicit sort_by from the most recent filter_listings call; "semantic_score"
+    Returns: the explicit sort_by from the most recent filter_listings call; "match_score"
     if the most recent order-defining tool was score_listings_by_preferences (whose output is
-    always sorted by score descending); or None after a fresh rental_search or when no
+    always sorted by match_score descending); or None after a fresh rental_search or when no
     order-defining tool has run yet. enrich_listings_with_proximity does not reorder listings,
     so it leaves the current value unchanged. Consumers (streamlit_app._apply_default_match_score_sort
     call site) use this to avoid silently overriding an explicit non-score sort (e.g. "price",
@@ -1136,7 +1169,7 @@ def _infer_last_sort_by(messages: list[dict]) -> str | None:
             if name == "rental_search":
                 last_sort_by = None
             elif name == "score_listings_by_preferences":
-                last_sort_by = "semantic_score"
+                last_sort_by = "match_score"
             elif name == "filter_listings":
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
@@ -1474,7 +1507,7 @@ def run_agent_step_events(
                             current_listings = scored_list
                             enriched_master = scored_list
                             display_source = "score"
-                            last_sort_by = "semantic_score"
+                            last_sort_by = "match_score"
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "parse_proximity_preferences":

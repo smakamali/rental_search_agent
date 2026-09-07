@@ -35,14 +35,15 @@ class TestPreferencesBlock:
         assert "No stored search preferences" in result
 
     def test_viewing_and_contact_prefs_not_injected(self):
-        prefs = {
-            "viewing_preference": "weekends 10am",
-            "name": "Jane",
-            "email": "jane@test.com",
-            "phone": "555-1234",
-            "proximity_preferences": "",
-            "qualitative_preferences": "",
-        }
+        prefs = {k: "" for k in PREF_KEYS}
+        prefs.update(
+            {
+                "viewing_preference": "weekends 10am",
+                "name": "Jane",
+                "email": "jane@test.com",
+                "phone": "555-1234",
+            }
+        )
         result = _preferences_block(prefs)
         assert "No stored search preferences" in result
         assert "viewing_preference" not in result
@@ -51,16 +52,18 @@ class TestPreferencesBlock:
         assert "phone = '555-1234'" not in result
 
     def test_with_proximity_and_qualitative(self):
-        prefs = {
-            "viewing_preference": "weekends 10am",
-            "name": "Jane",
-            "email": "jane@test.com",
-            "phone": "",
-            "proximity_preferences": "within 30 min of downtown",
-            "qualitative_preferences": "balcony, parking",
-        }
+        prefs = {k: "" for k in PREF_KEYS}
+        prefs.update(
+            {
+                "viewing_preference": "weekends 10am",
+                "name": "Jane",
+                "email": "jane@test.com",
+                "proximity_preferences": "within 30 min of downtown",
+                "qualitative_preferences": "balcony, parking",
+            }
+        )
         result = _preferences_block(prefs)
-        assert "Stored user preferences" in result
+        assert "Stored search preferences" in result
         assert "proximity_preferences = 'within 30 min of downtown'" in result
         assert "qualitative_preferences = 'balcony, parking'" in result
         assert "do not ask the user for these again" in result.lower()
@@ -68,18 +71,21 @@ class TestPreferencesBlock:
         assert "simulate_viewing_request" not in result
 
     def test_with_qualitative_preferences(self):
-        prefs = {
-            "viewing_preference": "",
-            "name": "",
-            "email": "",
-            "phone": "",
-            "proximity_preferences": "",
-            "qualitative_preferences": "balcony, parking, gym",
-        }
+        prefs = {k: "" for k in PREF_KEYS}
+        prefs["qualitative_preferences"] = "balcony, parking, gym"
         result = _preferences_block(prefs)
-        assert "Stored user preferences" in result
+        assert "Stored search preferences" in result
         assert "qualitative_preferences = 'balcony, parking, gym'" in result
         assert "score_listings_by_preferences" in result
+
+    def test_with_budget_and_beds(self):
+        prefs = {k: "" for k in PREF_KEYS}
+        prefs["budget_max"] = "2800"
+        prefs["min_bedrooms"] = "2"
+        result = _preferences_block(prefs)
+        assert "budget_max = '2800'" in result
+        assert "min_bedrooms = '2'" in result
+        assert "name =" not in result
 
 
 class TestLoadPreferencesFromFile:
@@ -239,7 +245,7 @@ class TestTableRowShape:
                 "address": "A St",
                 "rank": 1,
                 "listing_age_hours": 48,
-                "semantic_score": 0.873,
+                "match_score": 0.873,
             }
         ]
         rows = _listings_to_table_rows(listings)
@@ -293,6 +299,9 @@ class TestFormatBedrooms:
 class TestFormatMatchScore:
     def test_formats_score_as_percentage(self):
         assert _format_match_score({"semantic_score": 0.5}) == "50%"
+
+    def test_prefers_match_score_over_semantic(self):
+        assert _format_match_score({"match_score": 0.8, "semantic_score": 0.5}) == "80%"
 
     def test_missing_score_returns_dash(self):
         assert _format_match_score({}) == "—"

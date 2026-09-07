@@ -175,7 +175,7 @@ def score_listings_by_preferences(
     preferences_text: str,
     query_text: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Score and rank listings by semantic similarity to the user's qualitative preferences. Pass current listings and preferences_text (from stored qualitative_preferences or user message). Returns { listings: [...], total_count } with each listing having semantic_score, sorted by score descending. Call when qualitative_preferences is set and you have search results to rank. Credentials via API_PROVIDER and the corresponding key (OPENROUTER_API_KEY or OPENAI_API_KEY)."""
+    """Score and rank listings by multi-metric match to user preferences. Returns { listings, total_count } with match_score, score_breakdown, and semantic_score, sorted by match_score descending."""
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list.")
     if not (preferences_text and isinstance(preferences_text, str) and preferences_text.strip()):

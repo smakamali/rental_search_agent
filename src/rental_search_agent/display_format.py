@@ -1,0 +1,196 @@
+"""Shared display formatting for listing analysis and related UI."""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+# Piecewise RGB stops: orange → amber → yellow-green → green (no failure-red).
+_SCORE_COLOR_STOPS: tuple[tuple[float, tuple[int, int, int]], ...] = (
+    (0.0, (230, 126, 34)),
+    (60.0, (243, 156, 18)),
+    (75.0, (168, 184, 48)),
+    (90.0, (39, 174, 96)),
+    (100.0, (22, 160, 133)),
+)
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(n)
+
+
+def format_currency(value: Any, *, unavailable: str = "—") -> str:
+    """Format a CAD amount as $1,000,000 (whole dollars). Never uses scientific notation."""
+    if value is None or value == "":
+        return unavailable
+    if not _is_finite_number(value):
+        return unavailable
+    return f"${int(round(float(value))):,}"
+
+
+def format_duration(minutes: Any, *, unavailable: str = "—") -> str:
+    """Format a travel time as '2 min'."""
+    if minutes is None or minutes == "":
+        return unavailable
+    if not _is_finite_number(minutes):
+        return unavailable
+    n = float(minutes)
+    rounded = int(round(n))
+    return f"{rounded} min"
+
+
+def format_sqft(value: Any, *, unavailable: str = "—") -> str:
+    """Format area as '812 sq ft'."""
+    if value is None or value == "":
+        return unavailable
+    if not _is_finite_number(value):
+        return unavailable
+    n = float(value)
+    if n == int(n):
+        return f"{int(n):,} sq ft"
+    return f"{n:g} sq ft"
+
+
+def format_count(value: Any, *, unavailable: str = "—") -> str:
+    """Format a bed/bath-style count without trailing .0."""
+    if value is None or value == "":
+        return unavailable
+    if not _is_finite_number(value):
+        return unavailable
+    n = float(value)
+    if n == int(n):
+        return str(int(n))
+    return f"{n:g}"
+
+
+def format_percentage(value: Any, *, from_fraction: bool = False, unavailable: str = "—") -> str:
+    """Format as '90%'. Pass from_fraction=True for 0–1 scores."""
+    if value is None or value == "":
+        return unavailable
+    if not _is_finite_number(value):
+        return unavailable
+    n = float(value)
+    if from_fraction:
+        n = n * 100.0
+    return f"{int(round(n))}%"
+
+
+def score_to_pct(value: Any) -> Optional[int]:
+    """Convert a 0–1 or already-percent score to an int 0–100, or None if missing."""
+    if value is None or value == "":
+        return None
+    if not _is_finite_number(value):
+        return None
+    n = float(value)
+    if 0.0 <= n <= 1.0:
+        return int(round(n * 100.0))
+    if 1.0 < n <= 100.0:
+        return int(round(n))
+    return int(round(max(0.0, min(100.0, n))))
+
+
+def get_score_color(score: Any) -> str:
+    """Return an #rrggbb color for a 0–100 score (or 0–1 fraction). Centralized mapping."""
+    pct = score_to_pct(score)
+    if pct is None:
+        return "#888888"
+    x = float(max(0, min(100, pct)))
+    for i in range(1, len(_SCORE_COLOR_STOPS)):
+        x1, c1 = _SCORE_COLOR_STOPS[i - 1]
+        x2, c2 = _SCORE_COLOR_STOPS[i]
+        if x <= x2 or i == len(_SCORE_COLOR_STOPS) - 1:
+            if x2 == x1:
+                t = 1.0
+            else:
+                t = (x - x1) / (x2 - x1)
+            t = max(0.0, min(1.0, t))
+            r = int(round(c1[0] + t * (c2[0] - c1[0])))
+            g = int(round(c1[1] + t * (c2[1] - c1[1])))
+            b = int(round(c1[2] + t * (c2[2] - c1[2])))
+            return f"#{r:02x}{g:02x}{b:02x}"
+    return "#168a75"
+
+
+def format_criterion_comparison(
+    observed: Optional[str],
+    comparator: Optional[str],
+    required: Optional[str],
+    *,
+    unknown_text: str = "Not mentioned",
+) -> str:
+    """Join observed, comparator, and required, e.g. '2 min ≤ 5 min'."""
+    obs = (observed or "").strip()
+    req = (required or "").strip()
+    cmp_ = (comparator or "").strip()
+    if not obs and not req:
+        return unknown_text
+    if obs and req and cmp_:
+        return f"{obs} {cmp_} {req}"
+    if obs and req:
+        return f"{obs} ({req})"
+    if obs:
+        return obs
+    return req
+
+
+def split_listing_address(
+    address: str | None,
+    postal_code: str | None = None,
+) -> tuple[str, str]:
+    """Split a listing address into (headline, locality line).
+
+    Realtor.ca addresses are typically 'street, City, Province Postal'. When the
+    split is unclear, the full address is the headline and locality is empty.
+    """
+    raw = (address or "").strip()
+    postal = (postal_code or "").strip()
+    if not raw:
+        return ("Listing", postal)
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) >= 2:
+        headline = parts[0]
+        locality = ", ".join(parts[1:])
+    else:
+        headline = raw
+        locality = ""
+    if postal:
+        compact_local = re.sub(r"\s+", "", locality).lower()
+        compact_postal = re.sub(r"\s+", "", postal).lower()
+        if compact_postal and compact_postal not in compact_local:
+            locality = f"{locality} {postal}".strip() if locality else postal
+    return headline, locality
+
+
+def safe_http_url(url: str | None) -> str | None:
+    """Return url if it is http(s); else None (blocks javascript: and other schemes)."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None
+    if not parsed.netloc:
+        return None
+    return raw
+
+
+def proximity_criterion_name(mode: str | None, location: str | None) -> str:
+    """Human name for a proximity rule, e.g. 'Walk to nearest transit station'."""
+    loc = (location or "location").strip() or "location"
+    m = (mode or "travel").strip().lower()
+    verb = {"walk": "Walk", "drive": "Drive", "transit": "Transit"}.get(m, m.title() or "Travel")
+    return f"{verb} to {loc}"
+
+
+def escape_markdown_link_text(text: str) -> str:
+    """Escape characters that would let untrusted text break out of a markdown link label."""
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
