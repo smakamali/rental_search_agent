@@ -56,9 +56,9 @@ class TestInferLastSortBy:
         ]
         assert _infer_last_sort_by(messages) is None
 
-    def test_score_listings_by_preferences_implies_semantic_score(self):
+    def test_score_listings_by_preferences_implies_match_score(self):
         messages = [_assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"})]
-        assert _infer_last_sort_by(messages) == "semantic_score"
+        assert _infer_last_sort_by(messages) == "match_score"
 
     def test_rental_search_resets_to_none(self):
         messages = [
@@ -74,7 +74,7 @@ class TestInferLastSortBy:
             _assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"}),
             _assistant_tool_call_msg("enrich_listings_with_proximity", {"rules": [], "geocoded_refs": []}),
         ]
-        assert _infer_last_sort_by(messages) == "semantic_score"
+        assert _infer_last_sort_by(messages) == "match_score"
 
     def test_listing_state_from_messages_includes_last_sort_by(self):
         messages = [_assistant_tool_call_msg("filter_listings", {"sort_by": "proximity"})]
@@ -90,6 +90,8 @@ class TestFilterListingsToolSchema:
         filter_tool = next(t for t in TOOLS if t["function"]["name"] == "filter_listings")
         sort_by_enum = filter_tool["function"]["parameters"]["properties"]["sort_by"]["enum"]
         assert "listing_age_hours" in sort_by_enum
+        assert "match_score" in sort_by_enum
+        assert "semantic_score" in sort_by_enum
 
 
 class TestWithDisplayRank:
@@ -637,102 +639,101 @@ class TestGetParsedProximityRulesFromMessages:
         assert _get_parsed_proximity_rules_from_messages(messages) == rules
 
 
-class TestRunToolScoreListingsByPreferencesQueryBlob:
-    """The embedding query for score_listings_by_preferences must be built via
-    search_criteria_to_text_blob (mirroring listing_to_text_blob's shape) rather than the
-    bare preferences_text, using the search_criteria/proximity_rules_for_query kwargs
-    threaded in from run_agent_step_events."""
+class TestRunToolScoreListingsByPreferencesMultiMetric:
+    """score_listings_by_preferences now passes effective_prefs + proximity_rules into
+    the multi-metric scorer (not a single search_criteria text blob)."""
 
-    def test_uses_search_criteria_and_proximity_in_embedding_query(self):
+    def test_passes_effective_prefs_and_proximity_rules(self):
         listings = [sample_listing()]
         captured = {}
 
-        def fake_score(listings_arg, query_text_arg):
-            captured["query"] = query_text_arg
-            return [dict(listings_arg[0], semantic_score=0.5)]
-
-        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
-            run_tool(
-                "score_listings_by_preferences",
-                {"preferences_text": "must have balcony"},
-                current_listings=listings,
-                search_criteria={
-                    "location": "Metrotown, Burnaby, BC",
-                    "min_bedrooms": 3,
-                    "max_bedrooms": 3,
-                    "listing_type": "for_sale",
-                    "price_max": 1000000,
-                },
-                proximity_rules_for_query=[{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
-            )
-
-        assert captured["query"] == (
-            "Metrotown, Burnaby, BC 3 bedrooms, up to $1000000 list price must have balcony "
-            "5 min walk to nearest transit station"
-        )
-
-    def test_appends_llm_supplied_query_text_as_extra_context(self):
-        listings = [sample_listing()]
-        captured = {}
-
-        def fake_score(listings_arg, query_text_arg):
-            captured["query"] = query_text_arg
-            return listings_arg
-
-        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
-            run_tool(
-                "score_listings_by_preferences",
-                {"preferences_text": "must have balcony", "query_text": "near parks"},
-                current_listings=listings,
-                search_criteria={"location": "Burnaby, BC"},
-            )
-
-        assert captured["query"] == "Burnaby, BC must have balcony near parks"
-
-    def test_falls_back_to_bare_preferences_when_no_search_criteria_given(self):
-        listings = [sample_listing()]
-        captured = {}
-
-        def fake_score(listings_arg, query_text_arg):
-            captured["query"] = query_text_arg
-            return listings_arg
-
-        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
-            run_tool(
-                "score_listings_by_preferences",
-                {"preferences_text": "must have balcony"},
-                current_listings=listings,
-            )
-
-        assert captured["query"] == "must have balcony"
-
-
-class TestRunToolAnalyzeListingPreferencesQueryBlob:
-    def test_score_query_text_enriched_but_narrative_preferences_text_unchanged(self):
-        captured = {}
-
-        def fake_analyze(listing, preferences_text, conversation_context=None, score_query_text=None):
+        def fake_score(listings_arg, preferences_text="", query_text=None, embedding_model=None, **kwargs):
             captured["preferences_text"] = preferences_text
-            captured["score_query_text"] = score_query_text
+            captured["kwargs"] = kwargs
+            return [dict(listings_arg[0], match_score=0.5, semantic_score=0.4)]
+
+        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
+            with patch("rental_search_agent.client._load_preferences_from_file", return_value={}):
+                with patch("rental_search_agent.client._persist_fill_in_from_chat"):
+                    run_tool(
+                        "score_listings_by_preferences",
+                        {"preferences_text": "must have balcony"},
+                        current_listings=listings,
+                        search_criteria={
+                            "location": "Metrotown, Burnaby, BC",
+                            "min_bedrooms": 3,
+                            "max_bedrooms": 3,
+                            "listing_type": "for_sale",
+                            "price_max": 1000000,
+                        },
+                        proximity_rules_for_query=[
+                            {"location": "nearest transit station", "mode": "walk", "max_minutes": 5}
+                        ],
+                    )
+
+        assert captured["preferences_text"] == "must have balcony"
+        effective = captured["kwargs"]["effective_prefs"]
+        assert effective.min_bedrooms == 3
+        assert effective.budget_max == 1000000
+        assert effective.qualitative_preferences == "must have balcony"
+        assert captured["kwargs"]["proximity_rules"][0]["location"] == "nearest transit station"
+
+    def test_falls_back_to_preferences_text_when_no_search_criteria(self):
+        listings = [sample_listing()]
+        captured = {}
+
+        def fake_score(listings_arg, preferences_text="", **kwargs):
+            captured["preferences_text"] = preferences_text
+            captured["effective"] = kwargs.get("effective_prefs")
+            return listings_arg
+
+        with patch("rental_search_agent.client.do_score_listings_by_preferences", side_effect=fake_score):
+            with patch("rental_search_agent.client._load_preferences_from_file", return_value={}):
+                with patch("rental_search_agent.client._persist_fill_in_from_chat"):
+                    run_tool(
+                        "score_listings_by_preferences",
+                        {"preferences_text": "must have balcony"},
+                        current_listings=listings,
+                    )
+
+        assert captured["preferences_text"] == "must have balcony"
+        assert captured["effective"].qualitative_preferences == "must have balcony"
+
+
+class TestRunToolAnalyzeListingPreferencesMultiMetric:
+    def test_passes_narrative_preferences_and_effective_prefs(self):
+        captured = {}
+
+        def fake_analyze(listing, preferences_text, conversation_context=None, score_query_text=None, **kwargs):
+            captured["preferences_text"] = preferences_text
+            captured["kwargs"] = kwargs
             return {"match_score_pct": 50, "key_matches": [], "key_gaps": []}
 
         combined_preferences = "must have balcony\n\nProximity: 5 min walk to transit"
-        with patch("rental_search_agent.client.do_analyze_listing_against_preferences", side_effect=fake_analyze):
-            run_tool(
-                "analyze_listing_preferences",
-                {"listing": {"id": "a"}, "preferences_text": combined_preferences},
-                search_criteria={"location": "Burnaby, BC", "min_bedrooms": 3, "max_bedrooms": 3, "listing_type": "for_sale"},
-                # Deliberately also pass proximity rules to prove they are NOT re-added here
-                # (preferences_text may already contain "Proximity: ..." per this tool's
-                # existing contract, so doubling it up would skew the score).
-                proximity_rules_for_query=[{"location": "nearest transit station", "mode": "walk", "max_minutes": 5}],
-            )
+        with patch(
+            "rental_search_agent.client.do_analyze_listing_against_preferences",
+            side_effect=fake_analyze,
+        ):
+            with patch("rental_search_agent.client._load_preferences_from_file", return_value={}):
+                run_tool(
+                    "analyze_listing_preferences",
+                    {"listing": {"id": "a"}, "preferences_text": combined_preferences},
+                    search_criteria={
+                        "location": "Burnaby, BC",
+                        "min_bedrooms": 3,
+                        "max_bedrooms": 3,
+                        "listing_type": "for_sale",
+                    },
+                    proximity_rules_for_query=[
+                        {"location": "nearest transit station", "mode": "walk", "max_minutes": 5}
+                    ],
+                )
 
-        # Narrative text is passed through untouched.
         assert captured["preferences_text"] == combined_preferences
-        # Score query folds in structural criteria but does not duplicate proximity text.
-        assert captured["score_query_text"] == "Burnaby, BC 3 bedrooms must have balcony\n\nProximity: 5 min walk to transit"
-        assert "5 min walk to nearest transit station" not in captured["score_query_text"]
+        assert captured["kwargs"]["effective_prefs"].min_bedrooms == 3
+        assert captured["kwargs"]["effective_prefs"].qualitative_preferences == "must have balcony"
+        assert "Proximity" not in (captured["kwargs"]["chat_criteria"].get("qualitative_preferences") or "")
+        assert captured["kwargs"]["proximity_rules"][0]["mode"] == "walk"
 
 
 class TestGetViewingPlanFromMessages:

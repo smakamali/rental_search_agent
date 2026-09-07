@@ -307,49 +307,20 @@ def score_listings_by_preferences(
     query_text: Optional[str] = None,
     embedding_model: Optional[str] = None,
 ) -> List[dict]:
-    """Score listings by semantic similarity to preferences (and optional query). Returns list of listing dicts with semantic_score added, sorted by score descending. If preferences_text is empty, returns listings unchanged (no scores)."""
-    preferences_text = (preferences_text or "").strip()
-    query_text = (query_text or "").strip()
-    if not preferences_text and not query_text:
-        result: List[dict] = []
-        for item in listings:
-            d = item if isinstance(item, dict) else item.model_dump() if hasattr(item, "model_dump") else dict(item)
-            result.append(d)
-        return result
+    """Score listings with multi-metric match_score (coverage/structural/proximity/amenity/semantic).
 
-    query_str = preferences_text + (" " + query_text if query_text else "")
-    query_str = query_str.strip()
-    if not query_str:
-        result = []
-        for item in listings:
-            d = item if isinstance(item, dict) else item.model_dump() if hasattr(item, "model_dump") else dict(item)
-            result.append(d)
-        return result
+    Delegates to match_scoring.score_listings_by_preferences. preferences_text is treated as
+    qualitative preferences when no structured effective prefs are passed. Returns listing
+    dicts sorted by match_score descending. Missing components are excluded from the average
+    (not treated as zero). Embedding failure omits the semantic component only.
+    """
+    from rental_search_agent.match_scoring import (
+        score_listings_by_preferences as do_multi_score,
+    )
 
-    blobs = [listing_to_text_blob(item) for item in listings]
-    # For empty blobs use a space so we get an embedding; score may be low
-    blobs = [b if b.strip() else " " for b in blobs]
-
-    try:
-        query_embedding = embed_texts([query_str], model=embedding_model)[0]
-        listing_embeddings = embed_texts(blobs, model=embedding_model)
-    except Exception as e:
-        logger.warning("Semantic scoring embedding failed: %s", e)
-        result = []
-        for item in listings:
-            d = item if isinstance(item, dict) else item.model_dump() if hasattr(item, "model_dump") else dict(item)
-            d["semantic_score"] = 0.5
-            result.append(d)
-        return result
-
-    scored: List[tuple] = []
-    for i, item in enumerate(listings):
-        d = item if isinstance(item, dict) else item.model_dump() if hasattr(item, "model_dump") else dict(item)
-        sim = _cosine_similarity(query_embedding, listing_embeddings[i]) if i < len(listing_embeddings) else 0.0
-        # Clamp to [0, 1] for display (embeddings usually give positive similarity)
-        sim = max(0.0, min(1.0, sim))
-        d["semantic_score"] = round(sim, 4)
-        scored.append((d, sim))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [d for d, _ in scored]
+    return do_multi_score(
+        listings,
+        preferences_text=preferences_text,
+        query_text=query_text,
+        embedding_model=embedding_model,
+    )

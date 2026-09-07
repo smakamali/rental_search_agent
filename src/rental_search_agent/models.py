@@ -130,11 +130,22 @@ class Listing(BaseModel):
         None,
         ge=0,
         le=1,
-        description="Cosine-similarity match score (0-1) vs. the user's qualitative preferences, "
-        "set by score_listings_by_preferences. A real field (not just a display-only dict key) so "
-        "it survives round-trips through Listing.model_validate() in filter_listings/"
-        "enrich_listings_with_proximity — without this, filtering/enriching after scoring would "
-        "silently drop the score.",
+        description="Semantic component (0-1 cosine) vs qualitative preferences, set by "
+        "score_listings_by_preferences. Survives Listing.model_validate() round-trips in "
+        "filter_listings / enrich_listings_with_proximity.",
+    )
+    match_score: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Overall multi-metric match score (0-1): weighted average of available "
+        "components (structural, proximity, amenity, semantic). Missing components "
+        "are excluded rather than treated as zero. Primary UI Match score.",
+    )
+    score_breakdown: Optional[dict[str, Any]] = Field(
+        None,
+        description="Per-component scores, weights used, and coverage checklist from "
+        "score_listings_by_preferences. Survives filter/enrich round-trips.",
     )
 
     def to_short_label(self, index: Optional[int] = None) -> str:

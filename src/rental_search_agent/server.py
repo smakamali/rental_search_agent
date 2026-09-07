@@ -30,8 +30,13 @@ from rental_search_agent.models import (
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences as do_analyze_listing_against_preferences
+from rental_search_agent.match_scoring import score_listings_by_preferences as do_score_listings_by_preferences
+from rental_search_agent.preference_resolution import (
+    load_stored_preferences,
+    merge_chat_over_stored,
+    qualitative_from_preferences_text,
+)
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
-from rental_search_agent.semantic_scoring import score_listings_by_preferences as do_score_listings_by_preferences
 from rental_search_agent.viewing_plan import (
     _compute_unused_slots,
     draft_viewing_plan as do_draft_viewing_plan,
@@ -172,30 +177,58 @@ def enrich_listings_with_proximity(
 @mcp.tool()
 def score_listings_by_preferences(
     listings: list[dict[str, Any]],
-    preferences_text: str,
+    preferences_text: str = "",
     query_text: Optional[str] = None,
+    proximity_rules: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Score and rank listings by semantic similarity to the user's qualitative preferences. Pass current listings and preferences_text (from stored qualitative_preferences or user message). Returns { listings: [...], total_count } with each listing having semantic_score, sorted by score descending. Call when qualitative_preferences is set and you have search results to rank. Credentials via API_PROVIDER and the corresponding key (OPENROUTER_API_KEY or OPENAI_API_KEY)."""
+    """Score and rank listings by multi-metric match to user preferences. Returns { listings, total_count } with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Uses stored Search Preferences when set; preferences_text is qualitative only (a trailing Proximity: block is ignored — pass proximity_rules for commute scoring)."""
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list.")
-    if not (preferences_text and isinstance(preferences_text, str) and preferences_text.strip()):
-        raise ValueError("preferences_text is required and must be a non-empty string.")
+    stored = load_stored_preferences()
+    qual = qualitative_from_preferences_text(preferences_text)
+    chat = {"qualitative_preferences": qual} if qual else {}
+    effective = merge_chat_over_stored(stored, chat)
+    rules = [r for r in (proximity_rules or []) if isinstance(r, dict)]
+    if not effective.has_score_relevant_prefs() and not rules:
+        raise ValueError(
+            "preferences_text is required when no stored/search score-relevant preferences are available."
+        )
     scored = do_score_listings_by_preferences(
         listings,
-        preferences_text.strip(),
+        preferences_text=qual,
         query_text=(query_text or "").strip() or None,
+        effective_prefs=effective,
+        stored_prefs=stored,
+        proximity_rules=rules,
     )
     return {"listings": scored, "total_count": len(scored)}
 
 
 @mcp.tool()
-def analyze_listing_preferences(listing: dict[str, Any], preferences_text: str) -> dict[str, Any]:
-    """Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Pass the full listing object and preferences_text: combine listing (qualitative) preferences and proximity preferences in one string when both are set."""
+def analyze_listing_preferences(
+    listing: dict[str, Any],
+    preferences_text: str = "",
+    proximity_rules: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Uses stored Search Preferences merged with preferences_text (qualitative). Pass proximity_rules when commute constraints should be scored."""
     if not listing or not isinstance(listing, dict):
         raise ValueError("listing is required and must be a non-empty object.")
-    if not (preferences_text and isinstance(preferences_text, str) and preferences_text.strip()):
+    stored = load_stored_preferences()
+    text = (preferences_text or "").strip()
+    qual = qualitative_from_preferences_text(text)
+    chat = {"qualitative_preferences": qual} if qual else {}
+    effective = merge_chat_over_stored(stored, chat)
+    rules = [r for r in (proximity_rules or []) if isinstance(r, dict)]
+    if not text and not effective.has_score_relevant_prefs() and not rules:
         raise ValueError("preferences_text is required and must be a non-empty string.")
-    return do_analyze_listing_against_preferences(listing, preferences_text.strip())
+    return do_analyze_listing_against_preferences(
+        listing,
+        text or qual or "Match my search preferences",
+        stored_prefs=stored,
+        chat_criteria=chat,
+        proximity_rules=rules,
+        effective_prefs=effective,
+    )
 
 
 def do_simulate_viewing_request(

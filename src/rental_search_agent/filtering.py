@@ -7,7 +7,19 @@ from rental_search_agent.models import Listing, ListingFilterCriteria, Proximity
 
 # Attributes that can be used for sorting
 SORTABLE_ATTRS = frozenset(
-    {"price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "proximity", "listing_age_hours"}
+    {
+        "price",
+        "bedrooms",
+        "bathrooms",
+        "sqft",
+        "address",
+        "id",
+        "title",
+        "semantic_score",
+        "match_score",
+        "proximity",
+        "listing_age_hours",
+    }
 )
 
 # Map common user/Realtor.ca variants onto a small set of canonical keys for OR matching.
@@ -113,10 +125,13 @@ def _get_sort_key(listing: Listing | dict, attr: str) -> Any:
     else:
         val = getattr(listing, attr, None)
     if val is None:
-        if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score", "listing_age_hours"):
-            return (1, float("-inf") if attr == "semantic_score" else float("inf"))
+        if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score", "match_score", "listing_age_hours"):
+            return (
+                1,
+                float("-inf") if attr in ("semantic_score", "match_score") else float("inf"),
+            )
         return (1, "")
-    if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score", "listing_age_hours"):
+    if attr in ("price", "bedrooms", "bathrooms", "sqft", "semantic_score", "match_score", "listing_age_hours"):
         return (0, float(val))
     return (0, str(val))
 

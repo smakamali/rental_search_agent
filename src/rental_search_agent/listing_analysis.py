@@ -2,16 +2,19 @@
 
 import json
 import logging
-from typing import Any, Optional, Union
+from typing import Any, Optional, Sequence, Union
 
 from rental_search_agent.agent import current_date_context
 from rental_search_agent.api_config import get_llm_client_and_model
+from rental_search_agent.match_scoring import score_listings_by_preferences
 from rental_search_agent.models import Listing
-from rental_search_agent.semantic_scoring import (
-    _cosine_similarity,
-    embed_texts,
-    listing_to_text_blob,
+from rental_search_agent.preference_resolution import (
+    EffectiveSearchPreferences,
+    is_placeholder_qualitative,
+    merge_chat_over_stored,
+    qualitative_from_preferences_text,
 )
+from rental_search_agent.semantic_scoring import listing_to_text_blob
 
 logger = logging.getLogger(__name__)
 
@@ -36,63 +39,72 @@ def analyze_listing_against_preferences(
     preferences_text: str,
     conversation_context: Optional[str] = None,
     score_query_text: Optional[str] = None,
+    *,
+    stored_prefs: Optional[dict] = None,
+    chat_criteria: Optional[dict] = None,
+    proximity_rules: Optional[Sequence[dict]] = None,
+    effective_prefs: Optional[EffectiveSearchPreferences] = None,
 ) -> dict[str, Any]:
     """Analyze one listing against user preferences.
 
-    Uses the full listing blob (title, address, description, amenities, etc.) for both
-    the semantic match score and the LLM-generated key matches/gaps. conversation_context
-    is optional and used only for the LLM key_matches/key_gaps output, never for the
-    numeric match score.
-
-    Args:
-        listing: One listing as dict or Listing model.
-        preferences_text: User's preferences, used as the LLM prompt's narrative input for
-            key_matches/key_gaps (may combine qualitative and proximity preferences, e.g.
-            "balcony, parking\n\nProximity: 5 min walk to transit"). Also used as the
-            embedding query for match_score_pct unless score_query_text is given.
-        conversation_context: Optional summary or excerpt of the conversation; used only
-            in the LLM prompt for key_matches/key_gaps, not for the numeric match score.
-        score_query_text: Optional. When given, used instead of preferences_text as the
-            embedding query for match_score_pct. Callers that combine qualitative and
-            proximity preferences into one preferences_text string (for a richer narrative)
-            should pass just the qualitative portion here, matching the query text
-            score_listings_by_preferences uses for the table's semantic_score — otherwise
-            the two "Match score" numbers shown in the UI are computed from different query
-            text and can diverge for the same listing/preferences even though both are
-            labeled the same way.
+    Numeric match_score_pct uses the same multi-metric scorer as the results table.
+    LLM narrative (key_matches / key_gaps) uses preferences_text + optional conversation
+    context. score_query_text is accepted for backward compatibility but ignored for the
+    numeric score (structured effective prefs drive scoring).
 
     Returns:
-        Dict with: match_score_pct (int 0-100), key_matches (list[str]), key_gaps (list[str]).
-
-    Raises:
-        ValueError: If preferences_text is empty, or on embedding/LLM failure.
+        Dict with: match_score_pct, score_breakdown, key_matches, key_gaps.
     """
+    _ = score_query_text  # legacy callers may still pass this; multi-metric path supersedes it
     preferences_text = (preferences_text or "").strip()
-    if not preferences_text:
+    if not preferences_text and effective_prefs is None and not stored_prefs and not chat_criteria:
         raise ValueError("preferences_text is required and must be non-empty.")
-    score_text = (score_query_text or "").strip() or preferences_text
 
     blob = listing_to_text_blob(listing)
     if not blob.strip():
         blob = " "
 
-    # Match score via embeddings + cosine similarity
+    chat = dict(chat_criteria or {})
+    narrative_source = preferences_text
+    qual_from_text = qualitative_from_preferences_text(preferences_text)
+    if qual_from_text and not chat.get("qualitative_preferences"):
+        chat.setdefault("qualitative_preferences", qual_from_text)
+
+    prefs = effective_prefs or merge_chat_over_stored(stored_prefs, chat)
+    if is_placeholder_qualitative(prefs.qualitative_preferences):
+        prefs = prefs.model_copy(update={"qualitative_preferences": ""})
+    if qual_from_text and not prefs.qualitative_preferences:
+        prefs = prefs.model_copy(update={"qualitative_preferences": qual_from_text})
+
     try:
-        pref_emb, listing_emb = embed_texts([score_text, blob])
-        sim = _cosine_similarity(pref_emb, listing_emb)
-        sim = max(0.0, min(1.0, sim))
-        match_score_pct = round(sim * 100)
+        scored_list = score_listings_by_preferences(
+            [listing],
+            preferences_text=prefs.qualitative_preferences or preferences_text or " ",
+            effective_prefs=prefs,
+            proximity_rules=list(proximity_rules or []),
+        )
+        scored = scored_list[0] if scored_list else {}
+        match_score = scored.get("match_score")
+        if match_score is None:
+            match_score = scored.get("semantic_score")
+        if match_score is None:
+            raise ValueError("No match score components could be computed for this listing.")
+        match_score_pct = round(float(match_score) * 100)
+        score_breakdown = scored.get("score_breakdown")
+    except ValueError:
+        raise
     except Exception as e:
-        logger.warning("Listing analysis embedding failed: %s", e)
+        logger.warning("Listing analysis scoring failed: %s", e)
         raise ValueError(f"Failed to compute match score: {e}") from e
 
-    # Key matches / key gaps via LLM. Today's date is injected here (LLM-prompt text
-    # only) so the model can reason about stale info like a past open house date —
-    # it is deliberately NOT added to `blob` above, since blob also feeds embed_texts()
-    # for match_score_pct, and embeddings can't do date arithmetic; adding the date
-    # there would just be inert noise in the similarity vector.
+    narrative_prefs = narrative_source or prefs.qualitative_preferences or ""
+    if not narrative_prefs.strip():
+        narrative_prefs = "User search preferences (structured)."
+
     client, model = get_llm_client_and_model()
-    user_content = f"{current_date_context().strip()}\n\nListing:\n{blob}\n\nUser preferences:\n{preferences_text}"
+    user_content = (
+        f"{current_date_context().strip()}\n\nListing:\n{blob}\n\nUser preferences:\n{narrative_prefs}"
+    )
     ctx = (conversation_context or "").strip()
     if ctx:
         user_content += f"\n\nAdditional context from conversation:\n{ctx}"
@@ -128,6 +140,7 @@ def analyze_listing_against_preferences(
 
     return {
         "match_score_pct": match_score_pct,
+        "score_breakdown": score_breakdown,
         "key_matches": key_matches,
         "key_gaps": key_gaps,
     }
