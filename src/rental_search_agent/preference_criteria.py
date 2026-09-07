@@ -44,6 +44,7 @@ class AmenityFeature:
 
 # Lightweight vocabulary: qualitative prefs are scanned for these asks; listings matched via
 # structured fields + case-insensitive substring search on amenities/description.
+# A hit in remarks is met; a miss is unmet when description is present, unknown when it is not.
 AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature("parking", "Parking", ("parking", "garage", "underground parking", "carport")),
     AmenityFeature("balcony", "Balcony", ("balcony", "patio", "terrace", "deck")),
@@ -89,6 +90,40 @@ def _listing_text_blob_for_amenities(listing: Union[dict, Any]) -> str:
         _listing_attr(listing, "title") or "",
     ]
     return " ".join(str(p) for p in parts).lower()
+
+
+def _has_listing_description(listing: Union[dict, Any]) -> bool:
+    """True when the listing has remarks we can search for qualitative features."""
+    return bool(str(_listing_attr(listing, "description") or "").strip())
+
+
+def _amenity_not_found(feature: AmenityFeature, listing: Union[dict, Any]) -> CriterionResult:
+    """Absence of a requested amenity: unmet when remarks exist, else unknown.
+
+    When PublicRemarks were always empty, 'not mentioned' had to be unknown so
+    empty text did not drag amenity/match scores down. With fetchDetails, a real
+    description is evidence: if the user asked for a feature and the remarks
+    never mention it, treat that as unmet so description actually affects ranking.
+    """
+    if _has_listing_description(listing):
+        return _crit(
+            feature.id,
+            feature.label,
+            "unmet",
+            0.0,
+            group="amenity",
+            observed="No",
+            source="Inferred",
+            detail="Not mentioned in listing description",
+        )
+    return _crit(
+        feature.id,
+        feature.label,
+        "unknown",
+        None,
+        group="amenity",
+        detail="Not mentioned",
+    )
 
 
 def _crit(
@@ -152,10 +187,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
                 feature.id, feature.label, "met", 1.0,
                 group="amenity", observed="Yes", source="Inferred",
             )
-        return _crit(
-            feature.id, feature.label, "unknown", None,
-            group="amenity", detail="Not mentioned",
-        )
+        return _amenity_not_found(feature, listing)
 
     if feature.id == "den":
         has_den = _listing_attr(listing, "has_den")
@@ -168,10 +200,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
         if "+ den" in bed_disp or "den" in text:
             source = "MLS" if "+ den" in bed_disp else "Inferred"
             return _crit(feature.id, feature.label, "met", 1.0, group="amenity", observed="Yes", source=source)
-        return _crit(
-            feature.id, feature.label, "unknown", None,
-            group="amenity", detail="Not mentioned",
-        )
+        return _amenity_not_found(feature, listing)
 
     text = _listing_text_blob_for_amenities(listing)
     if any(p in text for p in feature.patterns):
@@ -179,11 +208,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
             feature.id, feature.label, "met", 1.0,
             group="amenity", observed="Yes", source="Inferred",
         )
-    # Free-text absence is inconclusive (sparse descriptions) — omit from averages.
-    return _crit(
-        feature.id, feature.label, "unknown", None,
-        group="amenity", detail="Not mentioned",
-    )
+    return _amenity_not_found(feature, listing)
 
 
 def _proximity_rule_key(rule: dict) -> str:

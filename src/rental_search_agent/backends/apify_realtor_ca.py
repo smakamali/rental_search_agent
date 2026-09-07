@@ -23,9 +23,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ACTOR_ID = "igolaizola/realtor-canada-scraper-ppe"
 DEFAULT_MAX_ITEMS = 100
+# Realtor.ca leaves PublicRemarks empty on search results; the actor only fills
+# listing descriptions when fetchDetails is on (extra request + PPE event each).
+DEFAULT_FETCH_DETAILS = True
 # Bound how long we wait for the Apify actor run to finish; without this the
 # apify-client SDK waits indefinitely, which would hang the whole agent turn.
 ACTOR_CALL_WAIT_DURATION = timedelta(minutes=2)
+# fetchDetails does one extra request per listing, so the run needs more time.
+ACTOR_CALL_WAIT_DURATION_WITH_DETAILS = timedelta(minutes=8)
 # Only trust absolute listing URLs on these hosts; anything else from the (third-party,
 # scraped) dataset falls back to an MLS-based realtor.ca URL to avoid propagating
 # attacker-controlled off-site links into the UI/calendar.
@@ -109,6 +114,57 @@ def _parse_bedrooms(raw: Any) -> tuple[int, int]:
     return _coerce_int(raw, default=0), 0
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _nonempty_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _nested_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _listing_description(item: dict[str, Any], prop: dict[str, Any]) -> Optional[str]:
+    """Read the listing description from search fields or fetchDetails `_details`.
+
+    Realtor.ca returns PublicRemarks as "" on search results. With fetchDetails
+    the actor stores the full property-details payload (including remarks)
+    under `_details`. Prefer a non-empty top-level value, then fall back.
+    """
+    details = _nested_dict(item, "_details")
+    details_prop = _nested_dict(details, "Property")
+    details_listing = _nested_dict(details, "Listing")
+    for candidate in (
+        item.get("PublicRemarks"),
+        item.get("Description"),
+        prop.get("PublicRemarks"),
+        prop.get("Description"),
+        details.get("PublicRemarks"),
+        details.get("Description"),
+        details_prop.get("PublicRemarks"),
+        details_prop.get("Description"),
+        details_listing.get("PublicRemarks"),
+        details_listing.get("Description"),
+    ):
+        text = _nonempty_str(candidate)
+        if text:
+            return text
+    return None
+
+
 def _run_field(run: Any, snake_name: str, camel_name: str) -> Any:
     """Read a field off an Apify actor Run result.
 
@@ -120,7 +176,12 @@ def _run_field(run: Any, snake_name: str, camel_name: str) -> Any:
     return getattr(run, snake_name, None)
 
 
-def filters_to_run_input(filters: RentalSearchFilters, max_items: int) -> dict[str, Any]:
+def filters_to_run_input(
+    filters: RentalSearchFilters,
+    max_items: int,
+    *,
+    fetch_details: bool = DEFAULT_FETCH_DETAILS,
+) -> dict[str, Any]:
     """Map RentalSearchFilters to igolaizola actor run_input."""
     listing_type = filters.listing_type or "for_rent"
     if listing_type not in ("for_rent", "for_sale"):
@@ -134,6 +195,7 @@ def filters_to_run_input(filters: RentalSearchFilters, max_items: int) -> dict[s
         "location": filters.location_list()[0],
         "operation": operation,
         "sortBy": "newest",
+        "fetchDetails": fetch_details,
         "minBeds": filters.min_bedrooms,
         "maxBeds": 0,
         "minBathrooms": 0,
@@ -244,8 +306,7 @@ def item_to_listing(item: dict[str, Any], listing_type: str) -> Listing:
     parking_spaces_val = _coerce_float(prop.get("ParkingSpaceTotal") or item.get("ParkingSpaceTotal"))
     parking_spaces = int(parking_spaces_val) if parking_spaces_val is not None else None
     parking_type = str(prop.get("ParkingType") or item.get("ParkingType") or "").strip() or None
-    description = item.get("PublicRemarks") or item.get("Description") or prop.get("Description")
-    description_str = str(description).strip() if description else None
+    description_str = _listing_description(item, prop)
     title = (description_str[:200] if description_str else None) or (f"Listing {mls}" if mls else "Listing")
 
     house_category = (
@@ -380,6 +441,7 @@ class ApifyRealtorCaBackend:
         token: Optional[str] = None,
         actor_id: Optional[str] = None,
         max_items: Optional[int] = None,
+        fetch_details: Optional[bool] = None,
         client: Any = None,
     ) -> None:
         self.token = token if token is not None else (os.environ.get("APIFY_TOKEN") or "").strip()
@@ -395,6 +457,11 @@ class ApifyRealtorCaBackend:
             except ValueError:
                 raw_max = DEFAULT_MAX_ITEMS
         self.max_items = max(1, int(raw_max))
+        self.fetch_details = (
+            _env_bool("APIFY_FETCH_DETAILS", DEFAULT_FETCH_DETAILS)
+            if fetch_details is None
+            else fetch_details
+        )
         self._client = client
 
     def _get_client(self) -> Any:
@@ -414,17 +481,25 @@ class ApifyRealtorCaBackend:
 
     def search(self, filters: RentalSearchFilters) -> RentalSearchResponse:
         listing_type = filters.listing_type or "for_rent"
-        run_input = filters_to_run_input(filters, self.max_items)
+        run_input = filters_to_run_input(
+            filters, self.max_items, fetch_details=self.fetch_details
+        )
+        wait = (
+            ACTOR_CALL_WAIT_DURATION_WITH_DETAILS
+            if self.fetch_details
+            else ACTOR_CALL_WAIT_DURATION
+        )
         client = self._get_client()
         try:
             logger.debug(
-                "Apify actor=%s operation=%s location=%s maxItems=%s",
+                "Apify actor=%s operation=%s location=%s maxItems=%s fetchDetails=%s",
                 self.actor_id,
                 run_input.get("operation"),
                 run_input.get("location"),
                 run_input.get("maxItems"),
+                run_input.get("fetchDetails"),
             )
-            run = _call_actor(client.actor(self.actor_id), run_input, ACTOR_CALL_WAIT_DURATION)
+            run = _call_actor(client.actor(self.actor_id), run_input, wait)
         except SearchBackendError:
             raise
         except Exception as e:
