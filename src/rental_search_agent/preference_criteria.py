@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, List, Literal, Optional, Sequence, Union
 
@@ -49,6 +50,11 @@ AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature("parking", "Parking", ("parking", "garage", "underground parking", "carport")),
     AmenityFeature("balcony", "Balcony", ("balcony", "patio", "terrace", "deck")),
     AmenityFeature("gym", "Gym", ("gym", "fitness", "exercise room")),
+    AmenityFeature(
+        "pool",
+        "Swimming pool",
+        ("swimming pool", "indoor pool", "outdoor pool", "shared pool", "heated pool", "lap pool"),
+    ),
     AmenityFeature("pets", "Pet-friendly", ("pet friendly", "pet-friendly", "pets allowed", "cats ok", "dogs ok", "pets ok")),
     AmenityFeature("laundry", "In-suite laundry", ("in-suite laundry", "in suite laundry", "washer", "dryer", "laundry")),
     AmenityFeature("dishwasher", "Dishwasher", ("dishwasher",)),
@@ -60,6 +66,15 @@ AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature("den", "Den", ("den", "flex room", "flex space")),
 )
 
+_POOL_WORD = re.compile(r"\bpool\b")
+
+
+def _amenity_text_matches(text: str, feature: AmenityFeature) -> bool:
+    """Substring patterns, plus a word-boundary check so 'pool' does not match 'whirlpool'."""
+    if any(pat in text for pat in feature.patterns):
+        return True
+    return feature.id == "pool" and bool(_POOL_WORD.search(text))
+
 
 def extract_amenity_features(qualitative_text: str) -> List[AmenityFeature]:
     """Return amenity features mentioned in qualitative preference text (deterministic)."""
@@ -68,10 +83,8 @@ def extract_amenity_features(qualitative_text: str) -> List[AmenityFeature]:
         return []
     found: List[AmenityFeature] = []
     for feat in AMENITY_FEATURES:
-        for pat in feat.patterns:
-            if pat in text:
-                found.append(feat)
-                break
+        if _amenity_text_matches(text, feat):
+            found.append(feat)
     return found
 
 
@@ -182,7 +195,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
                 group="amenity", observed=ptype, source="MLS",
             )
         text = _listing_text_blob_for_amenities(listing)
-        if any(p in text for p in feature.patterns):
+        if _amenity_text_matches(text, feature):
             return _crit(
                 feature.id, feature.label, "met", 1.0,
                 group="amenity", observed="Yes", source="Inferred",
@@ -203,7 +216,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
         return _amenity_not_found(feature, listing)
 
     text = _listing_text_blob_for_amenities(listing)
-    if any(p in text for p in feature.patterns):
+    if _amenity_text_matches(text, feature):
         return _crit(
             feature.id, feature.label, "met", 1.0,
             group="amenity", observed="Yes", source="Inferred",

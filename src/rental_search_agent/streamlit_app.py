@@ -1,20 +1,9 @@
 """Streamlit chat UI for the rental search agent. Uses run_agent_step_events from client."""
 
-import html
 import json
-import os
 from pathlib import Path
 
 import streamlit as st
-
-try:
-    import folium
-except ImportError:
-    folium = None
-try:
-    import pydeck as pdk
-except ImportError:
-    pdk = None
 
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
@@ -26,6 +15,10 @@ from rental_search_agent.client import (
     run_agent_step_events,
 )
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
+from rental_search_agent.display_format import (
+    escape_markdown_link_text as _escape_markdown_link_text,
+    safe_http_url as _safe_http_url,
+)
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
 from rental_search_agent.preference_resolution import (
@@ -36,7 +29,20 @@ from rental_search_agent.preference_resolution import (
 )
 from rental_search_agent.proximity_parser import parse_proximity_preferences
 from rental_search_agent.streamlit_analysis import render_listing_analysis
-from urllib.parse import urlparse
+from rental_search_agent.streamlit_results import (
+    _analyze_button_key,
+    _build_map_data,
+    _format_bedrooms,
+    _format_days_on_market,
+    _format_listing_price,
+    _format_map_price_label,
+    _format_match_score,
+    _listings_to_table_rows,
+    listing_match_score,
+    normalize_map_label_mode,
+    normalize_results_view,
+    render_search_results,
+)
 
 
 def _preferences_block(prefs: dict) -> str:
@@ -85,22 +91,6 @@ def _sync_preferences_from_file() -> dict:
     if st.session_state.get("messages"):
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
     return loaded
-
-
-def _safe_http_url(url: str | None) -> str | None:
-    """Return url if it is http(s); else None (blocks javascript: and other schemes)."""
-    raw = (url or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = urlparse(raw)
-    except Exception:
-        return None
-    if parsed.scheme.lower() not in ("http", "https"):
-        return None
-    if not parsed.netloc:
-        return None
-    return raw
 
 
 def _escape_markdown_plain(text: str) -> str:
@@ -163,9 +153,17 @@ def _init_session_state() -> None:
     if "chat_open" not in st.session_state:
         st.session_state["chat_open"] = True
     if "results_view" not in st.session_state:
-        st.session_state["results_view"] = "cards"
+        st.session_state["results_view"] = "grid"
+    else:
+        st.session_state["results_view"] = normalize_results_view(
+            st.session_state.get("results_view")
+        )
     if "map_label_mode" not in st.session_state:
         st.session_state["map_label_mode"] = "price"
+    else:
+        st.session_state["map_label_mode"] = normalize_map_label_mode(
+            st.session_state.get("map_label_mode")
+        )
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
@@ -205,38 +203,6 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
         return listings
 
 
-def _format_proximity_display(proximity: dict | None) -> str:
-    """Format listing.proximity for table display: short summary or 'Distance unknown'."""
-    if not proximity or not isinstance(proximity, dict):
-        return "—"
-    parts = []
-    has_unknown = False
-    for rule_key, val in proximity.items():
-        if val is None:
-            has_unknown = True
-            continue
-        if not isinstance(val, dict):
-            has_unknown = True
-            continue
-        loc = (rule_key.split("|")[0] if "|" in rule_key else rule_key).strip()
-        dist = val.get("distance_km")
-        dur = val.get("duration_min")
-        if dur is not None:
-            parts.append(f"{loc}: {float(dur):.0f} min")
-        elif dist is not None:
-            parts.append(f"{loc}: {float(dist):.1f} km")
-        else:
-            has_unknown = True
-    if has_unknown and not parts:
-        return "Distance unknown"
-    if has_unknown:
-        return "; ".join(parts) + " (some unknown)"
-    return "; ".join(parts) if parts else "—"
-
-
-_TABLE_COL_WIDTHS = [0.5, 0.6, 1.8, 0.8, 0.4, 0.4, 0.6, 0.8, 0.8, 0.8, 1.0, 1.1, 0.8]
-
-
 def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
     """Display-only: sort by match_score (fallback semantic_score) desc when available.
 
@@ -244,442 +210,16 @@ def _apply_default_match_score_sort(listings: list[dict]) -> list[dict]:
     field is unchanged — displayed order changes, but 'rank' still identifies
     listings for "listing N" references.
     """
-    if not any(
-        isinstance(item, dict)
-        and (item.get("match_score") is not None or item.get("semantic_score") is not None)
-        for item in listings
-    ):
+    if not any(listing_match_score(item) is not None for item in listings):
         return listings
 
     def _key(item: dict) -> tuple:
-        if not isinstance(item, dict):
+        score = listing_match_score(item)
+        if score is None:
             return (1, -1.0)
-        ms = item.get("match_score")
-        if ms is not None:
-            return (0, -float(ms))
-        ss = item.get("semantic_score")
-        if ss is not None:
-            return (0, -float(ss))
-        return (1, -1.0)
+        return (0, -score)
 
     return sorted(listings, key=_key)
-
-
-def _escape_markdown_link_text(text: str) -> str:
-    """Escape characters that would let untrusted text break out of a markdown link
-    label — e.g. "[label](url)" — and inject a second, attacker-controlled link.
-
-    Security-review/Bugbot finding: the Analyze expander builds a markdown link whose
-    *label* is the listing's scraped MLS id (f"[{id}]({url})"); a crafted id containing
-    "](attacker-url)[" would close the intended label early and open a new link, so the
-    text a user sees as the MLS number could actually navigate elsewhere. Backslash-
-    escaping "[", "]", and "\\" itself (the characters CommonMark treats as link-label
-    delimiters) neutralizes this while leaving normal MLS ids (plain alphanumeric)
-    unchanged.
-    """
-    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-
-
-def _render_clickable_photo(photo_url: str, listing_url: str, width: int) -> None:
-    """Render the listing photo as a clickable link to the listing (st.image can't be
-    wrapped as a link directly, so this uses escaped raw HTML — same escaping pattern as
-    the existing folium map marker links). Falls back to a plain "View" link button when
-    there's no photo, so every row/card keeps some click-through to the listing even
-    without a photo (this is the table's only click-through now that MLS id is removed)."""
-    if photo_url:
-        st.markdown(
-            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener">'
-            f'<img src="{html.escape(photo_url)}" width="{width}"></a>',
-            unsafe_allow_html=True,
-        )
-    elif listing_url:
-        st.link_button("View", listing_url)
-    else:
-        st.write("—")
-
-
-def _format_tags(listing: dict) -> str:
-    """Badges for freshness/open-house/price-drop signals; empty string when none apply."""
-    badges = []
-    age_hours = listing.get("listing_age_hours")
-    if age_hours is not None:
-        try:
-            if float(age_hours) <= 48:
-                badges.append("🆕 New")
-        except (TypeError, ValueError):
-            pass
-    if listing.get("open_house"):
-        badges.append("🏠 Open house")
-    if listing.get("price_change_display"):
-        badges.append("↓ Reduced")
-    return " · ".join(badges)
-
-
-def _format_days_on_market(listing: dict) -> str:
-    """'Days on Market', approximated from listing_age_hours (parsed from the actor's
-    relative freshness text, e.g. '18 hours ago') — the actor has no exact DOM field."""
-    age_hours = listing.get("listing_age_hours")
-    if age_hours is None:
-        return "—"
-    try:
-        return f"{round(float(age_hours) / 24)}d"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def _format_bedrooms(listing: dict) -> str:
-    """Bedroom count for display, preserving the source's den notation (e.g. '2 + 1' for 2
-    bedrooms + a den) when bedrooms_display is set, so the den isn't silently dropped from
-    the UI even though it's excluded from the numeric bedrooms count used for filtering."""
-    display = listing.get("bedrooms_display")
-    if display:
-        return str(display)
-    bedrooms = listing.get("bedrooms")
-    return str(bedrooms) if bedrooms is not None else "—"
-
-
-def _format_match_score(listing: dict) -> str:
-    """Match score display: overall match_score (fallback semantic_score) as %, or '—'."""
-    score = listing.get("match_score")
-    if score is None:
-        score = listing.get("semantic_score")
-    if score is None:
-        return "—"
-    try:
-        return f"{round(float(score) * 100)}%"
-    except (TypeError, ValueError):
-        return "—"
-
-
-def _format_listing_price(listing: dict) -> str:
-    """Human-readable price for table/cards.
-
-    Prefer the numeric ``price`` field so scraped ``price_display`` cannot inject
-    Markdown links into any Markdown render path. Fall back to plain display text.
-    """
-    price = listing.get("price")
-    if price is not None:
-        try:
-            return f"${int(float(price)):,}"
-        except (TypeError, ValueError):
-            pass
-    raw = listing.get("price_display")
-    if not raw:
-        return "—"
-    return str(raw)
-
-
-def _analyze_button_key(listing: dict, index: int) -> str:
-    """Stable unique widget key for Analyze. Empty/None ids must not collide."""
-    listing_id = listing.get("id")
-    if listing_id is None or listing_id == "":
-        return f"analyze_row_{index}"
-    return f"analyze_{listing_id}"
-
-
-def _format_map_price_label(listing: dict) -> str:
-    """Compact currency for map pins: $2,800, or $1.25M when price >= 1e6."""
-    price = listing.get("price")
-    if price is None:
-        return "—"
-    try:
-        value = float(price)
-    except (TypeError, ValueError):
-        return "—"
-    if value >= 1_000_000:
-        millions = value / 1_000_000
-        formatted = f"{millions:.2f}".rstrip("0").rstrip(".")
-        return f"${formatted}M"
-    return f"${int(round(value)):,}"
-
-
-def _render_clickable_address(address: str, listing_url: str) -> None:
-    """Address as a new-tab link when a listing URL is present (escaped like map markers)."""
-    label = html.escape(address or "—")
-    if listing_url:
-        st.markdown(
-            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener">{label}</a>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.write(address or "—")
-
-
-def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
-    """Build table-friendly rows: rank, photo, address, type, bed, bath, size, price,
-    days on market, match score, tags, Proximity, URL.
-
-    Uses each listing's 'rank' field (assigned by the LLM tool layer in client.py) rather
-    than its position in this list, so numbering stays correct even when this list has been
-    locally reordered/filtered for display (e.g. the proximity closest-first safeguard,
-    or the default match-score sort), which would otherwise desync the table's numbers
-    from what the LLM calls "listing N".
-    """
-    rows = []
-    for i, listing in enumerate(listings):
-        bath = listing.get("bathrooms")
-        sqft = listing.get("sqft")
-        rows.append({
-            "rank": listing.get("rank") if listing.get("rank") is not None else i + 1,
-            "photo": listing.get("photo_url") or "",
-            "address": listing.get("address") or "—",
-            "type": listing.get("house_category") or "—",
-            "bed": _format_bedrooms(listing),
-            "bath": f"{float(bath):g}" if bath is not None else "—",
-            "size": str(int(sqft)) if sqft is not None else "—",
-            "price": _format_listing_price(listing),
-            "days_on_market": _format_days_on_market(listing),
-            "match_score": _format_match_score(listing),
-            "tags": _format_tags(listing),
-            "Proximity": _format_proximity_display(listing.get("proximity")),
-            "URL": listing.get("url") or "",
-        })
-    return rows
-
-
-def _render_results_table(listings: list[dict]) -> None:
-    """Render search results as custom rows with an Analyze button per listing."""
-    if not listings:
-        return
-    # Header row: Rank, Photo, Address, Type, Bed, Bath, Size, Price, Days on Market,
-    # Match score, Tags, Proximity, Analyze
-    header_cols = st.columns(_TABLE_COL_WIDTHS)
-    headers = [
-        "Rank", "Photo", "Address", "Type", "Bed", "Bath", "Size", "Price",
-        "Days on Market", "Match score", "Tags", "Proximity", "Analyze",
-    ]
-    for col, label in zip(header_cols, headers):
-        with col:
-            st.caption(label)
-    st.divider()
-    for i, listing in enumerate(listings):
-        bath = listing.get("bathrooms")
-        sqft = listing.get("sqft")
-        url = listing.get("url") or ""
-        photo_url = listing.get("photo_url") or ""
-        prox = _format_proximity_display(listing.get("proximity"))
-        tags = _format_tags(listing)
-        row_cols = st.columns(_TABLE_COL_WIDTHS)
-        with row_cols[0]:
-            # Use the listing's authoritative 'rank' (from the LLM tool layer), not this
-            # row's position, so the number matches what the LLM calls "listing N" even
-            # after a local reorder (e.g. the proximity closest-first safeguard, or the
-            # default match-score sort, above).
-            st.write(listing.get("rank") if listing.get("rank") is not None else i + 1)
-        with row_cols[1]:
-            _render_clickable_photo(photo_url, url, width=56)
-        with row_cols[2]:
-            st.write(listing.get("address") or "—")
-        with row_cols[3]:
-            st.write(listing.get("house_category") or "—")
-        with row_cols[4]:
-            st.write(_format_bedrooms(listing))
-        with row_cols[5]:
-            st.write(f"{float(bath):g}" if bath is not None else "—")
-        with row_cols[6]:
-            st.write(str(int(sqft)) if sqft is not None else "—")
-        with row_cols[7]:
-            st.write(_format_listing_price(listing))
-        with row_cols[8]:
-            st.write(_format_days_on_market(listing))
-        with row_cols[9]:
-            st.write(_format_match_score(listing))
-        with row_cols[10]:
-            st.caption(tags or "—")
-        with row_cols[11]:
-            st.caption(prox)
-        with row_cols[12]:
-            if st.button("Analyze", key=_analyze_button_key(listing, i)):
-                st.session_state["analyze_listing_id"] = listing.get("id")
-                st.session_state["analyze_listing"] = listing
-                st.rerun()
-
-
-_CARDS_PER_ROW = 3
-
-
-def _render_results_cards(listings: list[dict]) -> None:
-    """Render search results as a 3-column card grid. Photo and address open the listing."""
-    if not listings:
-        return
-    for row_start in range(0, len(listings), _CARDS_PER_ROW):
-        cols = st.columns(_CARDS_PER_ROW)
-        chunk = listings[row_start : row_start + _CARDS_PER_ROW]
-        for offset, listing in enumerate(chunk):
-            with cols[offset]:
-                url = listing.get("url") or ""
-                photo_url = listing.get("photo_url") or ""
-                i = row_start + offset
-                rank = listing.get("rank") if listing.get("rank") is not None else i + 1
-                bath = listing.get("bathrooms")
-                sqft = listing.get("sqft")
-                bath_txt = f"{float(bath):g}" if bath is not None else "—"
-                size_txt = str(int(sqft)) if sqft is not None else "—"
-                with st.container(border=True):
-                    _render_clickable_photo(photo_url, url, width=220)
-                    st.caption(f"#{rank}")
-                    # Use st.write (not Markdown) so scraped price text cannot inject links.
-                    st.write(_format_listing_price(listing))
-                    _render_clickable_address(listing.get("address") or "—", url)
-                    st.caption(
-                        f"{_format_bedrooms(listing)} bed · {bath_txt} bath · {size_txt} sqft"
-                    )
-                    score = _format_match_score(listing)
-                    if score != "—":
-                        st.caption(f"Match {score}")
-                    tags = _format_tags(listing)
-                    if tags:
-                        st.caption(tags)
-                    prox = _format_proximity_display(listing.get("proximity"))
-                    if prox and prox != "—":
-                        st.caption(prox)
-                    if st.button("Analyze", key=_analyze_button_key(listing, i)):
-                        st.session_state["analyze_listing_id"] = listing.get("id")
-                        st.session_state["analyze_listing"] = listing
-                        st.rerun()
-
-
-def _listings_cache_key(listings: list[dict]) -> str:
-    """Stable JSON string for listings, used as cache key. Lists/dicts must be hashable for st.cache_data."""
-    return json.dumps(listings, sort_keys=True, default=str)
-
-
-def _folium_marker_icon(label: str, url: str, label_mode: str):
-    """DivIcon for a map pin: circle+bold rank, or rectangle+normal-weight price."""
-    url_escaped = html.escape(url or "#")
-    label_escaped = html.escape(str(label))
-    if label_mode == "price":
-        marker_html = (
-            '<div style="font-size:12px;font-weight:normal;color:white;text-align:center;'
-            "line-height:20px;padding:1px 6px;min-width:54px;height:22px;border-radius:4px;"
-            'background-color:#4682B4;border:2px solid white;white-space:nowrap;">'
-            f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-            f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
-        )
-        return folium.DivIcon(icon_size=(72, 26), icon_anchor=(36, 13), html=marker_html)
-    marker_html = (
-        '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
-        "line-height:30px;width:30px;height:30px;border-radius:50%;"
-        'background-color:#4682B4;border:2px solid white;">'
-        f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-        f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
-    )
-    return folium.DivIcon(icon_size=(32, 32), icon_anchor=(16, 16), html=marker_html)
-
-
-def _add_folium_markers(m, map_points: list[dict], label_mode: str) -> None:
-    for pt in map_points:
-        folium.Marker(
-            location=[pt["lat"], pt["lon"]],
-            icon=_folium_marker_icon(pt["label"], pt.get("url") or "#", label_mode),
-        ).add_to(m)
-
-
-@st.cache_data(show_spinner=False)
-def _get_map_html_cached(listings_json: str, label_mode: str = "rank") -> str | None:
-    """Build Folium map HTML from listings. Returns None if no map or Folium unavailable.
-    Cached by listings content and label_mode so toggling rank/price rebuilds pins."""
-    if folium is None:
-        return None
-    listings = json.loads(listings_json) if listings_json else []
-    map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
-    if not map_points or center_lat is None or center_lon is None:
-        return None
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-    _add_folium_markers(m, map_points, label_mode)
-    return m._repr_html_()
-
-
-def _build_map_data(
-    listings: list[dict], label_mode: str = "rank"
-) -> tuple[list[dict], float | None, float | None]:
-    """Build list of {lat, lon, label, url} for listings with valid coordinates.
-    Returns (map_points, center_lat, center_lon). Center is None if no points.
-
-    Rank labels use each listing's 'rank' field (assigned by the LLM tool layer in client.py)
-    rather than position in this list, so map pin numbers stay correct even when this list
-    has been locally reordered for display (e.g. the proximity closest-first safeguard).
-    Price labels use compact currency from _format_map_price_label. Default label_mode is
-    "rank" so existing unit tests stay valid; the UI passes the session value (price by default).
-    """
-    points = []
-    lats, lons = [], []
-    for i, listing in enumerate(listings):
-        lat = listing.get("latitude")
-        lon = listing.get("longitude")
-        if lat is None or lon is None:
-            continue
-        try:
-            lat, lon = float(lat), float(lon)
-        except (TypeError, ValueError):
-            continue
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            continue
-        url = listing.get("url") or ""
-        if label_mode == "price":
-            label = _format_map_price_label(listing)
-        else:
-            label = str(listing.get("rank")) if listing.get("rank") is not None else str(i + 1)
-        points.append({"lat": lat, "lon": lon, "label": label, "url": url})
-        lats.append(lat)
-        lons.append(lon)
-    if not points:
-        return points, None, None
-    center_lat = sum(lats) / len(lats)
-    center_lon = sum(lons) / len(lons)
-    return points, center_lat, center_lon
-
-
-def _render_results_map(
-    map_points: list[dict],
-    center_lat: float,
-    center_lon: float,
-    label_mode: str = "rank",
-) -> None:
-    """Render a map with points labeled by rank or price (see _build_map_data).
-    Uses Folium for reliable label rendering; falls back to PyDeck if Folium is not available."""
-    if folium is not None:
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-        _add_folium_markers(m, map_points, label_mode)
-        st.components.v1.html(m._repr_html_(), height=400, scrolling=False)
-        return
-    if pdk is not None:
-        # Fallback: PyDeck (labels 10+ may not render due to deck.gl TextLayer bug)
-        scatter = pdk.Layer(
-            "ScatterplotLayer",
-            data=map_points,
-            get_position="[lon, lat]",
-            get_radius=200,
-            get_fill_color=[70, 130, 180],
-            radius_min_pixels=6,
-            radius_max_pixels=12,
-        )
-        text = pdk.Layer(
-            "TextLayer",
-            data=map_points,
-            get_position="[lon, lat]",
-            get_text="label",
-            get_size=14,
-            get_color=[255, 255, 255],
-            get_text_anchor="middle",
-            get_alignment_baseline="center",
-        )
-        view_state = pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
-            zoom=11,
-            pitch=0,
-        )
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[scatter, text],
-                initial_view_state=view_state,
-            ),
-            width='stretch',
-            height=400,
-        )
-        return
-    st.caption("Map unavailable: install folium (recommended) or pydeck to show results on a map.")
 
 
 def _inject_chat_blob_css() -> None:
@@ -1158,42 +698,7 @@ def main() -> None:
                             st.rerun()
 
     if listings:
-        st.segmented_control(
-            "Results view",
-            options=["cards", "table"],
-            format_func=lambda x: "Cards" if x == "cards" else "Table",
-            key="results_view",
-        )
-        with st.expander("Search results", expanded=True):
-            if st.session_state.get("results_view") == "table":
-                _render_results_table(listings)
-            else:
-                _render_results_cards(listings)
-        label_mode = st.session_state.get("map_label_mode") or "price"
-        map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
-        if map_points and center_lat is not None and center_lon is not None:
-            with st.expander("Search results map", expanded=True):
-                st.segmented_control(
-                    "Map labels",
-                    options=["price", "rank"],
-                    format_func=lambda x: "Price" if x == "price" else "Rank",
-                    key="map_label_mode",
-                )
-                label_mode = st.session_state.get("map_label_mode") or "price"
-                map_points, center_lat, center_lon = _build_map_data(
-                    listings, label_mode=label_mode
-                )
-                if folium is not None:
-                    map_html = _get_map_html_cached(_listings_cache_key(listings), label_mode)
-                    if map_html:
-                        st.components.v1.html(map_html, height=400, scrolling=False)
-                    else:
-                        _render_results_map(map_points, center_lat, center_lon, label_mode)
-                else:
-                    _render_results_map(map_points, center_lat, center_lon, label_mode)
-        elif not map_points:
-            with st.expander("Search results map", expanded=False):
-                st.caption("No map: addresses have no coordinates.")
+        render_search_results(listings)
     else:
         st.caption("Run a search to see results here.")
 

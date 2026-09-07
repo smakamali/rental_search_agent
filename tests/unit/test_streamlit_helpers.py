@@ -404,3 +404,19 @@ class TestApplyDefaultMatchScoreSort:
         result_by_id = {lst["id"]: lst for lst in result}
         assert result_by_id["a"]["rank"] == 1
         assert result_by_id["b"]["rank"] == 2
+
+    def test_prefers_match_score_over_semantic_score(self):
+        listings = [
+            {"id": "a", "rank": 1, "match_score": 0.2, "semantic_score": 0.99},
+            {"id": "b", "rank": 2, "match_score": 0.8, "semantic_score": 0.1},
+        ]
+        result = _apply_default_match_score_sort(listings)
+        assert [lst["id"] for lst in result] == ["b", "a"]
+
+    def test_invalid_scores_do_not_crash_or_reorder(self):
+        listings = [
+            {"id": "a", "rank": 1, "match_score": "n/a"},
+            {"id": "b", "rank": 2, "match_score": 0.5},
+        ]
+        result = _apply_default_match_score_sort(listings)
+        assert [lst["id"] for lst in result] == ["b", "a"]
