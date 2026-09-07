@@ -673,7 +673,9 @@ def _inject_chat_blob_css() -> None:
         <style>
         [class*="st-key-chat_blob"] {{
             position: fixed !important;
-            top: 0.75rem !important;
+            /* Clear Streamlit's top toolbar (Deploy / Stop / menu) so the collapse
+               control is not covered. Header is typically ~2.875–3.5rem. */
+            top: 3.75rem !important;
             right: 0.75rem !important;
             bottom: 0.75rem !important;
             left: auto !important;
