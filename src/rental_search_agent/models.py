@@ -1,8 +1,38 @@
 """Data models per technical spec §4 and §5."""
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Cap so a full Metro Vancouver picker selection (21 municipalities + Tsawwassen) fits.
+MAX_SEARCH_LOCATIONS = 22
+# Bound each city string so a 22-item list cannot carry unbounded payloads.
+MAX_SEARCH_LOCATION_CHARS = 200
+
+
+def normalize_search_locations(location: Union[str, list[str], None]) -> list[str]:
+    """Strip, drop blanks, and dedupe city names case-insensitively (first-seen order)."""
+    if location is None:
+        return []
+    raw = [location] if isinstance(location, str) else list(location)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        s = str(item).strip()
+        if not s:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def location_as_display(location: Union[str, list[str], None]) -> str:
+    """Join one or more search locations for summaries and scoring blobs."""
+    return ", ".join(normalize_search_locations(location))
+
 
 # (min_field, max_field) pairs that must satisfy min <= max when both are set.
 # Shared by RentalSearchFilters and ListingFilterCriteria, which mirror these bounds.
@@ -47,20 +77,63 @@ class RentalSearchFilters(BaseModel):
         ge=0,
         description="Maximum price (CAD/month when for_rent; list price CAD when for_sale).",
     )
-    location: str = Field(
+    location: Union[str, list[str]] = Field(
         ...,
-        min_length=1,
-        description="Location string (city or 'City, Province', e.g. Vancouver or Vancouver, BC).",
+        description=(
+            "City or 'City, Province' (e.g. Vancouver or Vancouver, BC), or a list of "
+            "cities for a multi-city search. Metro/region names are not valid here — "
+            "expand them and confirm cities first."
+        ),
     )
     listing_type: Optional[Literal["for_rent", "for_sale"]] = Field(
         default="for_rent",
         description="Transaction type: for_rent or for_sale.",
     )
 
+    @field_validator("location", mode="before")
+    @classmethod
+    def _normalize_location(cls, value: Any) -> Union[str, list[str]]:
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                raise ValueError("location must be a non-empty string or list of city names.")
+            if len(s) > MAX_SEARCH_LOCATION_CHARS:
+                raise ValueError(
+                    f"location entries must be at most {MAX_SEARCH_LOCATION_CHARS} characters."
+                )
+            return s
+        if isinstance(value, list):
+            for item in value:
+                if item is None:
+                    continue
+                if len(str(item).strip()) > MAX_SEARCH_LOCATION_CHARS:
+                    raise ValueError(
+                        f"location entries must be at most {MAX_SEARCH_LOCATION_CHARS} characters."
+                    )
+            locs = normalize_search_locations(value)
+            if not locs:
+                raise ValueError("location must contain at least one non-empty city name.")
+            if len(locs) > MAX_SEARCH_LOCATIONS:
+                raise ValueError(
+                    f"location may contain at most {MAX_SEARCH_LOCATIONS} cities "
+                    f"(got {len(locs)})."
+                )
+            # Keep single-city callers as a string so existing tests and dumps stay stable.
+            return locs[0] if len(locs) == 1 else locs
+        raise ValueError("location must be a string or a list of strings.")
+
     @model_validator(mode="after")
     def _validate_min_max(self) -> "RentalSearchFilters":
         _check_min_max_pairs(self)
         return self
+
+    def location_list(self) -> list[str]:
+        """City strings to scrape, always a non-empty unique list."""
+        return normalize_search_locations(self.location)
+
+    def location_display(self) -> str:
+        """Comma-separated cities for summaries and preference blobs."""
+        return location_as_display(self.location)
 
 
 class Listing(BaseModel):
@@ -212,11 +285,26 @@ class ListingFilterCriteria(BaseModel):
         return self
 
 
+class FailedSearchLocation(BaseModel):
+    """One city that failed during a multi-city (or single-city) search."""
+
+    location: str = Field(..., min_length=1, description="City that was searched.")
+    error: str = Field(..., min_length=1, description="User-facing error for that city.")
+
+
 class RentalSearchResponse(BaseModel):
     """§5.2 rental_search response."""
 
     listings: list[Listing] = Field(..., description="List of listings.")
     total_count: int = Field(..., ge=0, description="Total number of listings.")
+    searched_locations: list[str] = Field(
+        default_factory=list,
+        description="Cities whose scrapes succeeded (subset of requested locations).",
+    )
+    failed_locations: list[FailedSearchLocation] = Field(
+        default_factory=list,
+        description="Cities whose scrapes failed; empty when every city succeeded.",
+    )
 
 
 class AskUserAnswerResponse(BaseModel):

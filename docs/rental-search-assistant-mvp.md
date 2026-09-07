@@ -135,7 +135,8 @@ User says something like:
 | Kind  | Name | Role |
 |-------|------|------|
 | Tool  | `ask_user(prompt, choices[], allow_multiple?)` | Same tool for clarification (single answer) and approval (multi-select). Use `allow_multiple: true` for “which listings?”; false/omitted for viewing times, geography, etc. |
-| Tool  | `rental_search(filters)` | Search one rental engine; return listing list. |
+| Tool  | `expand_search_region(region)` | Expand a named metro into municipality labels and search_location strings; then `ask_user` before search. |
+| Tool  | `rental_search(filters)` | Search one rental engine; `location` may be one city or a list of cities (parallel scrape, merged list). |
 | Tool  | `filter_listings(filters?, sort_by?, ascending?, proximity_rules?)` | Narrow and/or sort current search results in-memory. Optional proximity_rules (from parse_proximity_preferences) filter by AND; unknown proximity keeps listing. Operates on last rental_search/filter_listings/enrich_listings_with_proximity result. |
 | Tool  | `summarize_listings()` | Compute statistics (price, bedrooms, bathrooms, size, property types) for current results. Operates on last rental_search/filter_listings result. |
 | Tool  | `parse_proximity_preferences(proximity_text)` | Parse free-text proximity prefs into structured rules. |

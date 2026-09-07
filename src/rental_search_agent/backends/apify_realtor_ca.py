@@ -131,7 +131,7 @@ def filters_to_run_input(filters: RentalSearchFilters, max_items: int) -> dict[s
     operation = "rent" if listing_type == "for_rent" else "buy"
     run_input: dict[str, Any] = {
         "maxItems": max_items,
-        "location": filters.location,
+        "location": filters.location_list()[0],
         "operation": operation,
         "sortBy": "newest",
         "minBeds": filters.min_bedrooms,

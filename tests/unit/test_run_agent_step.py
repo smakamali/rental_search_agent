@@ -26,21 +26,28 @@ def _make_final_reply(content: str = "Here are the results.") -> MagicMock:
     return resp
 
 
-def _make_tool_call_reply(name: str, arguments: dict, call_id: str = "call-1") -> MagicMock:
-    """LLM returns a response requesting one tool call."""
-    tc = MagicMock()
-    tc.id = call_id
-    tc.function.name = name
-    tc.function.arguments = json.dumps(arguments)
-
+def _make_multi_tool_call_reply(calls: list[tuple[str, dict, str]]) -> MagicMock:
+    """LLM returns a response requesting several tool calls in one round."""
+    tcs = []
+    for name, arguments, call_id in calls:
+        tc = MagicMock()
+        tc.id = call_id
+        tc.function.name = name
+        tc.function.arguments = json.dumps(arguments)
+        tcs.append(tc)
     msg = MagicMock()
     msg.content = ""
-    msg.tool_calls = [tc]
+    msg.tool_calls = tcs
     choice = MagicMock()
     choice.message = msg
     resp = MagicMock()
     resp.choices = [choice]
     return resp
+
+
+def _make_tool_call_reply(name: str, arguments: dict, call_id: str = "call-1") -> MagicMock:
+    """LLM returns a response requesting one tool call."""
+    return _make_multi_tool_call_reply([(name, arguments, call_id)])
 
 
 def _make_client(*responses) -> tuple[MagicMock, str]:
@@ -124,6 +131,39 @@ class TestRunAgentStepToolCall:
         for tm in tool_msgs:
             parsed = json.loads(tm["content"])
             assert isinstance(parsed, (dict, list))
+
+    def test_two_rental_search_calls_in_one_batch_merge_master_list(self):
+        """If the model still emits one rental_search per city in the same round,
+        the client must merge masters instead of keeping only the last city."""
+        van = RentalSearchResponse(
+            listings=[sample_listing(id="van-1", address="Vancouver")],
+            total_count=1,
+        )
+        burn = RentalSearchResponse(
+            listings=[sample_listing(id="burn-1", address="Burnaby")],
+            total_count=1,
+        )
+
+        def _search(filters):
+            loc = filters.location if isinstance(filters.location, str) else filters.location[0]
+            return van if "Vancouver" in loc else burn
+
+        tool_call = _make_multi_tool_call_reply(
+            [
+                ("rental_search", {"filters": {"min_bedrooms": 2, "location": "Vancouver, BC"}}, "c1"),
+                ("rental_search", {"filters": {"min_bedrooms": 2, "location": "Burnaby, BC"}}, "c2"),
+            ]
+        )
+        final = _make_final_reply("Combined.")
+        with patch("rental_search_agent.client.search", side_effect=_search):
+            client, model = _make_client(tool_call, final)
+            messages = _base_messages() + [{"role": "user", "content": "Search Vancouver and Burnaby"}]
+            _updated, _payload, listing_state = run_agent_step(client, model, messages)
+
+        assert listing_state is not None
+        ids = [lst["id"] for lst in listing_state["master_list"]]
+        assert ids == ["van-1", "burn-1"]
+        assert listing_state["display_list"] == listing_state["master_list"]
 
 
 # ---------------------------------------------------------------------------

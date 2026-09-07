@@ -204,7 +204,11 @@ def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:
 
     for text_key in ("proximity_preferences", "location", "listing_type"):
         if text_key in chat and chat.get(text_key) is not None:
-            s = str(chat.get(text_key) or "").strip()
+            raw = chat.get(text_key)
+            if text_key == "location" and isinstance(raw, list):
+                s = ", ".join(str(x).strip() for x in raw if x and str(x).strip())
+            else:
+                s = str(raw or "").strip()
             if s:
                 out[text_key] = s
 

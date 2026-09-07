@@ -37,6 +37,7 @@ from rental_search_agent.preference_resolution import (
     qualitative_from_preferences_text,
 )
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
+from rental_search_agent.search_regions import expand_search_region as do_expand_search_region
 from rental_search_agent.viewing_plan import (
     _compute_unused_slots,
     draft_viewing_plan as do_draft_viewing_plan,
@@ -69,8 +70,16 @@ def ask_user(
 
 
 @mcp.tool()
+def expand_search_region(region: str) -> dict[str, Any]:
+    """Expand a named Canadian metro/region into municipality labels and search_location strings. Call when the user names a metro or greater area, then ask_user (allow_multiple=true) with the labels before rental_search. Returns { region, cities: [{ label, search_location }] } or { error }."""
+    if not isinstance(region, str) or not region.strip():
+        raise ValueError("region is required and must be a non-empty string.")
+    return do_expand_search_region(region.strip())
+
+
+@mcp.tool()
 def rental_search(filters: dict[str, Any]) -> RentalSearchResponse:
-    """Run a single logical search for rental listings. Returns listings and total_count. Requires min_bedrooms and location in filters. On backend failure returns an error (never empty list)."""
+    """Run a single logical search for rental listings. location may be one city or a list of cities (scraped in parallel and merged). Returns listings, total_count, searched_locations, and failed_locations. Requires min_bedrooms and location. Do not pass a metro name. On total backend failure returns an error (never empty list)."""
     try:
         f = RentalSearchFilters.model_validate(filters)
     except Exception as e:

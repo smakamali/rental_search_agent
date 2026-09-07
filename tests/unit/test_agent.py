@@ -87,6 +87,7 @@ class TestFlowInstructions:
         instructions = flow_instructions()
         assert "property search assistant" in instructions.lower()
         assert "rental_search" in instructions or "rental search" in instructions
+        assert "expand_search_region" in instructions
         assert "draft_viewing_plan" in instructions
         assert "calendar_get_available_slots" in instructions
 
@@ -97,3 +98,9 @@ class TestFlowInstructions:
         # re-sort locally, which desyncs the displayed Rank column from that order.
         instructions = flow_instructions()
         assert 'sort_by="proximity"' in instructions
+
+    def test_multi_city_flow_instructions(self):
+        instructions = flow_instructions()
+        assert "Do NOT call rental_search once per city" in instructions
+        assert "bare city" in instructions.lower() or "A **bare city**" in instructions
+        assert "explicit cities" in instructions.lower()
