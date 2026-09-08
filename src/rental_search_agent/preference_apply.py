@@ -190,6 +190,14 @@ def prepare_sidebar_search(
             spinner=_scrape_spinner(filters),
         )
 
+    warnings: list[str] = []
+    if _pref_text(previous_prefs, "min_bedrooms") and not _pref_text(new_prefs, "min_bedrooms"):
+        warnings.append("Enter a minimum bedroom count to search.")
+    if _pref_text(previous_prefs, "location") and not _pref_text(new_prefs, "location"):
+        warnings.append("Enter a location to search.")
+    if warnings:
+        return SidebarSearchRequest(kind="error", warnings=warnings)
+
     filters = overlay_structural_on_search_filters(
         last_filters, new_prefs, previous_prefs=previous_prefs
     )
@@ -257,7 +265,10 @@ def overlay_structural_on_search_filters(
         if listing_type:
             out["listing_type"] = listing_type
 
-    if "min_bedrooms" not in out or out.get("min_bedrooms") is None:
+    beds_cleared = previous_prefs is not None and bool(
+        _pref_text(previous_prefs, "min_bedrooms")
+    ) and not _pref_text(prefs, "min_bedrooms")
+    if ("min_bedrooms" not in out or out.get("min_bedrooms") is None) and not beds_cleared:
         out["min_bedrooms"] = last_filters.get("min_bedrooms", 0)
 
     if not out.get("listing_type"):

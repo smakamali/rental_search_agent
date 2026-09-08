@@ -140,6 +140,13 @@ class TestOverlayStructuralOnSearchFilters:
         assert out["price_max"] == 2500.0
         assert out["listing_type"] == "for_rent"
 
+    def test_cleared_min_bedrooms_is_not_restored_from_last_search(self):
+        last = {"min_bedrooms": 2, "location": "Vancouver, BC", "listing_type": "for_rent"}
+        previous = {"min_bedrooms": "2", "location": "Vancouver"}
+        prefs = {"min_bedrooms": "", "location": "Vancouver"}
+        out = overlay_structural_on_search_filters(last, prefs, previous_prefs=previous)
+        assert "min_bedrooms" not in out or out.get("min_bedrooms") is None
+
     def test_location_change_uses_expanded_metro_list(self):
         last = {
             "min_bedrooms": 2,
@@ -197,6 +204,23 @@ class TestPrepareSidebarSearch:
             last_filters={"location": "Vancouver, BC", "min_bedrooms": 2},
         )
         assert req.kind == "rerank"
+
+    def test_cleared_min_bedrooms_on_existing_search_errors(self):
+        previous = {
+            "location": "Vancouver",
+            "listing_type": "for_rent",
+            "min_bedrooms": "2",
+        }
+        prefs = dict(previous)
+        prefs["min_bedrooms"] = ""
+        req = prepare_sidebar_search(
+            prefs,
+            previous,
+            has_master=True,
+            last_filters={"location": "Vancouver, BC", "min_bedrooms": 2},
+        )
+        assert req.kind == "error"
+        assert any("bedroom" in w.lower() for w in req.warnings)
 
     def test_hard_key_change_scrapes_with_overlay(self):
         previous = {

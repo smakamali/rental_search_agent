@@ -729,6 +729,45 @@ def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | No
     return None
 
 
+_ENRICHMENT_KEYS = ("proximity", "semantic_score", "match_score", "score_breakdown")
+
+
+def overlay_enrichment_on_master(
+    master: list[dict] | None,
+    enriched: list[dict] | None,
+) -> list[dict]:
+    """Return the full scrape corpus with score/proximity fields copied from a later result.
+
+    ``apply_search_preferences`` and enrich/score may drop listings. Chat ``filter_listings``
+    must still be able to restore them when the user relaxes criteria, while keeping
+    match scores on listings that were scored.
+    """
+    master = list(master or [])
+    enriched = list(enriched or [])
+    if not master:
+        return enriched
+    if not enriched:
+        return master
+    by_id = {
+        item["id"]: item
+        for item in enriched
+        if isinstance(item, dict) and item.get("id")
+    }
+    out: list[dict] = []
+    for item in master:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        d = dict(item)
+        extra = by_id.get(d.get("id"))
+        if extra:
+            for key in _ENRICHMENT_KEYS:
+                if extra.get(key) is not None:
+                    d[key] = extra[key]
+        out.append(d)
+    return out
+
+
 def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
     """Return listings from the most recent "master" enrichment result: whichever of
     enrich_listings_with_proximity or score_listings_by_preferences ran more recently.
@@ -1528,15 +1567,20 @@ def run_agent_step_events(
                     args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                # filter_listings always re-filters from the master (enriched if available, else raw)
-                # so that relaxing filters never requires a new rental_search call.
+                # filter_listings always re-filters from the raw scrape, with score/proximity
+                # fields copied from a later apply/enrich/score result. Using the apply corpus
+                # alone would prevent relaxing structural or proximity constraints.
                 # summarize_listings uses current_listings (the latest filtered view for same-turn chaining).
                 if name == "filter_listings":
-                    filter_source = enriched_master or master_listings
+                    filter_source = overlay_enrichment_on_master(
+                        master_listings, enriched_master
+                    )
                 elif name == "summarize_listings":
                     filter_source = current_listings
                 elif name == "score_listings_by_preferences":
-                    filter_source = enriched_master or master_listings
+                    filter_source = overlay_enrichment_on_master(
+                        master_listings, enriched_master
+                    )
                 elif name == "enrich_listings_with_proximity":
                     # Use in-memory listings so the LLM doesn't need to pass them as
                     # arguments, keeping the full listing JSON out of the LLM's output tokens.

@@ -419,15 +419,21 @@ class TestRunAgentStepAskUser:
 # ---------------------------------------------------------------------------
 
 class TestRunAgentStepFilterSource:
-    def test_filter_listings_uses_enriched_master_over_raw(self):
-        """When enriched master exists in history, filter_listings uses it (not raw search)."""
-        enriched_listings = [
-            sample_listing(id="e-1", bedrooms=2).model_dump() | {"proximity": {"Downtown Vancouver|drive": {"distance_km": 5.0, "duration_min": 10.0}}},
-            sample_listing(id="e-2", bedrooms=1).model_dump() | {"proximity": {"Downtown Vancouver|drive": None}},
+    def test_filter_listings_keeps_enrichment_from_full_scrape(self):
+        """filter_listings starts from the raw scrape and copies proximity/scores onto matching ids."""
+        raw_listings = [
+            sample_listing(id="e-1", bedrooms=2).model_dump(),
+            sample_listing(id="e-2", bedrooms=1).model_dump(),
         ]
-        raw_listings = [sample_listing(id="r-1", bedrooms=3).model_dump()]
+        enriched_listings = [
+            raw_listings[0] | {
+                "proximity": {
+                    "Downtown Vancouver|drive": {"distance_km": 5.0, "duration_min": 10.0}
+                }
+            },
+            raw_listings[1] | {"proximity": {"Downtown Vancouver|drive": None}},
+        ]
 
-        # History: a rental_search result followed by an enriched result
         messages = _base_messages() + [
             {"role": "user", "content": "Search"},
             {
@@ -435,7 +441,7 @@ class TestRunAgentStepFilterSource:
                 "content": "",
                 "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "rental_search", "arguments": "{}"}}],
             },
-            {"role": "tool", "tool_call_id": "tc1", "content": json.dumps({"listings": raw_listings, "total_count": 1})},
+            {"role": "tool", "tool_call_id": "tc1", "content": json.dumps({"listings": raw_listings, "total_count": 2})},
             {
                 "role": "assistant",
                 "content": "",
@@ -444,7 +450,6 @@ class TestRunAgentStepFilterSource:
             {"role": "tool", "tool_call_id": "tc2", "content": json.dumps({"listings": enriched_listings, "total_count": 2})},
         ]
 
-        # Now LLM issues a filter_listings call → should filter from enriched (2 listings)
         tool_call = _make_tool_call_reply(
             "filter_listings",
             {"min_bedrooms": 2},
@@ -456,16 +461,82 @@ class TestRunAgentStepFilterSource:
         updated, payload, _ = run_agent_step(client, model, messages)
 
         assert payload is None
-        # Find the tool result for filter_listings
         filter_result = None
         for m in updated:
             if m.get("role") == "tool" and m.get("tool_call_id") == "tc3":
                 filter_result = json.loads(m["content"])
                 break
         assert filter_result is not None
-        # Should have filtered from 2 enriched listings (only bedrooms>=2 → 1 result: e-1)
         assert filter_result["total_count"] == 1
         assert filter_result["listings"][0]["id"] == "e-1"
+        assert filter_result["listings"][0]["proximity"]
+
+    def test_filter_listings_can_restore_listings_dropped_by_apply(self):
+        """Relaxing after apply_search_preferences re-filters from the full scrape."""
+        raw_listings = [
+            sample_listing(id="cheap", bedrooms=2, price=2000.0).model_dump(),
+            sample_listing(id="steep", bedrooms=2, price=4000.0).model_dump(),
+        ]
+        applied = [
+            raw_listings[0] | {"match_score": 0.9},
+        ]
+        messages = _base_messages() + [
+            {"role": "user", "content": "Search"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "rental_search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "content": json.dumps({"listings": raw_listings, "total_count": 2}),
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc2",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_search_preferences",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc2",
+                "content": json.dumps({"listings": applied, "total_count": 1}),
+            },
+        ]
+        tool_call = _make_tool_call_reply(
+            "filter_listings",
+            {"min_bedrooms": 2},
+            call_id="tc3",
+        )
+        final = _make_final_reply("Relaxed.")
+        client, model = _make_client(tool_call, final)
+        updated, payload, _ = run_agent_step(client, model, messages)
+        assert payload is None
+        filter_result = None
+        for m in updated:
+            if m.get("role") == "tool" and m.get("tool_call_id") == "tc3":
+                filter_result = json.loads(m["content"])
+                break
+        assert filter_result is not None
+        ids = {lst["id"] for lst in filter_result["listings"]}
+        assert ids == {"cheap", "steep"}
+        cheap = next(lst for lst in filter_result["listings"] if lst["id"] == "cheap")
+        assert cheap["match_score"] == 0.9
 
 
 # ---------------------------------------------------------------------------
