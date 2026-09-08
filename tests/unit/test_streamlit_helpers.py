@@ -24,6 +24,7 @@ from rental_search_agent.streamlit_app import (
     _load_preferences_from_file,
     _preferences_block,
     _preferences_file,
+    _run_sidebar_search,
     _save_preferences_to_file,
 )
 
@@ -86,6 +87,15 @@ class TestPreferencesBlock:
         assert "budget_max = '2800'" in result
         assert "min_bedrooms = '2'" in result
         assert "name =" not in result
+
+    def test_with_location_and_listing_type(self):
+        prefs = {k: "" for k in PREF_KEYS}
+        prefs["location"] = "Metro Vancouver"
+        prefs["listing_type"] = "for_rent"
+        result = _preferences_block(prefs)
+        assert "location = 'Metro Vancouver'" in result
+        assert "listing_type = 'for_rent'" in result
+        assert "Search Preferences Search button" in result
 
 
 class TestLoadPreferencesFromFile:
@@ -420,3 +430,70 @@ class TestApplyDefaultMatchScoreSort:
         ]
         result = _apply_default_match_score_sort(listings)
         assert [lst["id"] for lst in result] == ["b", "a"]
+
+
+class TestRunSidebarSearch:
+    def _session(self, **kwargs):
+        state = {
+            "search_master": [],
+            "messages": [{"role": "system", "content": "sys"}],
+            "apply_warnings": [],
+            "display_list": [],
+            "master_list": [],
+            "display_source": None,
+            "last_sort_by": None,
+        }
+        state.update(kwargs)
+        return state
+
+    def test_first_search_calls_search_when_location_and_beds_set(self):
+        from tests.fixtures.sample_data import sample_listing
+
+        session = self._session()
+        listing = sample_listing().model_dump()
+        resp = type("Resp", (), {"model_dump": lambda self: {"listings": [listing]}})()
+
+        with (
+            patch("rental_search_agent.streamlit_app.st") as mock_st,
+            patch(
+                "rental_search_agent.streamlit_app.search", return_value=resp
+            ) as mock_search,
+        ):
+            mock_st.session_state = session
+            _run_sidebar_search(
+                {
+                    "location": "Vancouver",
+                    "min_bedrooms": "2",
+                    "listing_type": "for_rent",
+                },
+                {},
+            )
+        mock_search.assert_called_once()
+        filters = mock_search.call_args[0][0]
+        assert filters.location == "Vancouver"
+        assert filters.min_bedrooms == 2
+        assert filters.listing_type == "for_rent"
+        assert session["search_master"]
+
+    def test_first_search_missing_location_does_not_call_search(self):
+        session = self._session()
+        with (
+            patch("rental_search_agent.streamlit_app.st") as mock_st,
+            patch("rental_search_agent.streamlit_app.search") as mock_search,
+        ):
+            mock_st.session_state = session
+            _run_sidebar_search({"location": "", "min_bedrooms": "2"}, {})
+        mock_search.assert_not_called()
+        assert session["apply_warnings"]
+        assert any("location" in w.lower() for w in session["apply_warnings"])
+
+    def test_first_search_missing_beds_does_not_call_search(self):
+        session = self._session()
+        with (
+            patch("rental_search_agent.streamlit_app.st") as mock_st,
+            patch("rental_search_agent.streamlit_app.search") as mock_search,
+        ):
+            mock_st.session_state = session
+            _run_sidebar_search({"location": "Vancouver", "min_bedrooms": ""}, {})
+        mock_search.assert_not_called()
+        assert any("bedroom" in w.lower() for w in session["apply_warnings"])

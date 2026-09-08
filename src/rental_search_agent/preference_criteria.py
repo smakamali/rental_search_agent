@@ -58,7 +58,7 @@ AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature("pets", "Pet-friendly", ("pet friendly", "pet-friendly", "pets allowed", "cats ok", "dogs ok", "pets ok")),
     AmenityFeature("laundry", "In-suite laundry", ("in-suite laundry", "in suite laundry", "washer", "dryer", "laundry")),
     AmenityFeature("dishwasher", "Dishwasher", ("dishwasher",)),
-    AmenityFeature("ac", "Air conditioning", ("air conditioning", "a/c", " aircon", "central air")),
+    AmenityFeature("ac", "Air conditioning", ("air conditioning", "a/c", " aircon", "central air", "air conditioner", "Air Conditioner", "A/C")),
     AmenityFeature("storage", "Storage", ("storage", "locker")),
     AmenityFeature("ev", "EV charger", ("ev charger", "ev charging", "electric vehicle")),
     AmenityFeature("elevator", "Elevator", ("elevator", "lift")),

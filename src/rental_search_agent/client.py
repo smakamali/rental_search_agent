@@ -34,6 +34,13 @@ from rental_search_agent.models import (
     location_as_display,
     MAX_SEARCH_LOCATIONS,
 )
+from rental_search_agent.preference_apply import (
+    APPLY_TOOL_NAME,
+    apply_search_preferences,
+    make_apply_tool_messages,
+    pipeline_needed,
+    with_display_rank as _with_display_rank,
+)
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     fill_empty_stored_from_chat,
@@ -100,22 +107,6 @@ def _persist_fill_in_from_chat(chat_criteria: dict | None) -> None:
     filled = fill_empty_stored_from_chat(stored, chat_criteria)
     if filled != stored:
         _save_preferences_to_file(filled)
-
-
-def _with_display_rank(listings: list[dict]) -> list[dict]:
-    """Attach an explicit 1-based 'rank' to each listing dict, matching the exact array
-    order the UI renders (see streamlit_app._listings_to_table_rows, which numbers rows
-    by position in this same array). Without an explicit field, the LLM has to infer
-    'listing N' by counting position in a large embedded JSON blob — which smaller/faster
-    models can get wrong (e.g. answering about listing 10 when asked about listing 1).
-    Recomputed fresh on every tool result, since filtering/sorting/enrichment changes order.
-    """
-    out = []
-    for i, listing in enumerate(listings):
-        d = dict(listing) if isinstance(listing, dict) else listing
-        d["rank"] = i + 1
-        out.append(d)
-    return out
 
 
 def _merge_listing_dicts(existing: list[dict], incoming: list[dict]) -> list[dict]:
@@ -646,20 +637,76 @@ def _get_active_search_criteria_from_messages(messages: list[dict]) -> dict:
 
 
 def _get_parsed_proximity_rules_from_messages(messages: list[dict]) -> list[dict]:
-    """Return the rules list from the most recent parse_proximity_preferences result, for
-    building the search_criteria_to_text_blob() query's proximity phrase. Unlike
-    _get_enriched_master_from_messages, this is not reset by a new rental_search — proximity
-    preferences are a user-level setting, not tied to a particular search.
+    """Return the rules list from the most recent parse_proximity_preferences or
+    apply_search_preferences result. Unlike _get_enriched_master_from_messages, this is
+    not reset by a new rental_search — proximity preferences are a user-level setting.
     """
-    idx = _tool_result_message_index(messages, "parse_proximity_preferences")
-    if idx is None:
+    parse_idx = _tool_result_message_index(messages, "parse_proximity_preferences")
+    apply_idx = _tool_result_message_index(messages, APPLY_TOOL_NAME)
+    candidates = [i for i in (parse_idx, apply_idx) if i is not None]
+    if not candidates:
         return []
+    idx = max(candidates)
     try:
         data = json.loads(messages[idx].get("content") or "{}")
     except (json.JSONDecodeError, TypeError):
         return []
     rules = data.get("rules") if isinstance(data, dict) else None
     return rules if isinstance(rules, list) else []
+
+
+def get_last_rental_search_filters(messages: list[dict]) -> dict | None:
+    """Return the filters dict from the most recent rental_search tool call, or None."""
+    last: dict | None = None
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if fn.get("name") != "rental_search":
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            filters = args.get("filters")
+            if isinstance(filters, dict) and filters:
+                last = dict(filters)
+    return last
+
+
+def _splice_apply_before_ask_user(
+    assistant_msg: dict, tool_results: list[dict], result
+) -> None:
+    """Insert synthetic apply tool_call + result before a pending ask_user in this batch.
+
+    ask_user pauses with incomplete tool results; a separate assistant pair after that
+    would sit in the middle of the open tool_calls. Splicing keeps completed results
+    (including apply) before the unanswered ask_user call.
+    """
+    apply_pair = make_apply_tool_messages(result)
+    apply_tc = apply_pair[0]["tool_calls"][0]
+    tcs = list(assistant_msg.get("tool_calls") or [])
+    ask_idx = next(
+        (
+            i
+            for i, tc in enumerate(tcs)
+            if (tc.get("function") or {}).get("name") == "ask_user"
+        ),
+        len(tcs),
+    )
+    tcs.insert(ask_idx, apply_tc)
+    assistant_msg["tool_calls"] = tcs
+    tool_results.append(apply_pair[1])
+
+
+_POST_APPLY_LISTING_TOOLS = frozenset(
+    {
+        "filter_listings",
+        "enrich_listings_with_proximity",
+        "score_listings_by_preferences",
+    }
+)
 
 
 def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | None:
@@ -680,6 +727,45 @@ def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | No
         if id_to_name.get(msg.get("tool_call_id")) == tool_name:
             return i
     return None
+
+
+_ENRICHMENT_KEYS = ("proximity", "semantic_score", "match_score", "score_breakdown")
+
+
+def overlay_enrichment_on_master(
+    master: list[dict] | None,
+    enriched: list[dict] | None,
+) -> list[dict]:
+    """Return the full scrape corpus with score/proximity fields copied from a later result.
+
+    ``apply_search_preferences`` and enrich/score may drop listings. Chat ``filter_listings``
+    must still be able to restore them when the user relaxes criteria, while keeping
+    match scores on listings that were scored.
+    """
+    master = list(master or [])
+    enriched = list(enriched or [])
+    if not master:
+        return enriched
+    if not enriched:
+        return master
+    by_id = {
+        item["id"]: item
+        for item in enriched
+        if isinstance(item, dict) and item.get("id")
+    }
+    out: list[dict] = []
+    for item in master:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        d = dict(item)
+        extra = by_id.get(d.get("id"))
+        if extra:
+            for key in _ENRICHMENT_KEYS:
+                if extra.get(key) is not None:
+                    d[key] = extra[key]
+        out.append(d)
+    return out
 
 
 def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
@@ -705,7 +791,8 @@ def _get_enriched_master_from_messages(messages: list[dict]) -> list[dict]:
     """
     enrich_idx = _tool_result_message_index(messages, "enrich_listings_with_proximity")
     score_idx = _tool_result_message_index(messages, "score_listings_by_preferences")
-    candidates = [i for i in (enrich_idx, score_idx) if i is not None]
+    apply_idx = _tool_result_message_index(messages, APPLY_TOOL_NAME)
+    candidates = [i for i in (enrich_idx, score_idx, apply_idx) if i is not None]
     if not candidates:
         return []
     latest_idx = max(candidates)
@@ -1225,6 +1312,12 @@ def _infer_last_sort_by(messages: list[dict]) -> str | None:
                 last_sort_by = None
             elif name == "score_listings_by_preferences":
                 last_sort_by = "match_score"
+            elif name == APPLY_TOOL_NAME:
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                last_sort_by = args.get("last_sort_by")
             elif name == "filter_listings":
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
@@ -1261,16 +1354,24 @@ def _infer_display_source_from_messages(messages: list[dict]) -> str | None:
                 display_source = "enrich"
             elif name == "score_listings_by_preferences":
                 display_source = "score"
+            elif name == APPLY_TOOL_NAME:
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                display_source = args.get("display_source") or "score"
     return display_source
 
 
 def _listing_state_from_messages(messages: list[dict]) -> dict | None:
-    """Build listing_state (display_list, master_list, display_source, last_sort_by) from message history."""
+    """Build listing_state (display_list, master_list, search_master, display_source, last_sort_by)."""
     display_list = _get_current_listings_from_messages(messages)
-    master_list = _get_enriched_master_from_messages(messages) or _get_master_listings_from_messages(messages)
+    search_master = _get_master_listings_from_messages(messages)
+    master_list = _get_enriched_master_from_messages(messages) or search_master
     return {
         "display_list": display_list or [],
         "master_list": master_list or [],
+        "search_master": search_master or [],
         "display_source": _infer_display_source_from_messages(messages),
         "last_sort_by": _infer_last_sort_by(messages),
     }
@@ -1454,7 +1555,8 @@ def run_agent_step_events(
             active_search_criteria = _get_active_search_criteria_from_messages(messages)
             parsed_proximity_rules = _get_parsed_proximity_rules_from_messages(messages)
             batch_search_count = 0
-            for tc in tool_calls_raw:
+            pending_apply_result = None
+            for i, tc in enumerate(tool_calls_raw):
                 name = tc["name"]
                 seq += 1
                 label = TOOL_STATUS_LABELS.get(name)
@@ -1465,15 +1567,20 @@ def run_agent_step_events(
                     args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                # filter_listings always re-filters from the master (enriched if available, else raw)
-                # so that relaxing filters never requires a new rental_search call.
+                # filter_listings always re-filters from the raw scrape, with score/proximity
+                # fields copied from a later apply/enrich/score result. Using the apply corpus
+                # alone would prevent relaxing structural or proximity constraints.
                 # summarize_listings uses current_listings (the latest filtered view for same-turn chaining).
                 if name == "filter_listings":
-                    filter_source = enriched_master or master_listings
+                    filter_source = overlay_enrichment_on_master(
+                        master_listings, enriched_master
+                    )
                 elif name == "summarize_listings":
                     filter_source = current_listings
                 elif name == "score_listings_by_preferences":
-                    filter_source = enriched_master or master_listings
+                    filter_source = overlay_enrichment_on_master(
+                        master_listings, enriched_master
+                    )
                 elif name == "enrich_listings_with_proximity":
                     # Use in-memory listings so the LLM doesn't need to pass them as
                     # arguments, keeping the full listing JSON out of the LLM's output tokens.
@@ -1541,6 +1648,65 @@ def run_agent_step_events(
                             batch_search_count += 1
                             current_listings = master_listings
                             display_source = "search"
+                            remaining_searches = sum(
+                                1
+                                for t in tool_calls_raw[i + 1 :]
+                                if t.get("name") == "rental_search"
+                            )
+                            if remaining_searches == 0 and master_listings:
+                                stored = _load_preferences_from_file()
+                                effective = merge_chat_over_stored(
+                                    stored, active_search_criteria
+                                )
+                                if pipeline_needed(effective):
+                                    seq += 1
+                                    apply_label = TOOL_STATUS_LABELS.get(
+                                        APPLY_TOOL_NAME, "Applying search preferences..."
+                                    )
+                                    yield {
+                                        "type": "tool_start",
+                                        "name": APPLY_TOOL_NAME,
+                                        "label": apply_label,
+                                        "seq": seq,
+                                    }
+                                    apply_ok = True
+                                    try:
+                                        pending_apply_result = apply_search_preferences(
+                                            master_listings, effective
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "Automatic preference pipeline failed after rental_search"
+                                        )
+                                        apply_ok = False
+                                        pending_apply_result = None
+                                    yield {
+                                        "type": "tool_end",
+                                        "name": APPLY_TOOL_NAME,
+                                        "label": apply_label,
+                                        "ok": apply_ok,
+                                        "seq": seq,
+                                    }
+                                    if (
+                                        pending_apply_result
+                                        and pending_apply_result.applied
+                                    ):
+                                        current_listings = pending_apply_result.listings
+                                        enriched_master = pending_apply_result.listings
+                                        if pending_apply_result.display_source:
+                                            display_source = (
+                                                pending_apply_result.display_source
+                                            )
+                                        if pending_apply_result.last_sort_by:
+                                            last_sort_by = (
+                                                pending_apply_result.last_sort_by
+                                            )
+                                        if pending_apply_result.proximity_rules:
+                                            parsed_proximity_rules = (
+                                                pending_apply_result.proximity_rules
+                                            )
+                                    else:
+                                        pending_apply_result = None
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -1595,6 +1761,10 @@ def run_agent_step_events(
                                 current_plan_entries = raw
                     except (json.JSONDecodeError, TypeError):
                         pass
+                if pending_apply_result and name in _POST_APPLY_LISTING_TOOLS:
+                    # Later 4p/4q/3b in this batch owns display history; do not append a
+                    # stale auto-apply snapshot after those tool results.
+                    pending_apply_result = None
                 logger.debug("Tool %s completed", name)
                 if name == "ask_user":
                     payload = json.loads(result_str)
@@ -1613,6 +1783,7 @@ def run_agent_step_events(
                         listing_state = {
                             "display_list": current_listings or [],
                             "master_list": enriched_master or master_listings or [],
+                            "search_master": master_listings or [],
                             "display_source": resolved_display_source,
                             "last_sort_by": last_sort_by,
                         }
@@ -1622,6 +1793,10 @@ def run_agent_step_events(
                             "choices": payload.get("choices") or [],
                             "allow_multiple": payload.get("allow_multiple", False),
                         }
+                        if pending_apply_result and pending_apply_result.applied:
+                            _splice_apply_before_ask_user(
+                                assistant_msg, tool_results, pending_apply_result
+                            )
                         yield {
                             "type": "done",
                             "messages": messages + [assistant_msg] + tool_results,
@@ -1633,6 +1808,7 @@ def run_agent_step_events(
             last_listing_state = {
                 "display_list": current_listings or [],
                 "master_list": enriched_master or master_listings or [],
+                "search_master": master_listings or [],
                 # Carry forward the display_source from a previous iteration when no
                 # display-changing tool ran in this batch (e.g. summarize_listings after
                 # rental_search), so the streamlit gate still sees the correct source. Falls
@@ -1649,6 +1825,8 @@ def run_agent_step_events(
                 "last_sort_by": last_sort_by,
             }
             messages = messages + [assistant_msg] + tool_results
+            if pending_apply_result and pending_apply_result.applied:
+                messages = messages + make_apply_tool_messages(pending_apply_result)
             continue
         # No tool calls: final assistant reply
         messages = messages + [{"role": "assistant", "content": content or ""}]

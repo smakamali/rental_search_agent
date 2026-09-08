@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 CONTACT_PREF_KEYS = ("viewing_preference", "name", "email", "phone")
 
 SEARCH_PREF_KEYS = (
+    "location",
+    "listing_type",
     "budget_max",
     "min_bedrooms",
     "max_bedrooms",
@@ -98,9 +100,19 @@ def _parse_optional_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _parse_listing_type(value: Any) -> Optional[str]:
+    s = str(value or "").strip().lower()
+    if s in ("for_rent", "rent", "rental"):
+        return "for_rent"
+    if s in ("for_sale", "sale", "buy"):
+        return "for_sale"
+    return None
+
+
 def stored_prefs_to_effective(stored: Mapping[str, Any] | None) -> EffectiveSearchPreferences:
     """Parse sidebar/file preference strings into typed EffectiveSearchPreferences."""
     stored = stored or {}
+    location = str(stored.get("location") or "").strip() or None
     return EffectiveSearchPreferences(
         budget_max=_parse_optional_float(stored.get("budget_max")),
         min_bedrooms=_parse_optional_int(stored.get("min_bedrooms")),
@@ -110,6 +122,8 @@ def stored_prefs_to_effective(stored: Mapping[str, Any] | None) -> EffectiveSear
         min_sqft=_parse_optional_float(stored.get("min_sqft")),
         proximity_preferences=str(stored.get("proximity_preferences") or "").strip(),
         qualitative_preferences=str(stored.get("qualitative_preferences") or "").strip(),
+        location=location,
+        listing_type=_parse_listing_type(stored.get("listing_type")),
     )
 
 
@@ -265,6 +279,8 @@ def fill_empty_stored_from_chat(
     out = {k: str(stored.get(k, "") or "") for k in PREF_KEYS}
     partial = chat_criteria_to_partial(chat)
     string_map = {
+        "location": partial.get("location"),
+        "listing_type": partial.get("listing_type"),
         "budget_max": partial.get("budget_max"),
         "min_bedrooms": partial.get("min_bedrooms"),
         "max_bedrooms": partial.get("max_bedrooms"),
@@ -321,7 +337,7 @@ def preferences_block(prefs: Mapping[str, Any] | None) -> str:
             parts.append(f"{key} = {val!r}")
     if not parts:
         return (
-            "No stored search preferences (budget, beds, baths, den, size, proximity, or qualitative)."
+            "No stored search preferences (location, listing type, budget, beds, baths, den, size, proximity, or qualitative)."
         )
     block = "Stored search preferences: " + "; ".join(parts)
     block += (
@@ -329,10 +345,11 @@ def preferences_block(prefs: Mapping[str, Any] | None) -> str:
         "Criteria stated in the current chat override stored values for that turn. "
         "When chat fills a field that is empty in stored preferences, persist the filled value. "
         "Do not ask the user for these again unless they are missing or the user asks to change them. "
-        "When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, "
-        "enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. "
-        "When any score-relevant preference is set (budget, beds/baths/sqft/den, proximity, qualitative), "
-        "call score_listings_by_preferences after structural (and proximity, if applicable) filtering; "
-        "do not ask again unless the user changes them."
+        "After rental_search, proximity and preference scoring are applied automatically — "
+        "do not call parse_proximity_preferences, geocode tools, enrich_listings_with_proximity, "
+        "or score_listings_by_preferences for that initial search. "
+        "The user can run a new search or re-rank from the Search Preferences Search button. "
+        "If a sidebar Search already produced the current master list, do not immediately "
+        "replace it unless the user asks for a different search."
     )
     return block
