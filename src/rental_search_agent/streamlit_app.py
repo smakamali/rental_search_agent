@@ -244,7 +244,8 @@ def _inject_chat_blob_css() -> None:
     """Dock the chat launcher/panel to the viewport.
 
     Use attribute selectors — Streamlit's st-key-* class may sit on a wrapper.
-    Prefer theme CSS variables for opaque backgrounds so light/dark both stay readable.
+    Do not paint an opaque fill: results already reserve space, so the panel
+    should inherit the app theme background (light and dark).
     When the panel is open, reserve right padding so results are not covered.
     """
     chat_open = st.session_state.get("chat_open", True)
@@ -265,16 +266,11 @@ def _inject_chat_blob_css() -> None:
             max-height: none !important;
             width: min(420px, calc(100vw - 1.5rem)) !important;
             z-index: 10000 !important;
-            background-color: var(--secondary-background-color, #0e1117) !important;
-            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border: 1px solid rgba(128, 128, 128, 0.28) !important;
             border-radius: 12px !important;
-            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12) !important;
             padding: 0.6rem 0.75rem 0.75rem !important;
             overflow: visible !important;
-        }}
-        [class*="st-key-chat_blob"] [data-testid="stVerticalBlock"],
-        [class*="st-key-chat_blob"] [data-testid="stVerticalBlockBorderWrapper"] {{
-            background-color: var(--secondary-background-color, #0e1117) !important;
         }}
         [class*="st-key-chat_history"] {{
             height: calc(100vh - 16rem) !important;
@@ -294,10 +290,9 @@ def _inject_chat_blob_css() -> None:
             right: 1.25rem !important;
             z-index: 10000 !important;
             width: auto !important;
-            background-color: var(--secondary-background-color, #0e1117) !important;
-            border: 1px solid rgba(250, 250, 250, 0.18) !important;
+            border: 1px solid rgba(128, 128, 128, 0.28) !important;
             border-radius: 24px !important;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12) !important;
             padding: 0.35rem 0.5rem !important;
         }}
         .block-container {{
