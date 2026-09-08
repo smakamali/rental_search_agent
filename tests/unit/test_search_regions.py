@@ -7,6 +7,7 @@ from rental_search_agent.search_regions import (
     expand_search_region,
     known_region_names,
     lookup_region,
+    resolve_search_location_input,
     unique_search_locations,
 )
 from rental_search_agent.models import MAX_SEARCH_LOCATIONS
@@ -94,3 +95,38 @@ class TestCatalogFitsCap:
     def test_gta_picker_fits_cap(self):
         assert len(GREATER_TORONTO.cities) <= MAX_SEARCH_LOCATIONS
         assert len(unique_search_locations(GREATER_TORONTO.cities)) <= MAX_SEARCH_LOCATIONS
+
+
+class TestResolveSearchLocationInput:
+    def test_metro_vancouver_expands_to_city_list(self):
+        resolved = resolve_search_location_input("Metro Vancouver")
+        assert isinstance(resolved, list)
+        assert "Vancouver, BC" in resolved
+        assert "Burnaby, BC" in resolved
+        assert len(resolved) > 1
+        assert len(resolved) <= MAX_SEARCH_LOCATIONS
+
+    def test_gta_alias_expands(self):
+        resolved = resolve_search_location_input("GTA")
+        assert isinstance(resolved, list)
+        assert "Toronto, ON" in resolved
+        assert len(resolved) > 1
+        assert len(resolved) <= MAX_SEARCH_LOCATIONS
+
+    def test_bare_vancouver_is_single_city(self):
+        assert resolve_search_location_input("Vancouver") == "Vancouver"
+
+    def test_city_with_province_unchanged(self):
+        assert resolve_search_location_input("Vancouver, BC") == "Vancouver, BC"
+
+    def test_blank_returns_empty(self):
+        assert resolve_search_location_input("  ") == ""
+
+    def test_unknown_text_treated_as_city(self):
+        assert resolve_search_location_input("the Prairies") == "the Prairies"
+
+    def test_metro_list_matches_catalog_unique_locations(self):
+        region = lookup_region("Metro Vancouver")
+        assert region is not None
+        expected = unique_search_locations(region.cities)
+        assert resolve_search_location_input("Greater Vancouver") == expected

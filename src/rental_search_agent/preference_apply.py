@@ -1,6 +1,6 @@
 """Deterministic post-search pipeline: structural filter → proximity → score.
 
-Used after every successful rental_search and from the sidebar Apply button.
+Used after every successful rental_search and from the sidebar Search button.
 The LLM does not own this path.
 """
 
@@ -24,12 +24,13 @@ from rental_search_agent.preference_resolution import (
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences
+from rental_search_agent.search_regions import resolve_search_location_input
 
 logger = logging.getLogger(__name__)
 
 APPLY_TOOL_NAME = "apply_search_preferences"
 
-# Sidebar fields that, if changed, cannot be applied in-memory (need a new scrape).
+# Sidebar fields overlaid onto last-search filters (not location / listing_type).
 STRUCTURAL_SCRAPE_KEYS = (
     "budget_max",
     "min_bedrooms",
@@ -37,6 +38,9 @@ STRUCTURAL_SCRAPE_KEYS = (
     "min_bathrooms",
     "min_sqft",
 )
+
+# Sidebar fields that, if changed, cannot be applied in-memory (need a new scrape).
+SCRAPE_PREF_KEYS = STRUCTURAL_SCRAPE_KEYS + ("location", "listing_type")
 
 ProgressCallback = Callable[[str, str, bool], None]
 
@@ -92,17 +96,108 @@ def pipeline_needed(prefs: EffectiveSearchPreferences) -> bool:
     return prefs.has_score_relevant_prefs()
 
 
+def _pref_text(prefs: Mapping[str, Any] | None, key: str) -> str:
+    return str((prefs or {}).get(key) or "").strip()
+
+
+def scrape_prefs_changed(
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any] | None,
+) -> bool:
+    """True when a scrape-relevant sidebar field changed (hard constraints)."""
+    for key in SCRAPE_PREF_KEYS:
+        if _pref_text(before, key) != _pref_text(after, key):
+            return True
+    return False
+
+
 def structural_prefs_changed(
     before: Mapping[str, Any] | None,
     after: Mapping[str, Any] | None,
 ) -> bool:
-    """True when a scrape-relevant structural sidebar field changed."""
-    before = before or {}
-    after = after or {}
-    for key in STRUCTURAL_SCRAPE_KEYS:
-        if str(before.get(key) or "").strip() != str(after.get(key) or "").strip():
-            return True
-    return False
+    """True when a scrape-relevant sidebar field changed."""
+    return scrape_prefs_changed(before, after)
+
+
+def _normalize_listing_type(value: Any) -> Optional[str]:
+    s = str(value or "").strip().lower()
+    if s in ("for_rent", "rent", "rental"):
+        return "for_rent"
+    if s in ("for_sale", "sale", "buy"):
+        return "for_sale"
+    return None
+
+
+def filters_from_sidebar_prefs(prefs: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build rental_search filters entirely from the sidebar form."""
+    prefs = prefs or {}
+    effective = stored_prefs_to_effective(prefs)
+    fields = effective_to_filter_fields(effective)
+    resolved = resolve_search_location_input(_pref_text(prefs, "location"))
+    if resolved:
+        fields["location"] = resolved
+    fields["listing_type"] = _normalize_listing_type(prefs.get("listing_type")) or "for_rent"
+    return fields
+
+
+def first_search_required_warnings(prefs: Mapping[str, Any] | None) -> list[str]:
+    """Validation errors when scraping with no prior master list."""
+    warnings: list[str] = []
+    if not _pref_text(prefs, "location"):
+        warnings.append("Enter a location to search.")
+    if not _pref_text(prefs, "min_bedrooms"):
+        warnings.append("Enter a minimum bedroom count to search.")
+    return warnings
+
+
+def _scrape_spinner(filters: Mapping[str, Any] | None) -> str:
+    loc = (filters or {}).get("location")
+    n = len(loc) if isinstance(loc, list) else 1
+    if n > 1:
+        return f"Searching {n} cities..."
+    return "Searching..."
+
+
+@dataclass
+class SidebarSearchRequest:
+    """Pure scrape / re-rank decision for the sidebar Search button."""
+
+    kind: str
+    warnings: list[str] = field(default_factory=list)
+    filters: Optional[dict[str, Any]] = None
+    spinner: str = ""
+
+
+def prepare_sidebar_search(
+    new_prefs: Mapping[str, Any],
+    previous_prefs: Mapping[str, Any] | None,
+    *,
+    has_master: bool,
+    last_filters: Mapping[str, Any] | None,
+) -> SidebarSearchRequest:
+    """Decide scrape vs re-rank and build filters when a scrape is needed."""
+    if has_master and not scrape_prefs_changed(previous_prefs, new_prefs):
+        return SidebarSearchRequest(kind="rerank", spinner="Updating rankings...")
+
+    if not has_master or not last_filters:
+        warnings = first_search_required_warnings(new_prefs)
+        if warnings:
+            return SidebarSearchRequest(kind="error", warnings=warnings)
+        filters = filters_from_sidebar_prefs(new_prefs)
+        return SidebarSearchRequest(
+            kind="scrape",
+            filters=filters,
+            spinner=_scrape_spinner(filters),
+        )
+
+    filters = overlay_structural_on_search_filters(
+        last_filters, new_prefs, previous_prefs=previous_prefs
+    )
+    return SidebarSearchRequest(
+        kind="scrape",
+        filters=filters,
+        spinner=_scrape_spinner(filters),
+    )
 
 
 def overlay_structural_on_search_filters(
@@ -113,10 +208,11 @@ def overlay_structural_on_search_filters(
 ) -> dict[str, Any]:
     """Rebuild rental_search filters: last location/listing_type plus new structural prefs.
 
-    When ``previous_prefs`` is provided (sidebar Apply), only scrape keys that changed
+    When ``previous_prefs`` is provided (sidebar Search), only scrape keys that changed
     are overlaid, so a budget edit does not drop last-search ``max_bedrooms`` / ``price_min``.
-    Keys the form never collects (``max_bathrooms``, ``max_sqft``, ``price_min``) are
-    kept from last search unless the overlay explicitly sets them.
+    A location change is resolved (metro → full city list); listing_type is taken from
+    the form. Keys the form never collects (``max_bathrooms``, ``max_sqft``, ``price_min``)
+    are kept from last search unless the overlay explicitly sets them.
     """
     out = dict(last_filters or {})
     effective = stored_prefs_to_effective(prefs)
@@ -128,8 +224,7 @@ def overlay_structural_on_search_filters(
         keys_to_apply = tuple(
             key
             for key in STRUCTURAL_SCRAPE_KEYS
-            if str(previous_prefs.get(key) or "").strip()
-            != str(prefs.get(key) or "").strip()
+            if _pref_text(previous_prefs, key) != _pref_text(prefs, key)
         )
 
     pref_to_filter = {
@@ -145,6 +240,22 @@ def overlay_structural_on_search_filters(
             out[filter_key] = fields[filter_key]
         else:
             out.pop(filter_key, None)
+
+    loc_changed = previous_prefs is None or _pref_text(previous_prefs, "location") != _pref_text(
+        prefs, "location"
+    )
+    if loc_changed:
+        resolved = resolve_search_location_input(_pref_text(prefs, "location"))
+        if resolved:
+            out["location"] = resolved
+
+    type_changed = previous_prefs is None or (
+        _pref_text(previous_prefs, "listing_type") != _pref_text(prefs, "listing_type")
+    )
+    if type_changed:
+        listing_type = _normalize_listing_type(prefs.get("listing_type"))
+        if listing_type:
+            out["listing_type"] = listing_type
 
     if "min_bedrooms" not in out or out.get("min_bedrooms") is None:
         out["min_bedrooms"] = last_filters.get("min_bedrooms", 0)
@@ -198,7 +309,7 @@ def make_rental_search_tool_messages(
     filters: Mapping[str, Any],
     result_data: Mapping[str, Any],
 ) -> list[dict]:
-    """Synthetic rental_search exchange so Apply re-search updates conversation master."""
+    """Synthetic rental_search exchange so sidebar Search updates conversation master."""
     call_id = f"search-{uuid.uuid4().hex[:12]}"
     return [
         {

@@ -29,8 +29,7 @@ from rental_search_agent.preference_apply import (
     apply_search_preferences,
     make_apply_tool_messages,
     make_rental_search_tool_messages,
-    overlay_structural_on_search_filters,
-    structural_prefs_changed,
+    prepare_sidebar_search,
     structural_prefs_for_rerank,
     with_display_rank,
 )
@@ -441,26 +440,22 @@ def _apply_pipeline_to_session(result, *, search_master: list[dict] | None = Non
         )
 
 
-def _apply_preferences_to_results(new_prefs: dict, previous_prefs: dict) -> None:
-    """Save already done. Re-rank current search, or re-scrape if structural prefs changed."""
+def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
+    """Save already done. Scrape when needed, otherwise re-rank the current master list."""
     search_master = _search_master_listings()
-    if not search_master:
-        st.session_state["apply_warnings"] = ["Run a search first, then click Apply to results."]
-        return
     messages = st.session_state.get("messages") or []
-    if structural_prefs_changed(previous_prefs, new_prefs):
-        last_filters = get_last_rental_search_filters(messages)
-        if not last_filters or not last_filters.get("location"):
-            st.session_state["apply_warnings"] = [
-                "Structural preferences changed, but there is no previous search location to re-run. "
-                "Start a search in chat first."
-            ]
-            return
-        new_filters = overlay_structural_on_search_filters(
-            last_filters, new_prefs, previous_prefs=previous_prefs
-        )
+    request = prepare_sidebar_search(
+        new_prefs,
+        previous_prefs,
+        has_master=bool(search_master),
+        last_filters=get_last_rental_search_filters(messages),
+    )
+    if request.kind == "error":
+        st.session_state["apply_warnings"] = request.warnings
+        return
+    if request.kind == "scrape":
         try:
-            filters = RentalSearchFilters.model_validate(new_filters)
+            filters = RentalSearchFilters.model_validate(request.filters)
         except Exception as e:
             st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
             return
@@ -476,7 +471,7 @@ def _apply_preferences_to_results(new_prefs: dict, previous_prefs: dict) -> None
         listings = with_display_rank(data.get("listings") or [])
         data["listings"] = listings
         st.session_state["messages"] = list(messages) + make_rental_search_tool_messages(
-            new_filters, data
+            request.filters or {}, data
         )
         effective = stored_prefs_to_effective(new_prefs)
         result = apply_search_preferences(listings, effective)
@@ -503,13 +498,25 @@ def _render_preferences_sidebar() -> None:
             "Used as defaults for search, filtering, and match scoring. "
             "Criteria stated in chat override these for that search. "
             "Empty fields may be filled from chat when you search. "
-            "Apply to results re-ranks the current search, or runs a new search "
-            "if budget/beds/baths/size changed."
+            "Search scrapes when location, buy/rent, or structural fields change, "
+            "or when there are no results yet; otherwise it re-ranks."
         )
         for warning in st.session_state.get("apply_warnings") or []:
             st.warning(warning)
-        has_master = bool(_search_master_listings())
         with st.form("preferences_form"):
+            location = st.text_input(
+                "Location",
+                value=prefs.get("location", ""),
+                placeholder="e.g. Vancouver, BC or Metro Vancouver",
+                key="pref_location",
+            )
+            saved_listing_type = str(prefs.get("listing_type") or "").strip()
+            listing_choice = st.segmented_control(
+                "Buy / Rent",
+                options=["Rent", "Buy"],
+                default="Buy" if saved_listing_type == "for_sale" else "Rent",
+                key="pref_listing_mode",
+            )
             budget = st.text_input(
                 "Budget max (CAD)",
                 value=prefs.get("budget_max", ""),
@@ -564,11 +571,15 @@ def _render_preferences_sidebar() -> None:
             with btn_cols[0]:
                 saved = st.form_submit_button("Save")
             with btn_cols[1]:
-                applied = st.form_submit_button("Apply to results", disabled=not has_master)
-            if saved or applied:
+                searched = st.form_submit_button("Search")
+            if saved or searched:
                 new_prefs = {k: str(prefs.get(k, "") or "") for k in PREF_KEYS}
                 new_prefs.update(
                     {
+                        "location": (location or "").strip(),
+                        "listing_type": (
+                            "for_sale" if listing_choice == "Buy" else "for_rent"
+                        ),
                         "budget_max": (budget or "").strip(),
                         "min_bedrooms": (min_beds or "").strip(),
                         "max_bedrooms": (max_beds or "").strip(),
@@ -581,13 +592,20 @@ def _render_preferences_sidebar() -> None:
                 )
                 previous = dict(prefs)
                 _commit_preferences(new_prefs)
-                if applied:
-                    with st.spinner(
-                        "Searching with updated preferences..."
-                        if structural_prefs_changed(previous, new_prefs)
-                        else "Updating rankings..."
-                    ):
-                        _apply_preferences_to_results(new_prefs, previous)
+                if searched:
+                    request = prepare_sidebar_search(
+                        new_prefs,
+                        previous,
+                        has_master=bool(_search_master_listings()),
+                        last_filters=get_last_rental_search_filters(
+                            st.session_state.get("messages") or []
+                        ),
+                    )
+                    if request.kind == "error":
+                        st.session_state["apply_warnings"] = request.warnings
+                    else:
+                        with st.spinner(request.spinner):
+                            _run_sidebar_search(new_prefs, previous)
                 else:
                     st.session_state["apply_warnings"] = []
                 st.rerun()
@@ -821,7 +839,7 @@ def main() -> None:
     if listings:
         render_search_results(listings)
     else:
-        st.caption("Run a search to see results here.")
+        st.caption("Enter location and beds in Search Preferences, then click Search.")
 
     _render_chat_panel(client, model)
 

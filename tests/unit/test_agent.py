@@ -108,5 +108,5 @@ class TestFlowInstructions:
     def test_initial_search_pipeline_is_automatic(self):
         instructions = flow_instructions()
         assert "applied automatically" in instructions.lower()
-        assert "Apply to results" in instructions
+        assert "Search Preferences **Search**" in instructions
         assert "Do **not** enter this step after a new rental_search" in instructions

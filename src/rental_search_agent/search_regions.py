@@ -407,6 +407,24 @@ def canonicalize_search_locations(locations: Sequence[str]) -> list[str]:
     return out
 
 
+def resolve_search_location_input(text: str) -> str | list[str]:
+    """Resolve a sidebar location: known metro → all search_locations, else a city string.
+
+    Bare city names are not expanded. The typed string is stored as-is; call this only
+    when building rental_search filters. Returns "" when the input is blank.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    match = lookup_region(stripped)
+    if match is None:
+        return stripped
+    locations = unique_search_locations(match.cities)
+    if not locations:
+        return stripped
+    return locations[0] if len(locations) == 1 else locations
+
+
 def expand_search_region(region: str) -> dict[str, Any]:
     """Expand a metro name into picker rows, or return { error } if unknown."""
     text = (region or "").strip()
