@@ -329,10 +329,9 @@ def preferences_block(prefs: Mapping[str, Any] | None) -> str:
         "Criteria stated in the current chat override stored values for that turn. "
         "When chat fills a field that is empty in stored preferences, persist the filled value. "
         "Do not ask the user for these again unless they are missing or the user asks to change them. "
-        "When proximity_preferences is set, parse and apply them (parse_proximity_preferences, geocode, "
-        "enrich_listings_with_proximity, filter_listings with proximity_rules) after presenting search results. "
-        "When any score-relevant preference is set (budget, beds/baths/sqft/den, proximity, qualitative), "
-        "call score_listings_by_preferences after structural (and proximity, if applicable) filtering; "
-        "do not ask again unless the user changes them."
+        "After rental_search, proximity and preference scoring are applied automatically — "
+        "do not call parse_proximity_preferences, geocode tools, enrich_listings_with_proximity, "
+        "or score_listings_by_preferences for that initial search. "
+        "The user can re-apply edited Search Preferences with the Apply to results button."
     )
     return block

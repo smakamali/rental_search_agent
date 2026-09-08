@@ -104,3 +104,9 @@ class TestFlowInstructions:
         assert "Do NOT call rental_search once per city" in instructions
         assert "bare city" in instructions.lower() or "A **bare city**" in instructions
         assert "explicit cities" in instructions.lower()
+
+    def test_initial_search_pipeline_is_automatic(self):
+        instructions = flow_instructions()
+        assert "applied automatically" in instructions.lower()
+        assert "Apply to results" in instructions
+        assert "Do **not** enter this step after a new rental_search" in instructions

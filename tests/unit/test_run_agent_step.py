@@ -100,7 +100,10 @@ class TestRunAgentStepToolCall:
         )
         final = _make_final_reply("Found 1 listing.")
 
-        with patch("rental_search_agent.client.search", return_value=sample_resp):
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client._load_preferences_from_file", return_value={}),
+        ):
             client, model = _make_client(tool_call, final)
             messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
             updated, payload, _ = run_agent_step(client, model, messages)
@@ -121,7 +124,10 @@ class TestRunAgentStepToolCall:
         )
         final = _make_final_reply("Done.")
 
-        with patch("rental_search_agent.client.search", return_value=sample_resp):
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client._load_preferences_from_file", return_value={}),
+        ):
             client, model = _make_client(tool_call, final)
             messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
             updated, _, _ = run_agent_step(client, model, messages)
@@ -155,7 +161,9 @@ class TestRunAgentStepToolCall:
             ]
         )
         final = _make_final_reply("Combined.")
-        with patch("rental_search_agent.client.search", side_effect=_search):
+        with patch("rental_search_agent.client.search", side_effect=_search), patch(
+            "rental_search_agent.client._load_preferences_from_file", return_value={}
+        ):
             client, model = _make_client(tool_call, final)
             messages = _base_messages() + [{"role": "user", "content": "Search Vancouver and Burnaby"}]
             _updated, _payload, listing_state = run_agent_step(client, model, messages)
@@ -164,6 +172,156 @@ class TestRunAgentStepToolCall:
         ids = [lst["id"] for lst in listing_state["master_list"]]
         assert ids == ["van-1", "burn-1"]
         assert listing_state["display_list"] == listing_state["master_list"]
+        assert [lst["id"] for lst in listing_state["search_master"]] == ["van-1", "burn-1"]
+
+
+class TestPostSearchPreferencePipeline:
+    def test_injects_apply_search_preferences_after_rental_search(self):
+        sample_resp = RentalSearchResponse(listings=[sample_listing()], total_count=1)
+        scored = [sample_listing().model_dump() | {"match_score": 0.9, "rank": 1}]
+        tool_call = _make_tool_call_reply(
+            "rental_search",
+            {"filters": {"min_bedrooms": 2, "location": "Vancouver"}},
+        )
+        final = _make_final_reply("Found 1 listing.")
+        from rental_search_agent.preference_apply import ApplyPreferencesResult
+
+        fake = ApplyPreferencesResult(
+            listings=scored,
+            last_sort_by="match_score",
+            display_source="score",
+            applied=True,
+        )
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client.apply_search_preferences", return_value=fake),
+            patch("rental_search_agent.client.pipeline_needed", return_value=True),
+        ):
+            client, model = _make_client(tool_call, final)
+            messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
+            updated, payload, listing_state = run_agent_step(client, model, messages)
+
+        assert payload is None
+        apply_names = []
+        for m in updated:
+            if m.get("role") == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    apply_names.append((tc.get("function") or {}).get("name"))
+        assert "apply_search_preferences" in apply_names
+        assert listing_state["display_list"][0]["match_score"] == 0.9
+        assert listing_state["last_sort_by"] == "match_score"
+        assert listing_state["display_source"] == "score"
+        assert listing_state["search_master"][0]["id"] == sample_listing().id
+        assert listing_state["search_master"][0].get("match_score") != 0.9
+
+    def test_ask_user_same_batch_still_injects_apply(self):
+        sample_resp = RentalSearchResponse(listings=[sample_listing()], total_count=1)
+        scored = [sample_listing().model_dump() | {"match_score": 0.8, "rank": 1}]
+        tool_call = _make_multi_tool_call_reply(
+            [
+                ("rental_search", {"filters": {"min_bedrooms": 2, "location": "Vancouver"}}, "c-search"),
+                ("ask_user", {"prompt": "Look good?", "choices": ["Yes", "No"]}, "c-ask"),
+            ]
+        )
+        from rental_search_agent.preference_apply import ApplyPreferencesResult
+
+        fake = ApplyPreferencesResult(
+            listings=scored,
+            last_sort_by="match_score",
+            display_source="score",
+            applied=True,
+        )
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client.apply_search_preferences", return_value=fake),
+            patch("rental_search_agent.client.pipeline_needed", return_value=True),
+        ):
+            client, model = _make_client(tool_call)
+            messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
+            updated, payload, listing_state = run_agent_step(client, model, messages)
+
+        assert payload is not None
+        assistant = next(m for m in updated if m.get("role") == "assistant" and m.get("tool_calls"))
+        names = [(tc.get("function") or {}).get("name") for tc in assistant["tool_calls"]]
+        assert names.index("apply_search_preferences") < names.index("ask_user")
+        assert listing_state["display_list"][0]["match_score"] == 0.8
+        apply_tools = [
+            m for m in updated if m.get("role") == "tool" and "match_score" in (m.get("content") or "")
+        ]
+        assert apply_tools
+
+    def test_same_batch_score_tool_skips_stale_apply_inject(self):
+        sample_resp = RentalSearchResponse(listings=[sample_listing()], total_count=1)
+        scored = [sample_listing().model_dump() | {"match_score": 0.5, "rank": 1}]
+        tool_call = _make_multi_tool_call_reply(
+            [
+                ("rental_search", {"filters": {"min_bedrooms": 2, "location": "Vancouver"}}, "c-search"),
+                (
+                    "score_listings_by_preferences",
+                    {"listings": [], "preferences_text": "balcony"},
+                    "c-score",
+                ),
+            ]
+        )
+        final = _make_final_reply("Ranked.")
+        from rental_search_agent.preference_apply import ApplyPreferencesResult
+
+        fake = ApplyPreferencesResult(
+            listings=scored,
+            last_sort_by="match_score",
+            display_source="score",
+            applied=True,
+        )
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client.apply_search_preferences", return_value=fake),
+            patch("rental_search_agent.client.pipeline_needed", return_value=True),
+            patch(
+                "rental_search_agent.client.do_score_listings_by_preferences",
+                return_value=scored,
+            ),
+        ):
+            client, model = _make_client(tool_call, final)
+            messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
+            updated, _, _ = run_agent_step(client, model, messages)
+
+        apply_after_search = [
+            m
+            for m in updated
+            if m.get("role") == "assistant"
+            and any(
+                (tc.get("function") or {}).get("name") == "apply_search_preferences"
+                for tc in (m.get("tool_calls") or [])
+            )
+            and not any(
+                (tc.get("function") or {}).get("name") == "rental_search"
+                for tc in (m.get("tool_calls") or [])
+            )
+        ]
+        assert apply_after_search == []
+
+    def test_skips_injection_when_pipeline_not_needed(self):
+        sample_resp = RentalSearchResponse(listings=[sample_listing()], total_count=1)
+        tool_call = _make_tool_call_reply(
+            "rental_search",
+            {"filters": {"min_bedrooms": 2, "location": "Vancouver"}},
+        )
+        final = _make_final_reply("Found 1 listing.")
+        with (
+            patch("rental_search_agent.client.search", return_value=sample_resp),
+            patch("rental_search_agent.client.pipeline_needed", return_value=False),
+        ):
+            client, model = _make_client(tool_call, final)
+            messages = _base_messages() + [{"role": "user", "content": "Find 2 bed"}]
+            updated, _, listing_state = run_agent_step(client, model, messages)
+
+        apply_names = []
+        for m in updated:
+            if m.get("role") == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    apply_names.append((tc.get("function") or {}).get("name"))
+        assert "apply_search_preferences" not in apply_names
+        assert listing_state["display_source"] == "search"
 
 
 # ---------------------------------------------------------------------------

@@ -5,13 +5,16 @@ from pathlib import Path
 
 import streamlit as st
 
+from rental_search_agent.adapter import SearchBackendError, search
 from rental_search_agent.agent import current_date_context, flow_instructions
 from rental_search_agent.api_config import has_api_credentials
 from rental_search_agent.client import (
     _get_active_search_criteria_from_messages,
+    _get_master_listings_from_messages,
     _get_parsed_proximity_rules_from_messages,
     _load_env_file,
     _make_llm_client,
+    get_last_rental_search_filters,
     run_agent_step_events,
 )
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
@@ -21,11 +24,22 @@ from rental_search_agent.display_format import (
 )
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
+from rental_search_agent.models import RentalSearchFilters
+from rental_search_agent.preference_apply import (
+    apply_search_preferences,
+    make_apply_tool_messages,
+    make_rental_search_tool_messages,
+    overlay_structural_on_search_filters,
+    structural_prefs_changed,
+    structural_prefs_for_rerank,
+    with_display_rank,
+)
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     is_placeholder_qualitative,
     merge_chat_over_stored,
     preferences_block as _shared_preferences_block,
+    stored_prefs_to_effective,
 )
 from rental_search_agent.proximity_parser import parse_proximity_preferences
 from rental_search_agent.streamlit_analysis import render_listing_analysis
@@ -146,6 +160,10 @@ def _init_session_state() -> None:
         st.session_state["display_list"] = []
     if "master_list" not in st.session_state:
         st.session_state["master_list"] = []
+    if "search_master" not in st.session_state:
+        st.session_state["search_master"] = []
+    if "apply_warnings" not in st.session_state:
+        st.session_state["apply_warnings"] = []
     if "display_source" not in st.session_state:
         st.session_state["display_source"] = None
     if "last_sort_by" not in st.session_state:
@@ -302,6 +320,12 @@ def _apply_listing_state(listing_state: dict | None) -> None:
         st.session_state["last_sort_by"] = listing_state.get("last_sort_by")
     if "master_list" in listing_state:
         st.session_state["master_list"] = listing_state.get("master_list") or []
+    if "search_master" in listing_state:
+        st.session_state["search_master"] = listing_state.get("search_master") or []
+    elif not st.session_state.get("search_master"):
+        st.session_state["search_master"] = _get_master_listings_from_messages(
+            st.session_state.get("messages") or []
+        )
     # Chat fill-in writes preferences.json; keep session + system prompt in sync.
     _sync_preferences_from_file()
 
@@ -389,6 +413,92 @@ def _build_answer_json(pending: dict, answer_value: str | list[str]) -> str:
     return json.dumps({"answer": answer_value if isinstance(answer_value, str) else str(answer_value or "")})
 
 
+def _search_master_listings() -> list[dict]:
+    """Original rental_search corpus: session cache, else recover from chat history."""
+    cached = st.session_state.get("search_master") or []
+    if cached:
+        return cached
+    return _get_master_listings_from_messages(st.session_state.get("messages") or [])
+
+
+def _commit_preferences(new_prefs: dict) -> None:
+    """Persist sidebar prefs and refresh the system prompt."""
+    st.session_state["user_preferences"] = new_prefs
+    _save_preferences_to_file(new_prefs)
+    messages = st.session_state.get("messages") or []
+    if messages:
+        messages[0] = {"role": "system", "content": _build_system_content()}
+        st.session_state["messages"] = messages
+
+
+def _apply_pipeline_to_session(result, *, search_master: list[dict] | None = None) -> None:
+    """Write pipeline output into session listing state and message history."""
+    if search_master is not None:
+        st.session_state["search_master"] = search_master
+    st.session_state["display_list"] = result.listings
+    st.session_state["master_list"] = result.listings
+    st.session_state["display_source"] = result.display_source
+    st.session_state["last_sort_by"] = result.last_sort_by
+    st.session_state["apply_warnings"] = list(result.warnings or [])
+    if result.applied:
+        st.session_state["messages"] = list(st.session_state.get("messages") or []) + make_apply_tool_messages(
+            result
+        )
+
+
+def _apply_preferences_to_results(new_prefs: dict, previous_prefs: dict) -> None:
+    """Save already done. Re-rank current search, or re-scrape if structural prefs changed."""
+    search_master = _search_master_listings()
+    if not search_master:
+        st.session_state["apply_warnings"] = ["Run a search first, then click Apply to results."]
+        return
+    messages = st.session_state.get("messages") or []
+    if structural_prefs_changed(previous_prefs, new_prefs):
+        last_filters = get_last_rental_search_filters(messages)
+        if not last_filters or not last_filters.get("location"):
+            st.session_state["apply_warnings"] = [
+                "Structural preferences changed, but there is no previous search location to re-run. "
+                "Start a search in chat first."
+            ]
+            return
+        new_filters = overlay_structural_on_search_filters(
+            last_filters, new_prefs, previous_prefs=previous_prefs
+        )
+        try:
+            filters = RentalSearchFilters.model_validate(new_filters)
+        except Exception as e:
+            st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
+            return
+        try:
+            resp = search(filters)
+        except SearchBackendError as e:
+            st.session_state["apply_warnings"] = [str(e)]
+            return
+        except Exception as e:
+            st.session_state["apply_warnings"] = [f"Search failed: {e}"]
+            return
+        data = resp.model_dump()
+        listings = with_display_rank(data.get("listings") or [])
+        data["listings"] = listings
+        st.session_state["messages"] = list(messages) + make_rental_search_tool_messages(
+            new_filters, data
+        )
+        effective = stored_prefs_to_effective(new_prefs)
+        result = apply_search_preferences(listings, effective)
+        _apply_pipeline_to_session(result, search_master=listings)
+        return
+
+    search_criteria = _get_active_search_criteria_from_messages(messages)
+    structural_prefs = structural_prefs_for_rerank(new_prefs, search_criteria)
+    score_prefs = stored_prefs_to_effective(new_prefs)
+    result = apply_search_preferences(
+        search_master,
+        score_prefs,
+        structural_prefs=structural_prefs,
+    )
+    _apply_pipeline_to_session(result)
+
+
 def _render_preferences_sidebar() -> None:
     """Sidebar Search Preferences form. Contact/viewing fields stay persisted but hidden."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
@@ -397,8 +507,13 @@ def _render_preferences_sidebar() -> None:
         st.caption(
             "Used as defaults for search, filtering, and match scoring. "
             "Criteria stated in chat override these for that search. "
-            "Empty fields may be filled from chat when you search."
+            "Empty fields may be filled from chat when you search. "
+            "Apply to results re-ranks the current search, or runs a new search "
+            "if budget/beds/baths/size changed."
         )
+        for warning in st.session_state.get("apply_warnings") or []:
+            st.warning(warning)
+        has_master = bool(_search_master_listings())
         with st.form("preferences_form"):
             budget = st.text_input(
                 "Budget max (CAD)",
@@ -450,9 +565,12 @@ def _render_preferences_sidebar() -> None:
                 placeholder="e.g. balcony, parking, gym, pet-friendly",
                 key="pref_qualitative",
             )
-            submitted = st.form_submit_button("Save")
-            if submitted:
-                # Preserve hidden contact/viewing keys from existing prefs
+            btn_cols = st.columns(2)
+            with btn_cols[0]:
+                saved = st.form_submit_button("Save")
+            with btn_cols[1]:
+                applied = st.form_submit_button("Apply to results", disabled=not has_master)
+            if saved or applied:
                 new_prefs = {k: str(prefs.get(k, "") or "") for k in PREF_KEYS}
                 new_prefs.update(
                     {
@@ -466,9 +584,17 @@ def _render_preferences_sidebar() -> None:
                         "qualitative_preferences": (qualitative or "").strip(),
                     }
                 )
-                st.session_state["user_preferences"] = new_prefs
-                _save_preferences_to_file(new_prefs)
-                st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
+                previous = dict(prefs)
+                _commit_preferences(new_prefs)
+                if applied:
+                    with st.spinner(
+                        "Searching with updated preferences..."
+                        if structural_prefs_changed(previous, new_prefs)
+                        else "Updating rankings..."
+                    ):
+                        _apply_preferences_to_results(new_prefs, previous)
+                else:
+                    st.session_state["apply_warnings"] = []
                 st.rerun()
         if not st.session_state.get("chat_open", True):
             if st.button("Open chat", key="sidebar_chat_open"):

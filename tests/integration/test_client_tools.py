@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from rental_search_agent.client import (
+    AGENT_TOOLS,
     TOOLS,
     _get_active_search_criteria_from_messages,
     _get_current_listings_from_messages,
@@ -15,6 +16,7 @@ from rental_search_agent.client import (
     _infer_last_sort_by,
     _listing_state_from_messages,
     _with_display_rank,
+    get_last_rental_search_filters,
     run_tool,
 )
 from rental_search_agent.server import draft_viewing_plan
@@ -60,6 +62,15 @@ class TestInferLastSortBy:
         messages = [_assistant_tool_call_msg("score_listings_by_preferences", {"preferences_text": "balcony"})]
         assert _infer_last_sort_by(messages) == "match_score"
 
+    def test_apply_search_preferences_uses_argument_sort(self):
+        messages = [
+            _assistant_tool_call_msg(
+                "apply_search_preferences",
+                {"last_sort_by": "match_score", "display_source": "score"},
+            )
+        ]
+        assert _infer_last_sort_by(messages) == "match_score"
+
     def test_rental_search_resets_to_none(self):
         messages = [
             _assistant_tool_call_msg("filter_listings", {"sort_by": "price"}),
@@ -82,6 +93,29 @@ class TestInferLastSortBy:
         assert state["last_sort_by"] == "proximity"
 
 
+class TestGetLastRentalSearchFilters:
+    def test_returns_latest_filters(self):
+        messages = [
+            _assistant_tool_call_msg(
+                "rental_search",
+                {"filters": {"min_bedrooms": 1, "location": "Toronto"}},
+                tc_id="r0",
+            ),
+            _assistant_tool_call_msg(
+                "rental_search",
+                {"filters": {"min_bedrooms": 2, "location": "Vancouver, BC"}},
+                tc_id="r1",
+            ),
+        ]
+        assert get_last_rental_search_filters(messages) == {
+            "min_bedrooms": 2,
+            "location": "Vancouver, BC",
+        }
+
+    def test_returns_none_when_no_search(self):
+        assert get_last_rental_search_filters([{"role": "user", "content": "hi"}]) is None
+
+
 class TestFilterListingsToolSchema:
     def test_sort_by_enum_includes_listing_age_hours(self):
         # Regression test (Bugbot finding): flow instructions and filtering.SORTABLE_ATTRS
@@ -92,6 +126,14 @@ class TestFilterListingsToolSchema:
         assert "listing_age_hours" in sort_by_enum
         assert "match_score" in sort_by_enum
         assert "semantic_score" in sort_by_enum
+
+
+class TestApplyToolNotExposedToLlm:
+    def test_apply_search_preferences_not_in_agent_tools(self):
+        names = [t["function"]["name"] for t in AGENT_TOOLS]
+        assert "apply_search_preferences" not in names
+        all_names = [t["function"]["name"] for t in TOOLS]
+        assert "apply_search_preferences" not in all_names
 
 
 class TestWithDisplayRank:
@@ -515,15 +557,42 @@ class TestGetEnrichedMasterFromMessages:
         ]
         assert _get_enriched_master_from_messages(messages) == []
 
+    def test_apply_after_search_wins(self):
+        scored = [{"id": "a", "match_score": 0.9}]
+        search = [{"id": "a"}]
+        messages = [
+            _assistant_tool_call_msg("rental_search", {"filters": {"location": "Vancouver"}}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": search}),
+            _assistant_tool_call_msg(
+                "apply_search_preferences",
+                {"last_sort_by": "match_score", "display_source": "score"},
+                tc_id="a1",
+            ),
+            _tool_result_msg("a1", {"listings": scored, "rules": []}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == scored
+
+    def test_new_rental_search_resets_apply_master(self):
+        scored = [{"id": "a", "match_score": 0.9}]
+        new_search = [{"id": "b"}]
+        messages = [
+            _assistant_tool_call_msg(
+                "apply_search_preferences",
+                {"last_sort_by": "match_score"},
+                tc_id="a1",
+            ),
+            _tool_result_msg("a1", {"listings": scored}),
+            _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
+            _tool_result_msg("r1", {"listings": new_search}),
+        ]
+        assert _get_enriched_master_from_messages(messages) == []
+
     def test_no_enrich_or_score_returns_empty(self):
         messages = [
             _assistant_tool_call_msg("rental_search", {"location": "Vancouver"}, tc_id="r1"),
             _tool_result_msg("r1", {"listings": [{"id": "a"}]}),
         ]
         assert _get_enriched_master_from_messages(messages) == []
-
-
-class TestGetActiveSearchCriteriaFromMessages:
     """Regression/feature tests for the search_criteria_to_text_blob wiring: the query used
     for score_listings_by_preferences / analyze_listing_preferences should mirror the
     listing_to_text_blob structure (bed/bath/sqft/price/location), reconstructed
@@ -672,6 +741,17 @@ class TestGetParsedProximityRulesFromMessages:
             _assistant_tool_call_msg("rental_search", {"filters": {"min_bedrooms": 2, "location": "Toronto, ON"}}, tc_id="s1"),
         ]
         assert _get_parsed_proximity_rules_from_messages(messages) == rules
+
+    def test_apply_search_preferences_rules_win_when_more_recent(self):
+        parsed = [{"location": "old", "mode": "walk", "max_minutes": 10}]
+        applied = [{"location": "downtown", "mode": "drive", "max_minutes": 20}]
+        messages = [
+            _assistant_tool_call_msg("parse_proximity_preferences", {}, tc_id="p1"),
+            _tool_result_msg("p1", {"rules": parsed}),
+            _assistant_tool_call_msg("apply_search_preferences", {}, tc_id="a1"),
+            _tool_result_msg("a1", {"listings": [], "rules": applied}),
+        ]
+        assert _get_parsed_proximity_rules_from_messages(messages) == applied
 
 
 class TestRunToolScoreListingsByPreferencesMultiMetric:
