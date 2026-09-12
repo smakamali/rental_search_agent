@@ -8,6 +8,7 @@ still sees one master list.
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -21,12 +22,25 @@ from rental_search_agent.models import (
     RentalSearchResponse,
 )
 
-__all__ = ["SearchBackendError", "merge_listings_by_id", "search"]
+__all__ = ["SearchBackendError", "get_fanout_max_workers", "merge_listings_by_id", "search"]
 
 logger = logging.getLogger(__name__)
 
-# Cap concurrent Apify actor runs so a 20-city selection does not stampede the API.
-_FANOUT_MAX_WORKERS = 8
+# Cap concurrent Apify actor runs so a large city selection does not stampede the API.
+# Free Apify plans allow 5 concurrent runs; override via APIFY_MAX_CONCURRENT.
+_DEFAULT_FANOUT_MAX_WORKERS = 5
+
+
+def get_fanout_max_workers() -> int:
+    """Max concurrent multi-city Apify actor runs (APIFY_MAX_CONCURRENT, default 5)."""
+    raw = (os.environ.get("APIFY_MAX_CONCURRENT") or "").strip()
+    if not raw:
+        return _DEFAULT_FANOUT_MAX_WORKERS
+    try:
+        n = int(raw)
+    except ValueError:
+        return _DEFAULT_FANOUT_MAX_WORKERS
+    return max(1, n)
 
 
 def merge_listings_by_id(listings: list[Listing]) -> list[Listing]:
@@ -77,7 +91,7 @@ def search(filters: RentalSearchFilters, use_proxy: bool = False) -> RentalSearc
             failed_locations=[],
         )
 
-    workers = min(_FANOUT_MAX_WORKERS, len(locations))
+    workers = min(get_fanout_max_workers(), len(locations))
     results: dict[str, RentalSearchResponse | BaseException] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_city = {

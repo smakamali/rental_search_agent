@@ -118,7 +118,9 @@ class TestAdapterSearch:
 
     def test_actor_exception_raises_backend_error(self):
         client = _mock_client(call_side_effect=Exception("Network error"))
-        backend = ApifyRealtorCaBackend(token="test-token", client=client)
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=0
+        )
         with patch("rental_search_agent.adapter.get_search_backend", return_value=backend):
             filters = RentalSearchFilters(min_bedrooms=2, location="Vancouver")
             with pytest.raises(SearchBackendError, match="temporarily unavailable"):
@@ -135,7 +137,9 @@ class TestAdapterSearch:
         # Simulates wait_duration elapsing before the actor run finished.
         client = _mock_client()
         client.actor.return_value.call.return_value = _mock_run(status="RUNNING")
-        backend = ApifyRealtorCaBackend(token="test-token", client=client)
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=0
+        )
         with patch("rental_search_agent.adapter.get_search_backend", return_value=backend):
             filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
             with pytest.raises(SearchBackendError, match="taking longer than expected"):
@@ -144,7 +148,9 @@ class TestAdapterSearch:
     def test_actor_failed_status_raises_backend_error(self):
         client = _mock_client()
         client.actor.return_value.call.return_value = _mock_run(status="FAILED")
-        backend = ApifyRealtorCaBackend(token="test-token", client=client)
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=0
+        )
         with patch("rental_search_agent.adapter.get_search_backend", return_value=backend):
             filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
             with pytest.raises(SearchBackendError, match="temporarily unavailable"):
@@ -210,3 +216,119 @@ class TestAdapterSearch:
             filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
             result = search(filters)
         assert result.total_count == 3
+
+
+class TestApifyRetry:
+    def test_retries_after_actor_exception_then_succeeds(self):
+        client = _mock_client()
+        actor = client.actor.return_value
+        actor.call.side_effect = [
+            Exception("Network error"),
+            _mock_run(),
+        ]
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=2, retry_base_seconds=0.01
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            patch("rental_search_agent.backends.apify_realtor_ca.time.sleep") as sleep_mock,
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            result = search(filters)
+        assert result.total_count == 3
+        assert actor.call.call_count == 2
+        sleep_mock.assert_called_once()
+        assert sleep_mock.call_args.args[0] == pytest.approx(0.01)
+
+    def test_retries_after_failed_status_then_succeeds(self):
+        client = _mock_client()
+        actor = client.actor.return_value
+        actor.call.side_effect = [
+            _mock_run(status="FAILED"),
+            _mock_run(status="SUCCEEDED"),
+        ]
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=2, retry_base_seconds=0.01
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            patch("rental_search_agent.backends.apify_realtor_ca.time.sleep"),
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            result = search(filters)
+        assert result.total_count == 3
+        assert actor.call.call_count == 2
+
+    def test_running_status_exhausts_retries(self):
+        client = _mock_client()
+        client.actor.return_value.call.return_value = _mock_run(status="RUNNING")
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, max_retries=2, retry_base_seconds=0.01
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            patch("rental_search_agent.backends.apify_realtor_ca.time.sleep") as sleep_mock,
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            with pytest.raises(SearchBackendError, match="taking longer than expected"):
+                search(filters)
+        assert client.actor.return_value.call.call_count == 3  # 1 + max_retries
+        assert sleep_mock.call_count == 2
+        assert sleep_mock.call_args_list[0].args[0] == pytest.approx(0.01)
+        assert sleep_mock.call_args_list[1].args[0] == pytest.approx(0.02)
+
+    def test_missing_token_does_not_retry(self):
+        backend = ApifyRealtorCaBackend(token="", client=None, max_retries=2)
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            patch("rental_search_agent.backends.apify_realtor_ca.time.sleep") as sleep_mock,
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            with pytest.raises(SearchBackendError, match="APIFY_TOKEN"):
+                search(filters)
+        sleep_mock.assert_not_called()
+
+
+class TestFetchDetailsIncompleteWarning:
+    def test_warns_when_fetch_details_on_and_descriptions_missing(self, caplog):
+        items = [
+            mock_apify_item(mls="with-desc", description="Has remarks"),
+            mock_apify_item(mls="no-desc", description=""),
+        ]
+        # Empty PublicRemarks with no _details → description None after mapping.
+        items[1]["PublicRemarks"] = ""
+        client = _mock_client(items=items)
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, fetch_details=True, max_retries=2
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("WARNING", logger="rental_search_agent.backends.apify_realtor_ca"),
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            result = search(filters)
+        assert result.total_count == 2
+        assert client.actor.return_value.call.call_count == 1
+        assert any(
+            "fetchDetails incomplete: 1/2 listings missing description" in r.message
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_fetch_details_disabled(self, caplog):
+        items = [
+            mock_apify_item(mls="a", description=""),
+            mock_apify_item(mls="b", description=""),
+        ]
+        for item in items:
+            item["PublicRemarks"] = ""
+        client = _mock_client(items=items)
+        backend = ApifyRealtorCaBackend(
+            token="test-token", client=client, fetch_details=False, max_retries=0
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("WARNING", logger="rental_search_agent.backends.apify_realtor_ca"),
+        ):
+            filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver")
+            search(filters)
+        assert not any("fetchDetails incomplete" in r.message for r in caplog.records)

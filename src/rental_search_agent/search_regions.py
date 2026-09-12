@@ -89,7 +89,8 @@ METRO_VANCOUVER = SearchRegion(
         _city("Vancouver", "Vancouver, BC"),
         _city("West Vancouver", "West Vancouver, BC"),
         _city("White Rock", "White Rock, BC"),
-        _city("Tsawwassen", "Tsawwassen, BC"),
+        # Treaty First Nation member; Realtor.ca place string remains Tsawwassen.
+        _city("Tsawwassen First Nation", "Tsawwassen, BC"),
     ),
 )
 
@@ -163,20 +164,21 @@ GREATER_TORONTO = SearchRegion(
         _city("Whitchurch-Stouffville", "Whitchurch-Stouffville, ON"),
         _city("East Gwillimbury", "East Gwillimbury, ON"),
         _city("Georgina", "Georgina, ON"),
+        _city("Uxbridge", "Uxbridge, ON"),
+        _city("Scugog", "Scugog, ON"),
+        _city("Brock", "Brock, ON"),
     ),
 )
 
 HAMILTON = SearchRegion(
     name="Hamilton Metro",
     aliases=("hamilton metro", "greater hamilton", "hamilton cma"),
+    # Hamilton CMA census subdivisions only (former Hamilton neighbourhoods
+    # like Ancaster/Dundas/Stoney Creek are inside the amalgamated city).
     cities=(
         _city("Hamilton", "Hamilton, ON"),
         _city("Burlington", "Burlington, ON"),
         _city("Grimsby", "Grimsby, ON"),
-        _city("Stoney Creek", "Stoney Creek, ON"),
-        _city("Ancaster", "Ancaster, ON"),
-        _city("Dundas", "Dundas, ON"),
-        _city("Waterdown", "Waterdown, ON"),
     ),
 )
 
@@ -211,15 +213,21 @@ OTTAWA = SearchRegion(
         "ottawa metro",
         "greater ottawa",
     ),
+    # Realtor.ca location matching is unreliable for some CMA names (e.g. Pontiac →
+    # Schwartz; L'Ange-Gardien matches the Québec City twin; rural townships can
+    # collapse to province-wide "Ontario"). Keep unambiguous, well-known places only.
     cities=(
         _city("Ottawa", "Ottawa, ON"),
         _city("Gatineau", "Gatineau, QC"),
-        _city("Kanata", "Kanata, ON"),
-        _city("Orleans", "Orleans, ON"),
-        _city("Nepean", "Nepean, ON"),
-        _city("Barrhaven", "Barrhaven, ON"),
-        _city("Stittsville", "Stittsville, ON"),
-        _city("Vanier", "Vanier, ON"),
+        _city("Clarence-Rockland", "Clarence-Rockland, ON"),
+        _city("Carleton Place", "Carleton Place, ON"),
+        _city("Arnprior", "Arnprior, ON"),
+        _city("Mississippi Mills", "Almonte, ON"),
+        _city("North Grenville (Kemptville)", "Kemptville, ON"),
+        _city("Chelsea", "Chelsea, QC"),
+        _city("Cantley", "Cantley, QC"),
+        _city("Val-des-Monts", "Val-des-Monts, QC"),
+        _city("La Pêche", "La Peche, QC"),
     ),
 )
 
@@ -240,7 +248,6 @@ GREATER_MONTREAL = SearchRegion(
         _city("Terrebonne", "Terrebonne, QC"),
         _city("Brossard", "Brossard, QC"),
         _city("Repentigny", "Repentigny, QC"),
-        _city("Saint-Jean-sur-Richelieu", "Saint-Jean-sur-Richelieu, QC"),
         _city("Boucherville", "Boucherville, QC"),
         _city("Dollard-Des Ormeaux", "Dollard-Des Ormeaux, QC"),
         _city("Blainville", "Blainville, QC"),
@@ -261,22 +268,24 @@ GREATER_MONTREAL = SearchRegion(
 CALGARY = SearchRegion(
     name="Calgary Region",
     aliases=("calgary region", "calgary metro", "calgary cma", "greater calgary"),
+    # Calgary CMA census subdivisions (Okotoks is a separate CA, not in the CMA).
     cities=(
         _city("Calgary", "Calgary, AB"),
         _city("Airdrie", "Airdrie, AB"),
         _city("Cochrane", "Cochrane, AB"),
         _city("Chestermere", "Chestermere, AB"),
-        _city("Okotoks", "Okotoks, AB"),
+        _city("Crossfield", "Crossfield, AB"),
     ),
 )
 
 EDMONTON = SearchRegion(
     name="Edmonton Metro",
     aliases=("edmonton metro", "edmonton region", "edmonton cma", "greater edmonton"),
+    # Major Edmonton CMA municipalities (Sherwood Park is inside Strathcona County).
     cities=(
         _city("Edmonton", "Edmonton, AB"),
         _city("St. Albert", "St. Albert, AB"),
-        _city("Sherwood Park", "Sherwood Park, AB"),
+        _city("Strathcona County (Sherwood Park)", "Sherwood Park, AB"),
         _city("Spruce Grove", "Spruce Grove, AB"),
         _city("Leduc", "Leduc, AB"),
         _city("Fort Saskatchewan", "Fort Saskatchewan, AB"),
@@ -290,12 +299,26 @@ EDMONTON = SearchRegion(
 WINNIPEG = SearchRegion(
     name="Winnipeg Metro",
     aliases=("winnipeg metro", "winnipeg cma", "capital region manitoba"),
+    # Winnipeg Metropolitan Region / Capital Planning Region municipalities (legislated 18).
     cities=(
         _city("Winnipeg", "Winnipeg, MB"),
-        _city("East St. Paul", "East St. Paul, MB"),
-        _city("West St. Paul", "West St. Paul, MB"),
-        _city("Headingley", "Headingley, MB"),
         _city("Selkirk", "Selkirk, MB"),
+        _city("Niverville", "Niverville, MB"),
+        _city("Stonewall", "Stonewall, MB"),
+        _city("Dunnottar", "Dunnottar, MB"),
+        _city("Cartier", "Cartier, MB"),
+        _city("East St. Paul", "East St. Paul, MB"),
+        _city("Headingley", "Headingley, MB"),
+        _city("Macdonald", "Macdonald, MB"),
+        _city("Ritchot", "Ritchot, MB"),
+        _city("Rockwood", "Rockwood, MB"),
+        _city("Rosser", "Rosser, MB"),
+        _city("Springfield", "Springfield, MB"),
+        _city("St. Andrews", "St. Andrews, MB"),
+        _city("St. Clements", "St. Clements, MB"),
+        _city("St. François Xavier", "St. Francois Xavier, MB"),
+        _city("Taché", "Tache, MB"),
+        _city("West St. Paul", "West St. Paul, MB"),
     ),
 )
 
@@ -307,13 +330,10 @@ HALIFAX = SearchRegion(
         "halifax regional municipality",
         "greater halifax",
     ),
+    # Halifax CMA: HRM is one municipality; communities like Dartmouth are inside it.
     cities=(
-        _city("Halifax", "Halifax, NS"),
-        _city("Dartmouth", "Dartmouth, NS"),
-        _city("Bedford", "Bedford, NS"),
-        _city("Sackville", "Sackville, NS"),
-        _city("Cole Harbour", "Cole Harbour, NS"),
-        _city("Lower Sackville", "Lower Sackville, NS"),
+        _city("Halifax Regional Municipality", "Halifax, NS"),
+        _city("East Hants", "East Hants, NS"),
     ),
 )
 
