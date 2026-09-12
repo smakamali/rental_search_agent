@@ -111,6 +111,13 @@ class TestCatalogFitsCap:
         labels = {c.label for c in OTTAWA.cities}
         assert "Ottawa" in labels and "Gatineau" in labels
         assert labels.isdisjoint({"Kanata", "Orleans", "Nepean", "Barrhaven", "Stittsville", "Vanier"})
+        # Fragile Realtor.ca matches dropped after wrong-province scrapes.
+        assert labels.isdisjoint({"Pontiac", "L'Ange-Gardien", "Beckwith", "Thurso", "Russell"})
+        locs = unique_search_locations(OTTAWA.cities)
+        assert "Almonte, ON" in locs
+        assert "Kemptville, ON" in locs
+        assert "Pontiac, QC" not in locs
+        assert "L'Ange-Gardien, QC" not in locs
 
     def test_halifax_is_hrm_plus_east_hants(self):
         labels = [c.label for c in HALIFAX.cities]

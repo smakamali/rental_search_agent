@@ -213,26 +213,21 @@ OTTAWA = SearchRegion(
         "ottawa metro",
         "greater ottawa",
     ),
-    # Real municipalities only (Kanata/Nepean/etc. were amalgamated into Ottawa).
-    # Curated to larger Ottawa–Gatineau CMA census subdivisions useful for search.
+    # Realtor.ca location matching is unreliable for some CMA names (e.g. Pontiac →
+    # Schwartz; L'Ange-Gardien matches the Québec City twin; rural townships can
+    # collapse to province-wide "Ontario"). Keep unambiguous, well-known places only.
     cities=(
         _city("Ottawa", "Ottawa, ON"),
         _city("Gatineau", "Gatineau, QC"),
         _city("Clarence-Rockland", "Clarence-Rockland, ON"),
-        _city("Russell", "Russell, ON"),
-        _city("North Grenville", "North Grenville, ON"),
-        _city("Mississippi Mills", "Mississippi Mills, ON"),
-        _city("Val-des-Monts", "Val-des-Monts, QC"),
         _city("Carleton Place", "Carleton Place, ON"),
-        _city("Cantley", "Cantley, QC"),
         _city("Arnprior", "Arnprior, ON"),
+        _city("Mississippi Mills", "Almonte, ON"),
+        _city("North Grenville (Kemptville)", "Kemptville, ON"),
         _city("Chelsea", "Chelsea, QC"),
+        _city("Cantley", "Cantley, QC"),
+        _city("Val-des-Monts", "Val-des-Monts, QC"),
         _city("La Pêche", "La Peche, QC"),
-        _city("Beckwith", "Beckwith, ON"),
-        _city("McNab/Braeside", "McNab/Braeside, ON"),
-        _city("Pontiac", "Pontiac, QC"),
-        _city("L'Ange-Gardien", "L'Ange-Gardien, QC"),
-        _city("Thurso", "Thurso, QC"),
     ),
 )
 
