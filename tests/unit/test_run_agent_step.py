@@ -415,12 +415,12 @@ class TestRunAgentStepAskUser:
 
 
 # ---------------------------------------------------------------------------
-# Tests: filter_listings uses enriched master when available
+# Tests: filter_listings corpus (current vs master)
 # ---------------------------------------------------------------------------
 
 class TestRunAgentStepFilterSource:
     def test_filter_listings_keeps_enrichment_from_full_scrape(self):
-        """filter_listings starts from the raw scrape and copies proximity/scores onto matching ids."""
+        """Reductive filter on the current (enriched) set keeps proximity fields."""
         raw_listings = [
             sample_listing(id="e-1", bedrooms=2).model_dump(),
             sample_listing(id="e-2", bedrooms=1).model_dump(),
@@ -471,8 +471,79 @@ class TestRunAgentStepFilterSource:
         assert filter_result["listings"][0]["id"] == "e-1"
         assert filter_result["listings"][0]["proximity"]
 
+    def test_reductive_filter_does_not_restore_apply_dropped_listings(self):
+        """Narrowing from the display set must not resurrect apply-dropped rows."""
+        raw_listings = [
+            sample_listing(id="kept", bedrooms=2, price=2000.0).model_dump(),
+            sample_listing(id="dropped", bedrooms=2, price=4000.0).model_dump(),
+            sample_listing(id="three_bed", bedrooms=3, price=2500.0).model_dump(),
+        ]
+        applied = [
+            (raw_listings[0] | {"match_score": 0.9}),
+            (raw_listings[2] | {"match_score": 0.8}),
+        ]
+        search_args = json.dumps(
+            {"filters": {"min_bedrooms": 2, "max_bedrooms": 3, "location": "Vancouver, BC"}}
+        )
+        messages = _base_messages() + [
+            {"role": "user", "content": "Search"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "rental_search", "arguments": search_args},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "content": json.dumps({"listings": raw_listings, "total_count": 3}),
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc2",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_search_preferences",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc2",
+                "content": json.dumps({"listings": applied, "total_count": 2}),
+            },
+        ]
+        tool_call = _make_tool_call_reply(
+            "filter_listings",
+            {"max_bedrooms": 2},
+            call_id="tc3",
+        )
+        final = _make_final_reply("Narrowed.")
+        client, model = _make_client(tool_call, final)
+        updated, payload, _ = run_agent_step(client, model, messages)
+        assert payload is None
+        filter_result = None
+        for m in updated:
+            if m.get("role") == "tool" and m.get("tool_call_id") == "tc3":
+                filter_result = json.loads(m["content"])
+                break
+        assert filter_result is not None
+        ids = {lst["id"] for lst in filter_result["listings"]}
+        assert ids == {"kept"}
+        assert filter_result["listings"][0]["match_score"] == 0.9
+
     def test_filter_listings_can_restore_listings_dropped_by_apply(self):
-        """Relaxing after apply_search_preferences re-filters from the full scrape."""
+        """Clearing proximity (empty rules) re-filters from the full scrape."""
         raw_listings = [
             sample_listing(id="cheap", bedrooms=2, price=2000.0).model_dump(),
             sample_listing(id="steep", bedrooms=2, price=4000.0).model_dump(),
@@ -520,7 +591,7 @@ class TestRunAgentStepFilterSource:
         ]
         tool_call = _make_tool_call_reply(
             "filter_listings",
-            {"min_bedrooms": 2},
+            {"proximity_rules": []},
             call_id="tc3",
         )
         final = _make_final_reply("Relaxed.")
@@ -537,6 +608,53 @@ class TestRunAgentStepFilterSource:
         assert ids == {"cheap", "steep"}
         cheap = next(lst for lst in filter_result["listings"] if lst["id"] == "cheap")
         assert cheap["match_score"] == 0.9
+
+
+class TestFilterListingsUsesMaster:
+    def test_sort_only_uses_current(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master(
+            {"sort_by": "price", "ascending": True},
+            {"max_bedrooms": 3, "min_bedrooms": 2},
+        ) is False
+
+    def test_tighter_max_beds_uses_current(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master(
+            {"max_bedrooms": 2},
+            {"min_bedrooms": 2, "max_bedrooms": 3},
+        ) is False
+
+    def test_looser_max_beds_uses_master(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master(
+            {"max_bedrooms": 3},
+            {"min_bedrooms": 2, "max_bedrooms": 2},
+        ) is True
+
+    def test_empty_proximity_rules_uses_master(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master({"proximity_rules": []}, {}) is True
+
+    def test_broader_categories_uses_master(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master(
+            {"house_categories": ["Apartment", "House"]},
+            {"house_categories": ["Apartment"]},
+        ) is True
+
+    def test_narrower_categories_uses_current(self):
+        from rental_search_agent.client import filter_listings_uses_master
+
+        assert filter_listings_uses_master(
+            {"house_categories": ["Apartment"]},
+            {"house_categories": ["Apartment", "House"]},
+        ) is False
 
 
 # ---------------------------------------------------------------------------
