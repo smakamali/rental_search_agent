@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Optional
 import json
+import logging
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # Contact/booking keys stay persisted but are never shown in Search Preferences UI.
 CONTACT_PREF_KEYS = ("viewing_preference", "name", "email", "phone")
@@ -62,7 +65,7 @@ class EffectiveSearchPreferences(BaseModel):
         return False
 
 
-def _parse_optional_float(value: Any) -> Optional[float]:
+def _parse_optional_float(value: Any, *, field: str | None = None) -> Optional[float]:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -75,17 +78,19 @@ def _parse_optional_float(value: Any) -> Optional[float]:
     try:
         return float(s)
     except ValueError:
+        if field is not None:
+            logger.warning("Failed to parse %s as float: %r", field, value)
         return None
 
 
-def _parse_optional_int(value: Any) -> Optional[int]:
-    f = _parse_optional_float(value)
+def _parse_optional_int(value: Any, *, field: str | None = None) -> Optional[int]:
+    f = _parse_optional_float(value, field=field)
     if f is None:
         return None
     return int(f)
 
 
-def _parse_optional_bool(value: Any) -> Optional[bool]:
+def _parse_optional_bool(value: Any, *, field: str | None = None) -> Optional[bool]:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -97,15 +102,22 @@ def _parse_optional_bool(value: Any) -> Optional[bool]:
         return True
     if s in ("0", "false", "no", "n", "off"):
         return False
+    if field is not None:
+        logger.warning("Failed to parse %s as bool: %r", field, value)
     return None
 
 
-def _parse_listing_type(value: Any) -> Optional[str]:
-    s = str(value or "").strip().lower()
+def _parse_listing_type(value: Any, *, field: str | None = None) -> Optional[str]:
+    raw = str(value or "").strip()
+    s = raw.lower()
+    if not s:
+        return None
     if s in ("for_rent", "rent", "rental"):
         return "for_rent"
     if s in ("for_sale", "sale", "buy"):
         return "for_sale"
+    if field is not None:
+        logger.warning("Failed to parse %s as listing_type: %r", field, value)
     return None
 
 
@@ -114,16 +126,16 @@ def stored_prefs_to_effective(stored: Mapping[str, Any] | None) -> EffectiveSear
     stored = stored or {}
     location = str(stored.get("location") or "").strip() or None
     return EffectiveSearchPreferences(
-        budget_max=_parse_optional_float(stored.get("budget_max")),
-        min_bedrooms=_parse_optional_int(stored.get("min_bedrooms")),
-        max_bedrooms=_parse_optional_int(stored.get("max_bedrooms")),
-        min_bathrooms=_parse_optional_float(stored.get("min_bathrooms")),
-        require_den=_parse_optional_bool(stored.get("require_den")),
-        min_sqft=_parse_optional_float(stored.get("min_sqft")),
+        budget_max=_parse_optional_float(stored.get("budget_max"), field="budget_max"),
+        min_bedrooms=_parse_optional_int(stored.get("min_bedrooms"), field="min_bedrooms"),
+        max_bedrooms=_parse_optional_int(stored.get("max_bedrooms"), field="max_bedrooms"),
+        min_bathrooms=_parse_optional_float(stored.get("min_bathrooms"), field="min_bathrooms"),
+        require_den=_parse_optional_bool(stored.get("require_den"), field="require_den"),
+        min_sqft=_parse_optional_float(stored.get("min_sqft"), field="min_sqft"),
         proximity_preferences=str(stored.get("proximity_preferences") or "").strip(),
         qualitative_preferences=str(stored.get("qualitative_preferences") or "").strip(),
         location=location,
-        listing_type=_parse_listing_type(stored.get("listing_type")),
+        listing_type=_parse_listing_type(stored.get("listing_type"), field="listing_type"),
     )
 
 
@@ -177,6 +189,11 @@ def load_stored_preferences() -> dict[str, str]:
         data = json.loads(path.read_text())
         return {k: data.get(k, "") or "" for k in PREF_KEYS}
     except Exception:
+        logger.warning(
+            "load_stored_preferences failed; using defaults path=%s",
+            path,
+            exc_info=True,
+        )
         return default
 
 
@@ -189,7 +206,7 @@ def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:
     budget = chat.get("budget_max")
     if budget is None:
         budget = chat.get("price_max")
-    parsed_budget = _parse_optional_float(budget)
+    parsed_budget = _parse_optional_float(budget, field="budget_max")
     if parsed_budget is not None:
         out["budget_max"] = parsed_budget
 
@@ -201,12 +218,12 @@ def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:
         ("price_min", _parse_optional_float),
     ):
         if key in chat and chat.get(key) is not None:
-            parsed = parser(chat.get(key))
+            parsed = parser(chat.get(key), field=key)
             if parsed is not None:
                 out[key] = parsed
 
     if "require_den" in chat and chat.get("require_den") is not None:
-        parsed_den = _parse_optional_bool(chat.get("require_den"))
+        parsed_den = _parse_optional_bool(chat.get("require_den"), field="require_den")
         if parsed_den is not None:
             out["require_den"] = parsed_den
 
@@ -245,7 +262,14 @@ def merge_chat_over_stored(
     data = base.model_dump()
     data.update(overrides)
     # If chat set price_max via budget_max and stored had qualitative only, fine.
-    return EffectiveSearchPreferences(**data)
+    effective = EffectiveSearchPreferences(**data)
+    set_keys = sorted(k for k, v in effective.model_dump().items() if v not in (None, "", []))
+    logger.debug(
+        "merge_chat_over_stored: effective_keys=%s n_overrides=%d",
+        set_keys,
+        len(overrides),
+    )
+    return effective
 
 
 def resolve_active_requirement(

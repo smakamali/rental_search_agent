@@ -431,6 +431,36 @@ class TestApplySearchPreferences:
         assert ranked[0]["rank"] == 1
         assert ranked[1]["rank"] == 2
 
+    def test_logs_pipeline_summary(self, caplog):
+        listings = [
+            _listing_dict(id="cheap", price=2000.0, bedrooms=2),
+            _listing_dict(id="steep", price=4000.0, bedrooms=2),
+        ]
+        prefs = EffectiveSearchPreferences(min_bedrooms=2, budget_max=2800.0)
+        with caplog.at_level("INFO", logger="rental_search_agent.preference_apply"):
+            apply_search_preferences(listings, prefs)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("stage start name=apply_search_preferences" in m for m in messages)
+        assert any(
+            "apply_search_preferences summary" in m
+            and "n_in=2" in m
+            and "after_structural=1" in m
+            for m in messages
+        )
+
+    def test_structural_stage_emits_progress(self):
+        listings = [_listing_dict(id="a", bedrooms=2, price=2000.0)]
+        prefs = EffectiveSearchPreferences(min_bedrooms=2)
+        events: list[tuple[str, str, bool]] = []
+
+        def _progress(name: str, phase: str, ok: bool = True) -> None:
+            events.append((name, phase, ok))
+
+        apply_search_preferences(listings, prefs, progress=_progress)
+        assert ("filter_listings", "start", True) in events
+        assert ("filter_listings", "end", True) in events
+        assert ("score_listings_by_preferences", "start", True) in events
+
 
 class TestMakeApplyToolMessages:
     def test_payload_round_trips(self):

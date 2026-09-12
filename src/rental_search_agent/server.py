@@ -14,6 +14,7 @@ from rental_search_agent.calendar_service import (
     update_event as do_calendar_update_event,
 )
 from rental_search_agent.filtering import filter_listings as do_filter_listings
+from rental_search_agent.logging_config import log_stage
 from rental_search_agent.summarizer import summarize_listings as do_summarize_listings
 from rental_search_agent.geocoding import (
     geocode_location as do_geocode_location,
@@ -43,6 +44,8 @@ from rental_search_agent.viewing_plan import (
     draft_viewing_plan as do_draft_viewing_plan,
     modify_viewing_plan as do_modify_viewing_plan,
 )
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "Property Search Assistant",
@@ -83,11 +86,37 @@ def rental_search(filters: dict[str, Any]) -> RentalSearchResponse:
     try:
         f = RentalSearchFilters.model_validate(filters)
     except Exception as e:
+        logger.warning("rental_search invalid filters: %s", e, exc_info=True)
         raise ValueError(f"Invalid filters: {e}") from e
+    loc = None
     try:
-        return search(f)
+        loc = f.location_display()
+    except Exception:
+        loc = filters.get("location") if isinstance(filters, dict) else None
+    logger.info(
+        "rental_search start location=%s min_bedrooms=%s listing_type=%s",
+        loc,
+        getattr(f, "min_bedrooms", None),
+        getattr(f, "listing_type", None),
+    )
+    try:
+        with log_stage(logger, "mcp_rental_search", location=loc):
+            resp = search(f)
+        failed = getattr(resp, "failed_locations", None) or []
+        logger.info(
+            "rental_search complete total_count=%s failed_locations=%s",
+            getattr(resp, "total_count", None),
+            len(failed) if isinstance(failed, list) else failed,
+        )
+        if failed:
+            logger.warning("rental_search partial failures failed_locations=%s", failed)
+        return resp
     except SearchBackendError as e:
+        logger.warning("rental_search backend failure: %s", e, exc_info=True)
         raise ValueError(str(e)) from e
+    except Exception:
+        logger.exception("rental_search unexpected failure")
+        raise
 
 
 @mcp.tool()
@@ -118,9 +147,14 @@ def filter_listings(
     try:
         criteria = ListingFilterCriteria.model_validate(criteria_dict) if criteria_dict else ListingFilterCriteria()
     except Exception as e:
+        logger.warning("filter_listings invalid criteria: %s", e, exc_info=True)
         raise ValueError(f"Invalid filter criteria: {e}") from e
-    rule_objs = [ProximityRule.model_validate(r) for r in (proximity_rules or [])] if proximity_rules else None
-    return do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=rule_objs)
+    try:
+        rule_objs = [ProximityRule.model_validate(r) for r in (proximity_rules or [])] if proximity_rules else None
+        return do_filter_listings(listings, criteria, sort_by=sort_by, ascending=ascending, proximity_rules=rule_objs)
+    except Exception:
+        logger.exception("filter_listings failed")
+        raise
 
 
 @mcp.tool()
@@ -269,9 +303,10 @@ def simulate_viewing_request(
     return do_simulate_viewing_request(listing_url, timeslot, user_details)
 
 
-def _calendar_error(msg: str) -> None:
-    """Re-raise as ValueError for calendar errors."""
-    raise ValueError(msg) from None
+def _calendar_error(exc: Exception) -> None:
+    """Log calendar failures, then re-raise as ValueError (preserving cause)."""
+    logger.warning("Calendar tool failed: %s", exc, exc_info=True)
+    raise ValueError(str(exc)) from exc
 
 
 @mcp.tool()
@@ -286,7 +321,7 @@ def calendar_list_events(
         events = do_calendar_list_events(time_min, time_max, calendar_id, max_results)
         return {"events": [{"id": e.get("id"), "summary": e.get("summary"), "start": e.get("start"), "end": e.get("end")} for e in events]}
     except Exception as e:
-        _calendar_error(str(e))
+        _calendar_error(e)
 
 
 @mcp.tool()
@@ -303,8 +338,7 @@ def calendar_get_available_slots(
         )
         return {"slots": slots}
     except Exception as e:
-        logging.warning("calendar_get_available_slots failed: %s", e)
-        _calendar_error(str(e))
+        _calendar_error(e)
 
 
 @mcp.tool()
@@ -331,7 +365,7 @@ def calendar_create_event(
         )
         return {"id": event.get("id"), "htmlLink": event.get("htmlLink"), "summary": event.get("summary")}
     except Exception as e:
-        _calendar_error(str(e))
+        _calendar_error(e)
 
 
 @mcp.tool()
@@ -355,7 +389,7 @@ def calendar_update_event(
         )
         return {"id": event.get("id"), "htmlLink": event.get("htmlLink"), "summary": event.get("summary")}
     except Exception as e:
-        _calendar_error(str(e))
+        _calendar_error(e)
 
 
 @mcp.tool()
@@ -365,7 +399,7 @@ def calendar_delete_event(event_id: str) -> dict[str, Any]:
         do_calendar_delete_event(event_id)
         return {"deleted": event_id}
     except Exception as e:
-        _calendar_error(str(e))
+        _calendar_error(e)
 
 
 @mcp.tool()
@@ -375,9 +409,10 @@ def draft_viewing_plan(listings: list[dict[str, Any]], available_slots: list[dic
         plan = do_draft_viewing_plan(listings, available_slots)
         unused = _compute_unused_slots(plan.entries, available_slots)
         return {"entries": [e.model_dump() for e in plan.entries], "unused_slots": unused}
-    except ValueError as e:
+    except ValueError:
         raise
     except Exception as e:
+        logger.exception("draft_viewing_plan failed")
         raise ValueError(str(e)) from e
 
 
@@ -400,14 +435,19 @@ def modify_viewing_plan(
         )
         unused = _compute_unused_slots(plan.entries, available_slots)
         return {"entries": [e.model_dump() for e in plan.entries], "unused_slots": unused}
-    except ValueError as e:
+    except ValueError:
         raise
     except Exception as e:
+        logger.exception("modify_viewing_plan failed")
         raise ValueError(str(e)) from e
 
 
 def main() -> None:
     """Run the MCP server (stdio by default for Cursor/Claude)."""
+    from rental_search_agent.logging_config import configure_logging
+
+    configure_logging()
+    logger.info("MCP server starting")
     mcp.run()
 
 

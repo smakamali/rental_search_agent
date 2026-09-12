@@ -2,6 +2,7 @@
 
 import pytest
 
+from rental_search_agent.logging_config import clear_run_id, reset_logging_config
 from tests.fixtures.sample_data import (
     mock_apify_item,
     sample_filter_criteria,
@@ -9,6 +10,16 @@ from tests.fixtures.sample_data import (
     sample_listings,
     sample_rental_filters,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_package_logging():
+    """Keep configure_logging / run_id from leaking across tests (caplog + propagate)."""
+    reset_logging_config()
+    clear_run_id()
+    yield
+    reset_logging_config()
+    clear_run_id()
 
 
 @pytest.fixture

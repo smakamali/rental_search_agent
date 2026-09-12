@@ -18,6 +18,7 @@ from rental_search_agent.backends.common import (
     post_filter_listings,
 )
 from rental_search_agent.backends.errors import SearchBackendError
+from rental_search_agent.logging_config import format_run_id_suffix, log_stage
 from rental_search_agent.models import Listing, RentalSearchFilters, RentalSearchResponse
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,26 @@ def _warn_incomplete_fetch_details(listings: list[Listing]) -> None:
             missing,
             len(listings),
         )
+
+
+def _safe_run_input_summary(run_input: dict[str, Any]) -> str:
+    """Compact filter summary for logs (never includes tokens/secrets)."""
+    keys = (
+        "location",
+        "operation",
+        "maxItems",
+        "fetchDetails",
+        "minBeds",
+        "maxBeds",
+        "minBathrooms",
+        "maxBathrooms",
+        "minPrice",
+        "maxPrice",
+        "minSquareFootage",
+        "maxSquareFootage",
+        "sortBy",
+    )
+    return " ".join(f"{k}={run_input.get(k)}" for k in keys if k in run_input)
 
 
 def _nonempty_str(value: Any) -> Optional[str]:
@@ -584,13 +605,16 @@ class ApifyRealtorCaBackend:
         wait: timedelta,
     ) -> list[Any]:
         """One actor call + status check + dataset read. Raises _TransientApifyError on retryable failure."""
+        location = run_input.get("location")
+        operation = run_input.get("operation")
         logger.debug(
-            "Apify actor=%s operation=%s location=%s maxItems=%s fetchDetails=%s",
+            "Apify fetch start actor=%s location=%s operation=%s maxItems=%s fetchDetails=%s%s",
             self.actor_id,
-            run_input.get("operation"),
-            run_input.get("location"),
+            location,
+            operation,
             run_input.get("maxItems"),
             run_input.get("fetchDetails"),
+            format_run_id_suffix(),
         )
         try:
             run = _call_actor(client.actor(self.actor_id), run_input, wait)
@@ -622,12 +646,21 @@ class ApifyRealtorCaBackend:
             )
 
         try:
-            return list(client.dataset(dataset_id).iterate_items())
+            items = list(client.dataset(dataset_id).iterate_items())
         except Exception as e:
             raise _TransientApifyError(
                 _MSG_UNAVAILABLE,
                 detail=f"dataset read {type(e).__name__}: {e}",
             ) from e
+
+        if not items:
+            logger.warning(
+                "Apify fetch succeeded with 0 items location=%s operation=%s%s",
+                location,
+                operation,
+                format_run_id_suffix(),
+            )
+        return items
 
     def search(self, filters: RentalSearchFilters) -> RentalSearchResponse:
         listing_type = filters.listing_type or "for_rent"
@@ -639,44 +672,91 @@ class ApifyRealtorCaBackend:
             if self.fetch_details
             else ACTOR_CALL_WAIT_DURATION
         )
+        location = run_input.get("location")
+        operation = run_input.get("operation")
+        # DEBUG: adapter.search already owns the INFO search boundary / timing.
+        logger.debug(
+            "Apify search start %s%s",
+            _safe_run_input_summary(run_input),
+            format_run_id_suffix(),
+        )
         client = self._get_client()
         delays = [0.0, *_retry_delays(self.max_retries, self.retry_base_seconds)]
         items: list[Any] = []
         last_error: Optional[_TransientApifyError] = None
+        success_attempt = 0
 
-        for attempt, delay_before in enumerate(delays):
-            if delay_before:
-                time.sleep(delay_before)
-            try:
-                items = self._fetch_dataset_items(client, run_input, wait)
-                last_error = None
-                break
-            except _TransientApifyError as e:
-                last_error = e
-                is_last = attempt >= len(delays) - 1
-                next_delay = delays[attempt + 1] if not is_last else None
-                logger.warning(
-                    "Apify attempt %d/%d failed (%s)%s",
-                    attempt + 1,
-                    len(delays),
-                    e.detail or e.user_message,
-                    f"; retrying in {next_delay:.1f}s" if next_delay is not None else "",
+        with log_stage(
+            logger,
+            "apify.search",
+            level=logging.DEBUG,
+            location=location,
+            operation=operation,
+            maxItems=run_input.get("maxItems"),
+            fetchDetails=run_input.get("fetchDetails"),
+        ):
+            for attempt, delay_before in enumerate(delays):
+                if delay_before:
+                    time.sleep(delay_before)
+                try:
+                    items = self._fetch_dataset_items(client, run_input, wait)
+                    last_error = None
+                    success_attempt = attempt + 1
+                    break
+                except _TransientApifyError as e:
+                    last_error = e
+                    is_last = attempt >= len(delays) - 1
+                    next_delay = delays[attempt + 1] if not is_last else None
+                    logger.warning(
+                        "Apify attempt %d/%d failed location=%s operation=%s (%s)%s%s",
+                        attempt + 1,
+                        len(delays),
+                        location,
+                        operation,
+                        e.detail or e.user_message,
+                        f"; retrying in {next_delay:.1f}s" if next_delay is not None else "",
+                        format_run_id_suffix(),
+                    )
+                    if is_last:
+                        raise SearchBackendError(e.user_message) from e
+
+            if last_error is not None:
+                raise SearchBackendError(last_error.user_message) from last_error
+
+            listings = _map_dataset_items(items, listing_type)
+            if self.fetch_details:
+                _warn_incomplete_fetch_details(listings)
+            before = len(listings)
+            listings = post_filter_listings(listings, filters)
+            if before != len(listings):
+                logger.debug(
+                    "Post-fetch filter excluded %d of %d listings",
+                    before - len(listings),
+                    before,
                 )
-                if is_last:
-                    raise SearchBackendError(e.user_message) from e
-
-        if last_error is not None:
-            raise SearchBackendError(last_error.user_message) from last_error
-
-        listings = _map_dataset_items(items, listing_type)
-        if self.fetch_details:
-            _warn_incomplete_fetch_details(listings)
-        before = len(listings)
-        listings = post_filter_listings(listings, filters)
-        if before != len(listings):
+            # Timing owned by log_stage; keep a compact DEBUG success summary.
             logger.debug(
-                "Post-fetch filter excluded %d of %d listings",
-                before - len(listings),
-                before,
+                "Apify search success location=%s raw_items=%d listings=%d attempt=%d/%d%s",
+                location,
+                len(items),
+                len(listings),
+                success_attempt,
+                len(delays),
+                format_run_id_suffix(),
             )
-        return RentalSearchResponse(listings=listings, total_count=len(listings))
+            if not listings and not items:
+                logger.warning(
+                    "Apify search succeeded with 0 listings location=%s operation=%s%s",
+                    location,
+                    operation,
+                    format_run_id_suffix(),
+                )
+            elif not listings:
+                logger.warning(
+                    "Apify search returned 0 listings after filter "
+                    "location=%s raw_items=%d%s",
+                    location,
+                    len(items),
+                    format_run_id_suffix(),
+                )
+            return RentalSearchResponse(listings=listings, total_count=len(listings))

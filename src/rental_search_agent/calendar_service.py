@@ -116,22 +116,26 @@ def get_credentials(scopes: list[str] | None = None) -> Any:
                 creds = Credentials.from_authorized_user_file(token_path, scopes)
                 logger.debug("get_credentials: loaded token, valid=%s", creds.valid)
             except Exception as e:
-                logger.debug("get_credentials: failed to load token: %s", e)
+                logger.warning("get_credentials: failed to load token: %s", e, exc_info=True)
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 logger.debug("get_credentials: refreshing token")
-                creds.refresh(Request())
+                try:
+                    creds.refresh(Request())
+                except Exception as e:
+                    logger.warning("get_credentials: token refresh failed: %s", e, exc_info=True)
+                    raise
             else:
                 if not os.path.exists(creds_path):
-                    logger.debug("get_credentials: credentials not found at %s", creds_path)
+                    logger.warning("get_credentials: credentials not found at %s", creds_path)
                     raise ValueError(
                         f"Google Calendar credentials not found at {creds_path}. "
                         "Download credentials.json from Google Cloud Console and place it there."
                     )
-                logger.debug("get_credentials: starting OAuth flow (browser will open)")
+                logger.info("get_credentials: starting OAuth flow (browser will open)")
                 flow = InstalledAppFlow.from_client_secrets_file(creds_path, scopes)
                 creds = flow.run_local_server(port=0)
-                logger.debug("get_credentials: OAuth flow completed")
+                logger.info("get_credentials: OAuth flow completed")
             Path(token_path).parent.mkdir(parents=True, exist_ok=True)
             with open(token_path, "w") as f:
                 f.write(creds.to_json())
@@ -244,13 +248,18 @@ def get_available_slots(
         "items": [{"id": "primary"}, {"id": realtor_id}],
     }
     logger.debug("get_available_slots: calling FreeBusy API")
-    freebusy = service.freebusy().query(body=body).execute()
+    try:
+        freebusy = service.freebusy().query(body=body).execute()
+    except Exception as e:
+        logger.warning("get_available_slots: FreeBusy API failed: %s", e, exc_info=True)
+        raise
     logger.debug("get_available_slots: FreeBusy API returned")
     calendars_data = freebusy.get("calendars", {})
     busy_list: list[dict[str, Any]] = []
     for cal_id in ("primary", realtor_id):
         cal = calendars_data.get(cal_id, {})
         if "errors" in cal:
+            logger.warning("get_available_slots: calendar access error cal_id=%s errors=%s", cal_id, cal["errors"])
             raise ValueError("Calendar access error: " + str(cal["errors"]))
         busy_list.extend(cal.get("busy", []))
 

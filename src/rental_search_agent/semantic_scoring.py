@@ -288,7 +288,17 @@ def embed_texts(texts: List[str], model: Optional[str] = None) -> List[List[floa
         raise ImportError("openai package is required for semantic scoring. pip install openai") from None
     client, default_model = get_embedding_client_and_model()
     embedding_model = model or default_model
-    response = client.embeddings.create(input=texts, model=embedding_model)
+    logger.debug("embed_texts: model=%s n_texts=%d", embedding_model, len(texts))
+    try:
+        response = client.embeddings.create(input=texts, model=embedding_model)
+    except Exception:
+        logger.debug(
+            "embed_texts failed: model=%s n_texts=%d",
+            embedding_model,
+            len(texts),
+            exc_info=True,
+        )
+        raise
     ordering = {e.index: e.embedding for e in response.data}
     return [ordering[i] for i in range(len(texts))]
 

@@ -1,6 +1,7 @@
 """Streamlit chat UI for the rental search agent. Uses run_agent_step_events from client."""
 
 import json
+import logging
 from pathlib import Path
 
 import streamlit as st
@@ -24,6 +25,7 @@ from rental_search_agent.display_format import (
 )
 from rental_search_agent.filtering import filter_listings as do_filter_listings
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences
+from rental_search_agent.logging_config import clear_run_id, log_stage, new_run_id, set_run_id
 from rental_search_agent.models import RentalSearchFilters
 from rental_search_agent.preference_apply import (
     apply_search_preferences,
@@ -57,6 +59,8 @@ from rental_search_agent.streamlit_results import (
     render_search_results,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _preferences_block(prefs: dict) -> str:
     """Build the search-relevant preferences block to inject into the system message."""
@@ -78,6 +82,11 @@ def _load_preferences_from_file() -> dict:
         data = json.loads(path.read_text())
         return {k: data.get(k, "") or "" for k in PREF_KEYS}
     except Exception:
+        logger.warning(
+            "Failed to load preferences from %s; using defaults",
+            path,
+            exc_info=True,
+        )
         return default
 
 
@@ -88,7 +97,7 @@ def _save_preferences_to_file(prefs: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
     except Exception:
-        pass
+        logger.warning("Failed to save preferences to %s", path, exc_info=True)
 
 
 def _build_system_content() -> str:
@@ -115,6 +124,7 @@ def _escape_markdown_plain(text: str) -> str:
 
 
 def _ensure_env_loaded() -> None:
+    """Load .env and configure package logging (idempotent)."""
     project_root = Path(__file__).resolve().parent.parent.parent
     _load_env_file(project_root / ".env")
 
@@ -196,6 +206,7 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
             st.session_state["proximity_parsed_rules"] = (proximity_text, rules)
         except Exception:
             st.warning("Could not parse proximity preferences; showing results unfiltered.")
+            logger.warning("Proximity preference parse failed", exc_info=True)
             return listings
     if not rules:
         return listings
@@ -217,6 +228,7 @@ def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str)
                 lst["rank"] = rank_by_id[lst["id"]]
         return result
     except Exception:
+        logger.warning("Proximity filter safeguard failed; showing unfiltered", exc_info=True)
         return listings
 
 
@@ -362,34 +374,39 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
         status_box = st.status("Working...", expanded=True)
         text_placeholder = st.empty()
         acc_text = ""
-        for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
-            etype = event["type"]
-            if etype in ("round_start", "text_reset"):
-                # round_start: a new LLM round is starting; any text streamed so far belongs to
-                # a distinct, separately-persisted assistant message (e.g. rare preamble
-                # alongside a tool call).
-                # text_reset: a malformed streamed tool call triggered a non-streaming fallback
-                # retry within the *same* round; the fallback's text_delta is the full,
-                # authoritative reply and must replace (not append to) the partial text already
-                # streamed from the failed attempt.
-                # Either way, reset so stale/partial text isn't concatenated with what follows.
-                acc_text = ""
-                text_placeholder.empty()
-            elif etype == "tool_start":
-                ph = status_box.empty()
-                ph.markdown(f"- \u23f3 {event['label']}")
-                step_placeholders[event["seq"]] = ph
-                status_box.update(label=event["label"])
-            elif etype == "tool_end":
-                ph = step_placeholders.get(event["seq"])
-                if ph is not None:
-                    icon = "\u2705" if event["ok"] else "\u26a0\ufe0f"
-                    ph.markdown(f"- {icon} {event['label']}")
-            elif etype == "text_delta":
-                acc_text += event["delta"]
-                text_placeholder.markdown(acc_text)
-            elif etype == "done":
-                final_event = event
+        try:
+            for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
+                etype = event["type"]
+                if etype in ("round_start", "text_reset"):
+                    # round_start: a new LLM round is starting; any text streamed so far belongs to
+                    # a distinct, separately-persisted assistant message (e.g. rare preamble
+                    # alongside a tool call).
+                    # text_reset: a malformed streamed tool call triggered a non-streaming fallback
+                    # retry within the *same* round; the fallback's text_delta is the full,
+                    # authoritative reply and must replace (not append to) the partial text already
+                    # streamed from the failed attempt.
+                    # Either way, reset so stale/partial text isn't concatenated with what follows.
+                    acc_text = ""
+                    text_placeholder.empty()
+                elif etype == "tool_start":
+                    ph = status_box.empty()
+                    ph.markdown(f"- \u23f3 {event['label']}")
+                    step_placeholders[event["seq"]] = ph
+                    status_box.update(label=event["label"])
+                elif etype == "tool_end":
+                    ph = step_placeholders.get(event["seq"])
+                    if ph is not None:
+                        icon = "\u2705" if event["ok"] else "\u26a0\ufe0f"
+                        ph.markdown(f"- {icon} {event['label']}")
+                elif etype == "text_delta":
+                    acc_text += event["delta"]
+                    text_placeholder.markdown(acc_text)
+                elif etype == "done":
+                    final_event = event
+        except Exception:
+            logger.exception("Agent step failed")
+            status_box.update(label="Error", state="error", expanded=True)
+            raise
         status_box.update(label="Done", state="complete", expanded=False)
         if not acc_text:
             # No streamed text (e.g. the turn ended on ask_user) — nothing more to show here.
@@ -452,41 +469,75 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
     )
     if request.kind == "error":
         st.session_state["apply_warnings"] = request.warnings
+        logger.warning("Sidebar search rejected: %s", request.warnings)
         return
-    if request.kind == "scrape":
-        try:
-            filters = RentalSearchFilters.model_validate(request.filters)
-        except Exception as e:
-            st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
+    set_run_id(new_run_id())
+    try:
+        if request.kind == "scrape":
+            logger.info("Sidebar search start kind=scrape")
+            try:
+                filters = RentalSearchFilters.model_validate(request.filters)
+            except Exception as e:
+                logger.warning("Sidebar search invalid filters: %s", e, exc_info=True)
+                st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
+                return
+            try:
+                with log_stage(logger, "sidebar_scrape"):
+                    resp = search(filters)
+            except SearchBackendError as e:
+                logger.warning("Sidebar search backend failure: %s", e)
+                st.session_state["apply_warnings"] = [str(e)]
+                return
+            except Exception as e:
+                logger.warning("Sidebar search failed: %s", e, exc_info=True)
+                st.session_state["apply_warnings"] = [f"Search failed: {e}"]
+                return
+            data = resp.model_dump()
+            listings = with_display_rank(data.get("listings") or [])
+            data["listings"] = listings
+            st.session_state["messages"] = list(messages) + make_rental_search_tool_messages(
+                request.filters or {}, data
+            )
+            effective = stored_prefs_to_effective(new_prefs)
+            result = apply_search_preferences(listings, effective)
+            if result.warnings or result.skipped:
+                logger.warning(
+                    "Sidebar scrape apply soft failures warnings=%s skipped=%s",
+                    result.warnings,
+                    result.skipped,
+                )
+            _apply_pipeline_to_session(result, search_master=listings)
+            logger.info(
+                "Sidebar search end kind=scrape total_count=%s display=%s",
+                data.get("total_count"),
+                len(result.listings or []),
+            )
             return
-        try:
-            resp = search(filters)
-        except SearchBackendError as e:
-            st.session_state["apply_warnings"] = [str(e)]
-            return
-        except Exception as e:
-            st.session_state["apply_warnings"] = [f"Search failed: {e}"]
-            return
-        data = resp.model_dump()
-        listings = with_display_rank(data.get("listings") or [])
-        data["listings"] = listings
-        st.session_state["messages"] = list(messages) + make_rental_search_tool_messages(
-            request.filters or {}, data
-        )
-        effective = stored_prefs_to_effective(new_prefs)
-        result = apply_search_preferences(listings, effective)
-        _apply_pipeline_to_session(result, search_master=listings)
-        return
 
-    search_criteria = _get_active_search_criteria_from_messages(messages)
-    structural_prefs = structural_prefs_for_rerank(new_prefs, search_criteria)
-    score_prefs = stored_prefs_to_effective(new_prefs)
-    result = apply_search_preferences(
-        search_master,
-        score_prefs,
-        structural_prefs=structural_prefs,
-    )
-    _apply_pipeline_to_session(result)
+        logger.info("Sidebar search start kind=rerank master=%d", len(search_master))
+        search_criteria = _get_active_search_criteria_from_messages(messages)
+        structural_prefs = structural_prefs_for_rerank(new_prefs, search_criteria)
+        score_prefs = stored_prefs_to_effective(new_prefs)
+        with log_stage(logger, "sidebar_rerank", master=len(search_master)):
+            result = apply_search_preferences(
+                search_master,
+                score_prefs,
+                structural_prefs=structural_prefs,
+            )
+        if result.warnings or result.skipped:
+            logger.warning(
+                "Sidebar rerank soft failures warnings=%s skipped=%s",
+                result.warnings,
+                result.skipped,
+            )
+        _apply_pipeline_to_session(result)
+        logger.info(
+            "Sidebar search end kind=rerank display=%s applied=%s",
+            len(result.listings or []),
+            result.applied,
+        )
+    finally:
+        clear_run_id()
 
 
 def _render_preferences_sidebar() -> None:
@@ -813,6 +864,12 @@ def main() -> None:
                             analyze_listing_id
                         ] = result
                     except Exception as e:
+                        logger.warning(
+                            "Listing analysis failed listing_id=%s: %s",
+                            analyze_listing_id,
+                            e,
+                            exc_info=True,
+                        )
                         st.session_state.setdefault("analysis_result", {})[
                             analyze_listing_id
                         ] = {"error": str(e)}

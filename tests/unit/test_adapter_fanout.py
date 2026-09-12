@@ -192,3 +192,70 @@ class TestAdapterSearchFanout:
         pool_cls.assert_called_once_with(max_workers=2)
         assert result.total_count == 4
         assert set(result.searched_locations) == set(cities)
+
+
+class TestAdapterSearchLogging:
+    def test_logs_stage_start_and_done_for_single_city(self, caplog):
+        backend = MagicMock()
+        backend.search.return_value = _resp(sample_listing(id="v1"))
+        filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver, BC")
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("INFO", logger="rental_search_agent.adapter"),
+        ):
+            search(filters)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("stage start name=adapter.search" in m and "n_locations=1" in m for m in messages)
+        assert any("adapter.search done searched=1 failed=0 listings=1" in m for m in messages)
+
+    def test_warns_on_zero_listings(self, caplog):
+        backend = MagicMock()
+        backend.search.return_value = _resp()
+        filters = RentalSearchFilters(min_bedrooms=1, location="Vancouver, BC")
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("WARNING", logger="rental_search_agent.adapter"),
+        ):
+            search(filters)
+        assert any(
+            "returned zero listings" in r.getMessage() for r in caplog.records
+        )
+
+    def test_logs_dedupe_stats_on_multi_city(self, caplog):
+        backend = MagicMock()
+        shared = sample_listing(id="shared-mls", address="Border")
+        backend.search.side_effect = [_resp(shared), _resp(shared)]
+        filters = RentalSearchFilters(
+            min_bedrooms=1,
+            location=["Vancouver, BC", "Burnaby, BC"],
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("INFO", logger="rental_search_agent.adapter"),
+        ):
+            search(filters)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "before_dedupe=2" in m and "deduped=1" in m and "listings=1" in m
+            for m in messages
+        )
+
+    def test_warns_per_city_on_partial_failure(self, caplog):
+        backend = MagicMock()
+
+        def _side_effect(filters):
+            if filters.location == "Surrey, BC":
+                raise SearchBackendError("unavailable")
+            return _resp(sample_listing(id="ok", address=filters.location))
+
+        backend.search.side_effect = _side_effect
+        filters = RentalSearchFilters(
+            min_bedrooms=1,
+            location=["Vancouver, BC", "Surrey, BC"],
+        )
+        with (
+            patch("rental_search_agent.adapter.get_search_backend", return_value=backend),
+            caplog.at_level("WARNING", logger="rental_search_agent.adapter"),
+        ):
+            search(filters)
+        assert any("Search failed for Surrey, BC" in r.getMessage() for r in caplog.records)

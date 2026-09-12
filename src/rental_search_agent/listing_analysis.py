@@ -94,7 +94,7 @@ def analyze_listing_against_preferences(
     except ValueError:
         raise
     except Exception as e:
-        logger.warning("Listing analysis scoring failed: %s", e)
+        logger.warning("Listing analysis scoring failed: %s", e, exc_info=True)
         raise ValueError(f"Failed to compute match score: {e}") from e
 
     narrative_prefs = narrative_source or prefs.qualitative_preferences or ""
@@ -119,7 +119,7 @@ def analyze_listing_against_preferences(
             temperature=0,
         )
     except Exception as e:
-        logger.warning("Listing analysis LLM call failed: %s", e)
+        logger.warning("Listing analysis LLM call failed: %s", e, exc_info=True)
         raise ValueError(f"Failed to analyze listing: {e}") from e
 
     content = (response.choices[0].message.content or "{}").strip()

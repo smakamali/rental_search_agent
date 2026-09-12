@@ -1,9 +1,13 @@
 """In-memory filter and sort for search results. Used by filter_listings tool."""
 
+import logging
 import re
+from collections import Counter
 from typing import Any, List, Optional
 
 from rental_search_agent.models import Listing, ListingFilterCriteria, ProximityRule, RentalSearchResponse
+
+logger = logging.getLogger(__name__)
 
 # Attributes that can be used for sorting
 SORTABLE_ATTRS = frozenset(
@@ -136,49 +140,79 @@ def _get_sort_key(listing: Listing | dict, attr: str) -> Any:
     return (0, str(val))
 
 
-def _listing_matches(listing: Listing | dict, criteria: ListingFilterCriteria) -> bool:
-    """Return True if listing satisfies all non-None criteria."""
+def _listing_field_values(listing: Listing | dict) -> tuple[Any, Any, Any, Any, Any]:
     if isinstance(listing, dict):
-        bedrooms = listing.get("bedrooms")
-        bathrooms = listing.get("bathrooms")
-        sqft = listing.get("sqft")
-        price = listing.get("price")
-        house_category = listing.get("house_category")
-    else:
-        bedrooms = listing.bedrooms
-        bathrooms = listing.bathrooms
-        sqft = listing.sqft
-        price = listing.price
-        house_category = listing.house_category
+        return (
+            listing.get("bedrooms"),
+            listing.get("bathrooms"),
+            listing.get("sqft"),
+            listing.get("price"),
+            listing.get("house_category"),
+        )
+    return (
+        listing.bedrooms,
+        listing.bathrooms,
+        listing.sqft,
+        listing.price,
+        listing.house_category,
+    )
+
+
+def _structural_drop_reason(listing: Listing | dict, criteria: ListingFilterCriteria) -> Optional[str]:
+    """Return first structural drop-reason key, or None if listing passes criteria."""
+    bedrooms, bathrooms, sqft, price, house_category = _listing_field_values(listing)
 
     if criteria.min_bedrooms is not None:
-        if bedrooms is None or bedrooms < criteria.min_bedrooms:
-            return False
+        if bedrooms is None:
+            return "missing_fields"
+        if bedrooms < criteria.min_bedrooms:
+            return "beds"
     if criteria.max_bedrooms is not None:
-        if bedrooms is None or bedrooms > criteria.max_bedrooms:
-            return False
+        if bedrooms is None:
+            return "missing_fields"
+        if bedrooms > criteria.max_bedrooms:
+            return "beds"
     if criteria.min_bathrooms is not None:
-        if bathrooms is None or bathrooms < criteria.min_bathrooms:
-            return False
+        if bathrooms is None:
+            return "missing_fields"
+        if bathrooms < criteria.min_bathrooms:
+            return "baths"
     if criteria.max_bathrooms is not None:
-        if bathrooms is None or bathrooms > criteria.max_bathrooms:
-            return False
+        if bathrooms is None:
+            return "missing_fields"
+        if bathrooms > criteria.max_bathrooms:
+            return "baths"
     if criteria.min_sqft is not None:
-        if sqft is None or sqft < criteria.min_sqft:
-            return False
+        if sqft is None:
+            return "missing_fields"
+        if sqft < criteria.min_sqft:
+            return "sqft"
     if criteria.max_sqft is not None:
-        if sqft is None or sqft > criteria.max_sqft:
-            return False
+        if sqft is None:
+            return "missing_fields"
+        if sqft > criteria.max_sqft:
+            return "sqft"
     if criteria.price_min is not None:
-        if price is None or price < criteria.price_min:
-            return False
+        if price is None:
+            return "missing_fields"
+        if price < criteria.price_min:
+            return "price"
     if criteria.price_max is not None:
-        if price is None or price > criteria.price_max:
-            return False
+        if price is None:
+            return "missing_fields"
+        if price > criteria.price_max:
+            return "price"
     if criteria.house_categories:
+        if house_category is None or not str(house_category).strip():
+            return "missing_fields"
         if not _house_category_matches(house_category, criteria.house_categories):
-            return False
-    return True
+            return "category"
+    return None
+
+
+def _listing_matches(listing: Listing | dict, criteria: ListingFilterCriteria) -> bool:
+    """Return True if listing satisfies all non-None criteria."""
+    return _structural_drop_reason(listing, criteria) is None
 
 
 def _rule_key(rule: ProximityRule) -> str:
@@ -225,17 +259,37 @@ def filter_listings(
     """Filter in-memory listings by criteria and/or proximity rules (AND). Optionally sort. Returns same shape as rental_search. Listings with unknown proximity for a rule are kept."""
     if isinstance(criteria, dict):
         criteria = ListingFilterCriteria.model_validate(criteria)
+    n_in = len(listings)
+    drop_counts: Counter[str] = Counter()
     filtered: list[Listing] = []
     for item in listings:
         if isinstance(item, dict):
             listing = Listing.model_validate(item)
         else:
             listing = item
-        if not _listing_matches(listing, criteria):
+        reason = _structural_drop_reason(listing, criteria)
+        if reason is not None:
+            drop_counts[reason] += 1
             continue
         if proximity_rules and not _listing_matches_proximity(listing, proximity_rules):
+            drop_counts["proximity"] += 1
             continue
         filtered.append(listing)
     if sort_by and sort_by in SORTABLE_ATTRS:
         filtered.sort(key=lambda lst: _get_sort_key(lst, sort_by), reverse=not ascending)
-    return RentalSearchResponse(listings=filtered, total_count=len(filtered))
+    n_out = len(filtered)
+    drops = dict(drop_counts)
+    if n_in > 0 and n_out == 0:
+        logger.warning(
+            "filter_listings: wiped all listings n_in=%d n_out=0 drops=%s",
+            n_in,
+            drops,
+        )
+    else:
+        logger.debug(
+            "filter_listings: n_in=%d n_out=%d drops=%s",
+            n_in,
+            n_out,
+            drops,
+        )
+    return RentalSearchResponse(listings=filtered, total_count=n_out)

@@ -62,5 +62,5 @@ def summarize_conversation_for_preferences(messages: list[dict[str, Any]]) -> st
         content = (response.choices[0].message.content or "").strip()
         return content
     except Exception as e:
-        logger.warning("Chat summary failed: %s", e)
+        logger.warning("Chat summary failed: %s", e, exc_info=True)
         return ""
