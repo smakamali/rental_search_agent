@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rental-search-agent"
 version = "0.1.0"
-description = "Property Search Assistant MVP — MCP server, Apify Realtor.ca adapter, LLM agent, Chat UI"
+description = "Canadian property search assistant — Apify REALTOR.CA, LLM agent, Streamlit UI, MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
