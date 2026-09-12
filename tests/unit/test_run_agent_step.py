@@ -609,6 +609,79 @@ class TestRunAgentStepFilterSource:
         cheap = next(lst for lst in filter_result["listings"] if lst["id"] == "cheap")
         assert cheap["match_score"] == 0.9
 
+    def test_filter_outside_scrape_bounds_errors_instead_of_master_widen(self):
+        """Lowering min beds below the scrape must not restore 3BR from master."""
+        raw_listings = [
+            sample_listing(id="two", bedrooms=2).model_dump(),
+            sample_listing(id="three", bedrooms=3).model_dump(),
+        ]
+        applied = [raw_listings[0] | {"match_score": 0.9}]
+        search_args = json.dumps(
+            {
+                "filters": {
+                    "min_bedrooms": 2,
+                    "max_bedrooms": 3,
+                    "location": "Vancouver, BC",
+                }
+            }
+        )
+        messages = _base_messages() + [
+            {"role": "user", "content": "Search"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "rental_search", "arguments": search_args},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "content": json.dumps({"listings": raw_listings, "total_count": 2}),
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc2",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_search_preferences",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc2",
+                "content": json.dumps({"listings": applied, "total_count": 1}),
+            },
+        ]
+        tool_call = _make_tool_call_reply(
+            "filter_listings",
+            {"min_bedrooms": 1, "max_bedrooms": 2},
+            call_id="tc3",
+        )
+        final = _make_final_reply("Need a new search.")
+        client, model = _make_client(tool_call, final)
+        updated, payload, _ = run_agent_step(client, model, messages)
+        assert payload is None
+        filter_result = None
+        for m in updated:
+            if m.get("role") == "tool" and m.get("tool_call_id") == "tc3":
+                filter_result = json.loads(m["content"])
+                break
+        assert filter_result is not None
+        assert "error" in filter_result
+        assert "rental_search" in filter_result["error"]
+        assert "listings" not in filter_result
+
 
 class TestFilterListingsUsesMaster:
     def test_sort_only_uses_current(self):
@@ -655,6 +728,51 @@ class TestFilterListingsUsesMaster:
             {"house_categories": ["Apartment"]},
             {"house_categories": ["Apartment", "House"]},
         ) is False
+
+
+class TestFilterArgsOutsideScrape:
+    def test_lower_min_beds_than_scrape_requires_research(self):
+        from rental_search_agent.client import filter_args_outside_scrape
+
+        err = filter_args_outside_scrape(
+            {"min_bedrooms": 1, "max_bedrooms": 2},
+            {"min_bedrooms": 2, "max_bedrooms": 3, "location": "Vancouver, BC"},
+        )
+        assert err is not None
+        assert "rental_search" in err
+        assert "min_bedrooms" in err
+
+    def test_restore_max_within_scrape_ok(self):
+        from rental_search_agent.client import filter_args_outside_scrape
+
+        assert (
+            filter_args_outside_scrape(
+                {"max_bedrooms": 3},
+                {"min_bedrooms": 2, "max_bedrooms": 3},
+            )
+            is None
+        )
+
+    def test_higher_max_beds_than_scrape_requires_research(self):
+        from rental_search_agent.client import filter_args_outside_scrape
+
+        err = filter_args_outside_scrape(
+            {"max_bedrooms": 4},
+            {"min_bedrooms": 2, "max_bedrooms": 3},
+        )
+        assert err is not None
+        assert "max_bedrooms" in err
+
+    def test_scrape_max_zero_means_unlimited(self):
+        from rental_search_agent.client import filter_args_outside_scrape
+
+        assert (
+            filter_args_outside_scrape(
+                {"max_bedrooms": 5},
+                {"min_bedrooms": 2, "max_bedrooms": 0},
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
