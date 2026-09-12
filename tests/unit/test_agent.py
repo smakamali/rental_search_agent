@@ -110,3 +110,8 @@ class TestFlowInstructions:
         assert "applied automatically" in instructions.lower()
         assert "Search Preferences **Search**" in instructions
         assert "Do **not** enter this step after a new rental_search" in instructions
+
+    def test_outside_scrape_bounds_require_rental_search(self):
+        instructions = flow_instructions()
+        assert "outside the last scrape" in instructions
+        assert "MUST call rental_search" in instructions

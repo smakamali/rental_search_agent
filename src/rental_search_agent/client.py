@@ -293,7 +293,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "filter_listings",
-            "description": "Narrow and/or sort the current search results. Always re-filters from the complete search results (from the most recent rental_search or enrich_listings_with_proximity result), not from a previously filtered subset — so call it again with relaxed or updated criteria instead of running a new rental_search. Pass filter criteria and/or sort_by + ascending and/or proximity_rules.",
+            "description": "Narrow and/or sort the current search results. Reductive filters and sorts apply to the current displayed set; relaxing/widening criteria *within* the last scrape (or clearing proximity via proximity_rules=[]) re-filters from the full scrape so previously dropped listings can return. Bounds outside the last scrape (e.g. lower min_bedrooms than the scrape used) require a new rental_search — filter_listings will error. Prefer filter_listings over a new rental_search unless location or scrape bounds must change. Pass filter criteria and/or sort_by + ascending and/or proximity_rules.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -317,7 +317,16 @@ TOOLS = [
                     },
                     "sort_by": {"type": "string", "enum": ["price", "bedrooms", "bathrooms", "sqft", "address", "id", "title", "semantic_score", "match_score", "proximity", "listing_age_hours"], "description": "Attribute to sort by. Use match_score (preferred) or semantic_score with ascending=false for best preference match first. Use proximity with ascending=true for nearest first. Use listing_age_hours with ascending=true for newest first."},
                     "ascending": {"type": "boolean", "description": "If true, sort ascending (e.g. cheapest first for price, nearest first for proximity). If false, sort descending (e.g. most expensive first). Default true.", "default": True},
-                    "proximity_rules": {"type": "array", "items": {"type": "object"}, "description": "Optional. Rules from parse_proximity_preferences; filter to listings satisfying all rules (AND). Listings with unknown proximity are kept."},
+                    "proximity_rules": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "Optional. Rules from parse_proximity_preferences; filter to listings "
+                            "satisfying all rules (AND). Listings with unknown proximity are kept. "
+                            "Pass an empty list to clear the proximity filter and restore listings "
+                            "dropped for commute/transit limits."
+                        ),
+                    },
                 },
             },
         },
@@ -812,6 +821,106 @@ def _tool_result_message_index(messages: list[dict], tool_name: str) -> int | No
 
 _ENRICHMENT_KEYS = ("proximity", "semantic_score", "match_score", "score_breakdown")
 
+_MIN_BOUND_KEYS = ("min_bedrooms", "min_bathrooms", "min_sqft", "price_min")
+_MAX_BOUND_KEYS = ("max_bedrooms", "max_bathrooms", "max_sqft", "price_max")
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def filter_listings_uses_master(args: dict, active_criteria: dict | None) -> bool:
+    """True when chat filter_listings must read the scrape corpus (widen/relax).
+
+    Reductive structural filters and sort-only calls use the current display set.
+    Widening a bound, broadening house_categories, or clearing proximity
+    (``proximity_rules`` present but empty/null) restores from master.
+
+    Bounds that fall *outside* the last scrape are rejected separately via
+    ``filter_args_outside_scrape`` (those need ``rental_search``, not master).
+    """
+    active = active_criteria or {}
+
+    if "proximity_rules" in args and not args.get("proximity_rules"):
+        return True
+
+    for key in _MIN_BOUND_KEYS:
+        new_v = _as_float(args.get(key))
+        old_v = _as_float(active.get(key))
+        if new_v is not None and old_v is not None and new_v < old_v:
+            return True
+
+    for key in _MAX_BOUND_KEYS:
+        new_v = _as_float(args.get(key))
+        old_v = _as_float(active.get(key))
+        if new_v is not None and old_v is not None and new_v > old_v:
+            return True
+
+    if args.get("house_categories") is not None:
+        new_cats = {
+            c.casefold()
+            for c in (args.get("house_categories") or [])
+            if isinstance(c, str) and c.strip()
+        }
+        active_raw = active.get("house_categories") or []
+        old_cats = {
+            c.casefold() for c in active_raw if isinstance(c, str) and c.strip()
+        }
+        if old_cats and not new_cats.issubset(old_cats):
+            return True
+
+    return False
+
+
+def _scrape_max_bound(value: object) -> float | None:
+    """Apify uses 0 / omitted for 'no max'; treat those as unlimited."""
+    v = _as_float(value)
+    if v is None or v <= 0:
+        return None
+    return v
+
+
+def filter_args_outside_scrape(
+    args: dict,
+    scrape_filters: dict | None,
+) -> str | None:
+    """If filter args ask for inventory the last scrape could not include, return an error.
+
+    In-memory filter/master restore cannot invent 1BR units when the scrape used
+    min_bedrooms=2, or listings above a scraped price_max, etc. Caller should
+    ``rental_search`` with updated filters instead.
+    """
+    scrape = scrape_filters or {}
+    if not scrape:
+        return None
+
+    outside: list[str] = []
+
+    for key in ("min_bedrooms", "min_bathrooms", "min_sqft", "price_min"):
+        new_v = _as_float(args.get(key))
+        scrape_v = _as_float(scrape.get(key))
+        if new_v is not None and scrape_v is not None and new_v < scrape_v:
+            outside.append(f"{key}={args.get(key)} (scrape had {key}={scrape.get(key)})")
+
+    for key in ("max_bedrooms", "max_bathrooms", "max_sqft", "price_max"):
+        new_v = _scrape_max_bound(args.get(key))
+        scrape_v = _scrape_max_bound(scrape.get(key))
+        if new_v is not None and scrape_v is not None and new_v > scrape_v:
+            outside.append(f"{key}={args.get(key)} (scrape had {key}={scrape.get(key)})")
+
+    if not outside:
+        return None
+
+    return (
+        "Requested bounds are outside the last rental_search scrape and cannot be "
+        "satisfied by filter_listings (the scrape never fetched that inventory): "
+        + "; ".join(outside)
+        + ". Call rental_search with the updated filters instead."
+    )
+
 
 def overlay_enrichment_on_master(
     master: list[dict] | None,
@@ -820,8 +929,8 @@ def overlay_enrichment_on_master(
     """Return the full scrape corpus with score/proximity fields copied from a later result.
 
     ``apply_search_preferences`` and enrich/score may drop listings. Chat ``filter_listings``
-    must still be able to restore them when the user relaxes criteria, while keeping
-    match scores on listings that were scored.
+    uses this corpus when relaxing/widening so previously dropped listings can return,
+    while keeping match scores on listings that were scored.
     """
     master = list(master or [])
     enriched = list(enriched or [])
@@ -977,6 +1086,7 @@ def run_tool(
     available_slots: list[dict] | None = None,
     search_criteria: dict | None = None,
     proximity_rules_for_query: list[dict] | None = None,
+    scrape_filters: dict | None = None,
 ) -> str:
     """Execute tool in-process and return JSON string result. For ask_user, returns request_user_input payload; caller must resolve via UI and pass back answer/selected.
 
@@ -985,6 +1095,9 @@ def run_tool(
     are used only by score_listings_by_preferences and analyze_listing_preferences, to build
     a search_criteria_to_text_blob() embedding query that mirrors listing_to_text_blob's
     structure instead of embedding the bare preferences text alone.
+
+    scrape_filters is the last rental_search filters dict; filter_listings uses it to reject
+    bounds that need a new scrape rather than an in-memory widen.
     """
     if name == "ask_user":
         # Return payload for client to show UI and supply real result
@@ -1055,6 +1168,9 @@ def run_tool(
         listings = current_listings if current_listings is not None else []
         if not listings:
             return json.dumps({"error": "No current search results to filter or sort. Run a search first."})
+        outside = filter_args_outside_scrape(arguments, scrape_filters)
+        if outside:
+            return json.dumps({"error": outside})
         sort_by = arguments.get("sort_by")
         ascending = arguments.get("ascending", True)
         criteria_keys = {
@@ -1069,8 +1185,16 @@ def run_tool(
             "house_categories",
         }
         criteria_dict = {k: v for k, v in arguments.items() if k in criteria_keys and v is not None}
+        clearing_proximity = "proximity_rules" in arguments and not arguments.get(
+            "proximity_rules"
+        )
         proximity_rules_raw = arguments.get("proximity_rules") or []
-        if not criteria_dict and not sort_by and not proximity_rules_raw:
+        if (
+            not criteria_dict
+            and not sort_by
+            and not proximity_rules_raw
+            and not clearing_proximity
+        ):
             return json.dumps({"error": "At least one filter criterion, sort_by, or proximity_rules is required."})
         # Guard: proximity filtering requires enriched listings. If rules are supplied but no
         # listing has proximity data, the filter will silently pass everything through.
@@ -1666,6 +1790,7 @@ def _run_agent_step_events_body(
             # score_listings_by_preferences / analyze_listing_preferences (see run_tool).
             active_search_criteria = _get_active_search_criteria_from_messages(messages)
             parsed_proximity_rules = _get_parsed_proximity_rules_from_messages(messages)
+            last_scrape_filters = get_last_rental_search_filters(messages)
             batch_search_count = 0
             pending_apply_result = None
             for i, tc in enumerate(tool_calls_raw):
@@ -1679,13 +1804,25 @@ def _run_agent_step_events_body(
                     args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                # filter_listings always re-filters from the raw scrape, with score/proximity
-                # fields copied from a later apply/enrich/score result. Using the apply corpus
-                # alone would prevent relaxing structural or proximity constraints.
-                # summarize_listings uses current_listings (the latest filtered view for same-turn chaining).
+                # filter_listings: reductive/sort → current display; widen/relax → master
+                # with score/proximity fields overlaid. summarize_listings always uses current.
                 if name == "filter_listings":
-                    filter_source = overlay_enrichment_on_master(
+                    master_overlay = overlay_enrichment_on_master(
                         master_listings, enriched_master
+                    )
+                    use_master = filter_listings_uses_master(
+                        args, active_search_criteria
+                    )
+                    filter_source = (
+                        master_overlay
+                        if use_master
+                        else (current_listings or master_overlay)
+                    )
+                    logger.debug(
+                        "filter_listings corpus=%s n=%d use_master=%s",
+                        "master" if use_master or not current_listings else "current",
+                        len(filter_source or []),
+                        use_master,
                     )
                 elif name == "summarize_listings":
                     filter_source = current_listings
@@ -1717,6 +1854,7 @@ def _run_agent_step_events_body(
                         available_slots=available_slots if name == "modify_viewing_plan" else None,
                         search_criteria=active_search_criteria,
                         proximity_rules_for_query=parsed_proximity_rules,
+                        scrape_filters=last_scrape_filters,
                     )
                 ok = True
                 parsed_result: object = None
@@ -1769,6 +1907,8 @@ def _run_agent_step_events_body(
                                     "listing_type": search_filters.get("listing_type"),
                                     **{k: search_filters.get(k) for k in _STRUCTURAL_CRITERIA_KEYS},
                                 }
+                                if isinstance(search_filters, dict) and search_filters:
+                                    last_scrape_filters = dict(search_filters)
                             batch_search_count += 1
                             current_listings = master_listings
                             display_source = "search"
