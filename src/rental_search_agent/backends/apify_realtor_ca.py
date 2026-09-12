@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import timedelta
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -26,11 +27,30 @@ DEFAULT_MAX_ITEMS = 100
 # Realtor.ca leaves PublicRemarks empty on search results; the actor only fills
 # listing descriptions when fetchDetails is on (extra request + PPE event each).
 DEFAULT_FETCH_DETAILS = True
+# Extra attempts after the first for transient Apify run failures / timeouts.
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_BASE_SECONDS = 1.0
 # Bound how long we wait for the Apify actor run to finish; without this the
 # apify-client SDK waits indefinitely, which would hang the whole agent turn.
 ACTOR_CALL_WAIT_DURATION = timedelta(minutes=2)
 # fetchDetails does one extra request per listing, so the run needs more time.
 ACTOR_CALL_WAIT_DURATION_WITH_DETAILS = timedelta(minutes=8)
+_IN_FLIGHT_STATUSES = frozenset({"RUNNING", "READY", "TIMING-OUT", "ABORTING"})
+_MSG_UNAVAILABLE = "The rental search is temporarily unavailable."
+_MSG_TOO_SLOW = (
+    "The property search is taking longer than expected. Please try again in a moment."
+)
+
+
+class _TransientApifyError(Exception):
+    """Internal: retryable Apify failure. Carries the user-facing SearchBackendError message."""
+
+    def __init__(self, user_message: str, *, detail: str = "") -> None:
+        self.user_message = user_message
+        self.detail = detail
+        super().__init__(detail or user_message)
+
+
 # Only trust absolute listing URLs on these hosts; anything else from the (third-party,
 # scraped) dataset falls back to an MLS-based realtor.ca URL to avoid propagating
 # attacker-controlled off-site links into the UI/calendar.
@@ -123,6 +143,72 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _retry_delays(max_retries: int, base: float) -> list[float]:
+    """Delays before attempts 2..N (empty when max_retries == 0)."""
+    if max_retries <= 0 or base < 0:
+        return []
+    return [base * (2**i) for i in range(max_retries)]
+
+
+def _map_dataset_items(items: list[Any], listing_type: str) -> list[Listing]:
+    """Map dataset rows to Listing; skip bad rows with a warning instead of aborting."""
+    listings: list[Listing] = []
+    skipped_non_dict = 0
+    for item in items:
+        if not isinstance(item, dict):
+            skipped_non_dict += 1
+            continue
+        try:
+            listings.append(item_to_listing(item, listing_type))
+        except Exception as e:
+            mls = item.get("MlsNumber") or item.get("Id") or "?"
+            logger.warning(
+                "Skipping Apify dataset item (id=%s): %s: %s",
+                mls,
+                type(e).__name__,
+                e,
+            )
+    if skipped_non_dict:
+        logger.warning(
+            "Skipped %d non-dict Apify dataset item(s)",
+            skipped_non_dict,
+        )
+    return listings
+
+
+def _warn_incomplete_fetch_details(listings: list[Listing]) -> None:
+    """Log when fetchDetails was on but some listings still lack descriptions."""
+    if not listings:
+        return
+    missing = sum(1 for lst in listings if not (lst.description or "").strip())
+    if missing:
+        logger.warning(
+            "Apify fetchDetails incomplete: %d/%d listings missing description (run succeeded)",
+            missing,
+            len(listings),
+        )
 
 
 def _nonempty_str(value: Any) -> Optional[str]:
@@ -442,6 +528,8 @@ class ApifyRealtorCaBackend:
         actor_id: Optional[str] = None,
         max_items: Optional[int] = None,
         fetch_details: Optional[bool] = None,
+        max_retries: Optional[int] = None,
+        retry_base_seconds: Optional[float] = None,
         client: Any = None,
     ) -> None:
         self.token = token if token is not None else (os.environ.get("APIFY_TOKEN") or "").strip()
@@ -462,6 +550,16 @@ class ApifyRealtorCaBackend:
             if fetch_details is None
             else fetch_details
         )
+        if max_retries is None:
+            self.max_retries = max(0, _env_int("APIFY_MAX_RETRIES", DEFAULT_MAX_RETRIES))
+        else:
+            self.max_retries = max(0, int(max_retries))
+        if retry_base_seconds is None:
+            self.retry_base_seconds = max(
+                0.0, _env_float("APIFY_RETRY_BASE_SECONDS", DEFAULT_RETRY_BASE_SECONDS)
+            )
+        else:
+            self.retry_base_seconds = max(0.0, float(retry_base_seconds))
         self._client = client
 
     def _get_client(self) -> Any:
@@ -479,6 +577,58 @@ class ApifyRealtorCaBackend:
             ) from e
         return ApifyClient(self.token)
 
+    def _fetch_dataset_items(
+        self,
+        client: Any,
+        run_input: dict[str, Any],
+        wait: timedelta,
+    ) -> list[Any]:
+        """One actor call + status check + dataset read. Raises _TransientApifyError on retryable failure."""
+        logger.debug(
+            "Apify actor=%s operation=%s location=%s maxItems=%s fetchDetails=%s",
+            self.actor_id,
+            run_input.get("operation"),
+            run_input.get("location"),
+            run_input.get("maxItems"),
+            run_input.get("fetchDetails"),
+        )
+        try:
+            run = _call_actor(client.actor(self.actor_id), run_input, wait)
+        except Exception as e:
+            raise _TransientApifyError(
+                _MSG_UNAVAILABLE,
+                detail=f"{type(e).__name__}: {e}",
+            ) from e
+
+        # client.actor(...).call() returns an apify_client Run object (attribute access) on
+        # apify-client >= 3.0, or a plain dict (camelCase keys) on < 3.0 — see _run_field().
+        dataset_id = _run_field(run, "default_dataset_id", "defaultDatasetId") if run else None
+        if not run or not dataset_id:
+            raise _TransientApifyError(
+                _MSG_UNAVAILABLE,
+                detail="missing run or defaultDatasetId",
+            )
+
+        status = _run_field(run, "status", "status")
+        if status != "SUCCEEDED":
+            if status in _IN_FLIGHT_STATUSES:
+                raise _TransientApifyError(
+                    _MSG_TOO_SLOW,
+                    detail=f"status={status}",
+                )
+            raise _TransientApifyError(
+                _MSG_UNAVAILABLE,
+                detail=f"status={status}",
+            )
+
+        try:
+            return list(client.dataset(dataset_id).iterate_items())
+        except Exception as e:
+            raise _TransientApifyError(
+                _MSG_UNAVAILABLE,
+                detail=f"dataset read {type(e).__name__}: {e}",
+            ) from e
+
     def search(self, filters: RentalSearchFilters) -> RentalSearchResponse:
         listing_type = filters.listing_type or "for_rent"
         run_input = filters_to_run_input(
@@ -490,44 +640,37 @@ class ApifyRealtorCaBackend:
             else ACTOR_CALL_WAIT_DURATION
         )
         client = self._get_client()
-        try:
-            logger.debug(
-                "Apify actor=%s operation=%s location=%s maxItems=%s fetchDetails=%s",
-                self.actor_id,
-                run_input.get("operation"),
-                run_input.get("location"),
-                run_input.get("maxItems"),
-                run_input.get("fetchDetails"),
-            )
-            run = _call_actor(client.actor(self.actor_id), run_input, wait)
-        except SearchBackendError:
-            raise
-        except Exception as e:
-            logger.warning("Apify search failed: %s: %s", type(e).__name__, e)
-            raise SearchBackendError("The rental search is temporarily unavailable.") from e
+        delays = [0.0, *_retry_delays(self.max_retries, self.retry_base_seconds)]
+        items: list[Any] = []
+        last_error: Optional[_TransientApifyError] = None
 
-        # client.actor(...).call() returns an apify_client Run object (attribute access) on
-        # apify-client >= 3.0, or a plain dict (camelCase keys) on < 3.0 — see _run_field().
-        dataset_id = _run_field(run, "default_dataset_id", "defaultDatasetId")
-        if not run or not dataset_id:
-            raise SearchBackendError("The rental search is temporarily unavailable.")
-
-        status = _run_field(run, "status", "status")
-        if status != "SUCCEEDED":
-            logger.warning("Apify run did not succeed: status=%s", status)
-            if status in ("RUNNING", "READY", "TIMING-OUT", "ABORTING"):
-                raise SearchBackendError(
-                    "The property search is taking longer than expected. Please try again in a moment."
+        for attempt, delay_before in enumerate(delays):
+            if delay_before:
+                time.sleep(delay_before)
+            try:
+                items = self._fetch_dataset_items(client, run_input, wait)
+                last_error = None
+                break
+            except _TransientApifyError as e:
+                last_error = e
+                is_last = attempt >= len(delays) - 1
+                next_delay = delays[attempt + 1] if not is_last else None
+                logger.warning(
+                    "Apify attempt %d/%d failed (%s)%s",
+                    attempt + 1,
+                    len(delays),
+                    e.detail or e.user_message,
+                    f"; retrying in {next_delay:.1f}s" if next_delay is not None else "",
                 )
-            raise SearchBackendError("The rental search is temporarily unavailable.")
+                if is_last:
+                    raise SearchBackendError(e.user_message) from e
 
-        try:
-            items = list(client.dataset(dataset_id).iterate_items())
-        except Exception as e:
-            logger.warning("Apify dataset read failed: %s: %s", type(e).__name__, e)
-            raise SearchBackendError("The rental search is temporarily unavailable.") from e
+        if last_error is not None:
+            raise SearchBackendError(last_error.user_message) from last_error
 
-        listings = [item_to_listing(item, listing_type) for item in items if isinstance(item, dict)]
+        listings = _map_dataset_items(items, listing_type)
+        if self.fetch_details:
+            _warn_incomplete_fetch_details(listings)
         before = len(listings)
         listings = post_filter_listings(listings, filters)
         if before != len(listings):

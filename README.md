@@ -34,6 +34,8 @@ pip install -e .
 | `APIFY_ACTOR_ID` | Optional. Actor id (default: `igolaizola/realtor-canada-scraper-ppe`). |
 | `APIFY_MAX_ITEMS` | Optional. Max listings per search (default: `100`). |
 | `APIFY_FETCH_DETAILS` | Optional. Fetch listing descriptions (`PublicRemarks`) via the actor's `fetchDetails` option (default: `true`). Extra Apify PPE cost and longer run time. |
+| `APIFY_MAX_RETRIES` | Optional. Extra Apify actor attempts after a transient failure/timeout (default: `2`, so 3 tries total). |
+| `APIFY_RETRY_BASE_SECONDS` | Optional. Base delay for exponential backoff between retries (default: `1.0` → 1s, then 2s). |
 | `SEARCH_MARKET` | Optional. Only `ca` is implemented (US planned). |
 | `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |

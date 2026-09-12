@@ -113,6 +113,10 @@ BUGS (PROXIMITY / RANKING)
 [x] Filter on cheap structural features (beds, baths, size, rent) before expensive enrich_listings_with_proximity / score_listings_by_preferences.
     Fixed: step 3b structural narrow (predicate push-down).
 
+[x] Apify scraper silently fails to scrape some listings. Investigate the issue and add a retry mechanism with exponential backoff.
+    Transient run failure/timeout: retry with exponential backoff (APIFY_MAX_RETRIES / APIFY_RETRY_BASE_SECONDS).
+    Partial fetchDetails (SUCCEEDED but missing descriptions): WARNING only, no re-scrape.
+
 ================================================================================
 SESSION AND AUTH
 ================================================================================

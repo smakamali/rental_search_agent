@@ -7,6 +7,7 @@ from rental_search_agent.backends.apify_realtor_ca import (
     _format_price_display,
     _parse_bedrooms,
     _parse_sqft,
+    _retry_delays,
     filters_to_run_input,
     item_to_listing,
     post_filter_listings,
@@ -343,6 +344,15 @@ class TestFetchDetailsEnv:
         monkeypatch.setenv("APIFY_FETCH_DETAILS", "false")
         backend = ApifyRealtorCaBackend(token="t")
         assert backend.fetch_details is False
+
+
+class TestRetryDelays:
+    def test_exponential_delays(self):
+        assert _retry_delays(2, 1.0) == [1.0, 2.0]
+        assert _retry_delays(3, 0.5) == [0.5, 1.0, 2.0]
+
+    def test_zero_retries_empty(self):
+        assert _retry_delays(0, 1.0) == []
 
 
 class TestPostFilter:
