@@ -7,8 +7,8 @@
 # Backend: REALTOR.CA via Apify (igolaizola/realtor-canada-scraper-ppe)
 apify-client>=1.8.0
 
-# MCP server
-mcp>=1.0.0
+# MCP server (pin <2: code uses FastMCP; mcp 2.x renamed it to MCPServer)
+mcp>=1.0.0,<2
 
 # Schemas and validation
 pydantic>=2.0.0
