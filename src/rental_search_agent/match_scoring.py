@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Union
+from collections import Counter
+from typing import Any, Dict, List, Optional, Sequence
 
+from rental_search_agent.logging_config import log_stage
 from rental_search_agent.preference_criteria import (
     CriterionResult,
     evaluate_coverage,
@@ -134,11 +136,18 @@ def _compute_semantic_scores(
         return [None] * len(listings)
     blobs = [listing_semantic_blob(item) for item in listings]
     blobs = [b if (b or "").strip() else " " for b in blobs]
+    n_texts = 1 + len(blobs)
     try:
         query_emb = embed_texts([query], model=embedding_model)[0]
         listing_embs = embed_texts(blobs, model=embedding_model)
     except Exception as e:
-        logger.warning("Semantic component embedding failed (omitting semantic): %s", e)
+        logger.warning(
+            "Semantic component embedding failed (omitting semantic): n_listings=%d n_texts=%d error=%s",
+            len(listings),
+            n_texts,
+            e,
+            exc_info=True,
+        )
         return [None] * len(listings)
     out: List[Optional[float]] = []
     for i in range(len(listings)):
@@ -166,6 +175,35 @@ def score_listings_by_preferences(
     Backward compatible: preferences_text is treated as qualitative when effective_prefs
     is not provided. Missing components are excluded from the weighted average.
     """
+    with log_stage(
+        logger,
+        "score_listings_by_preferences",
+        level=logging.DEBUG,
+        n_listings=len(listings),
+    ):
+        return _score_listings_by_preferences_impl(
+            listings,
+            preferences_text=preferences_text,
+            query_text=query_text,
+            embedding_model=embedding_model,
+            effective_prefs=effective_prefs,
+            stored_prefs=stored_prefs,
+            chat_criteria=chat_criteria,
+            proximity_rules=proximity_rules,
+        )
+
+
+def _score_listings_by_preferences_impl(
+    listings: List[Any],
+    preferences_text: str = "",
+    query_text: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+    *,
+    effective_prefs: Optional[EffectiveSearchPreferences] = None,
+    stored_prefs: Optional[dict] = None,
+    chat_criteria: Optional[dict] = None,
+    proximity_rules: Optional[Sequence[dict]] = None,
+) -> List[dict]:
     if effective_prefs is None:
         stored = dict(stored_prefs or {})
         chat = dict(chat_criteria or {})
@@ -191,6 +229,11 @@ def score_listings_by_preferences(
     rules = [r for r in (proximity_rules or []) if isinstance(r, dict)]
     amenity_features = extract_amenity_features(effective_prefs.qualitative_preferences or "")
     weights = get_score_weights()
+    logger.debug(
+        "score_listings_by_preferences: amenity_features=%d n_proximity_rules=%d",
+        len(amenity_features),
+        len(rules),
+    )
 
     if not listings:
         return []
@@ -239,4 +282,15 @@ def score_listings_by_preferences(
         )
 
     scored_list.sort(key=_sort_key)
+    none_score = sum(1 for d in scored_list if d.get("match_score") is None)
+    included_counts: Counter[str] = Counter()
+    for d in scored_list:
+        breakdown = d.get("score_breakdown") or {}
+        for key in breakdown.get("included") or []:
+            included_counts[key] += 1
+    logger.debug(
+        "score_listings_by_preferences: match_score_none=%d components=%s",
+        none_score,
+        dict(included_counts),
+    )
     return scored_list

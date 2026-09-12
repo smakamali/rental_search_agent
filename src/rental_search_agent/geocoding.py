@@ -16,6 +16,7 @@ NEAREST_TRANSIT_LOCATION = "nearest transit station"
 
 _GEOCODE_CACHE: dict[str, GeocodedReference] = {}
 _GEOCODE_CACHE_MAX = 500
+_ERROR_MESSAGE_MAX = 200
 
 
 def _get_api_key() -> str:
@@ -31,6 +32,13 @@ def _get_api_key() -> str:
 def _normalize_location_key(location: str) -> str:
     """Normalize for cache key (lowercase, strip)."""
     return location.strip().lower()
+
+
+def _truncate_error_message(raw: object) -> str:
+    text = str(raw or "").strip()
+    if len(text) <= _ERROR_MESSAGE_MAX:
+        return text
+    return text[:_ERROR_MESSAGE_MAX] + "..."
 
 
 def geocode_location(location: str) -> GeocodedReference:
@@ -52,14 +60,27 @@ def geocode_location(location: str) -> GeocodedReference:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        logger.warning("Geocoding request failed for %r: %s", location, e)
+        logger.warning("Geocoding request failed for %r: %s", location, type(e).__name__)
         raise ValueError(f"Geocoding failed for {location!r}: {e}") from e
-    if data.get("status") != "OK":
+    status = data.get("status", "UNKNOWN")
+    if status != "OK":
+        err_msg = _truncate_error_message(data.get("error_message"))
+        logger.warning(
+            "Geocoding non-OK status=%s location=%r error_message=%r",
+            status,
+            location.strip(),
+            err_msg,
+        )
         raise ValueError(
-            f"Geocoding failed for {location!r}: {data.get('status', 'UNKNOWN')} - {data.get('error_message', '')}"
+            f"Geocoding failed for {location!r}: {status} - {data.get('error_message', '')}"
         )
     results = data.get("results") or []
     if not results:
+        logger.warning(
+            "Geocoding missing geometry status=%s location=%r (empty results)",
+            status,
+            location.strip(),
+        )
         raise ValueError(f"No geocoding results for {location!r}.")
     first = results[0]
     geometry = first.get("geometry") or {}
@@ -67,6 +88,11 @@ def geocode_location(location: str) -> GeocodedReference:
     lat = loc.get("lat")
     lon = loc.get("lng")
     if lat is None or lon is None:
+        logger.warning(
+            "Geocoding missing geometry status=%s location=%r",
+            status,
+            location.strip(),
+        )
         raise ValueError(f"Missing lat/lng in geocode result for {location!r}.")
     display_name = first.get("formatted_address") or location.strip()
     ref = GeocodedReference(

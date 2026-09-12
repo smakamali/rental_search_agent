@@ -65,6 +65,39 @@ class TestGeocodeLocation:
                 with pytest.raises(ValueError, match="ZERO_RESULTS"):
                     geocode_location("Nowhere Land")
 
+    def test_warns_on_non_ok_status_without_url(self, caplog):
+        payload = {
+            "status": "REQUEST_DENIED",
+            "error_message": "The provided API key is invalid.",
+            "results": [],
+        }
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "secret-key-value"}):
+                with caplog.at_level("WARNING", logger="rental_search_agent.geocoding"):
+                    with pytest.raises(ValueError, match="REQUEST_DENIED"):
+                        geocode_location("Vancouver, BC")
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("status=REQUEST_DENIED" in m and "Vancouver, BC" in m for m in warnings)
+        joined = " ".join(warnings)
+        assert "secret-key-value" not in joined
+        assert "maps.googleapis.com" not in joined
+
+    def test_warns_on_missing_geometry(self, caplog):
+        payload = {
+            "status": "OK",
+            "results": [
+                {"formatted_address": "X", "geometry": {"location": {}}}
+            ],
+        }
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                with caplog.at_level("WARNING", logger="rental_search_agent.geocoding"):
+                    with pytest.raises(ValueError, match="Missing lat/lng"):
+                        geocode_location("Some Place")
+        assert any(
+            "missing geometry" in r.getMessage() and "Some Place" in r.getMessage()
+            for r in caplog.records
+        )
     def test_raises_for_missing_api_key(self):
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(ValueError, match="GOOGLE_MAPS_API_KEY"):

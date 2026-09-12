@@ -42,6 +42,8 @@ pip install -e .
 | `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
 | `GOOGLE_MAPS_API_KEY` | Required for **proximity preferences**: geocoding, drive/walk/transit times. Enable Geocoding, Directions, and Places APIs in Google Cloud. |
 | `TIMEZONE` | Optional. Timezone for calendar and date display (default: `America/Vancouver`). |
+| `LOG_LEVEL` | Optional. Package log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default: `INFO`). |
+| `LOG_FILE` | Optional. If set, also write logs to this file (relative paths resolve from the project root). Console logging is always enabled. Useful when Streamlit captures stderr. |
 
 ## Running
 

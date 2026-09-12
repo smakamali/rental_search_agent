@@ -8,8 +8,11 @@ still produces a single scrape after dedupe.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -412,18 +415,32 @@ _CITY_KEY_TO_SEARCH = _city_key_to_search_location()
 
 def canonicalize_search_locations(locations: Sequence[str]) -> list[str]:
     """Map catalog labels to search_location and dedupe (e.g. both North Vancouvers → one scrape)."""
+    raw_in = list(locations)
     seen: set[str] = set()
     out: list[str] = []
-    for loc in locations:
+    n_blank = 0
+    n_dup = 0
+    for loc in raw_in:
         s = (loc or "").strip()
         if not s:
+            n_blank += 1
             continue
         mapped = _CITY_KEY_TO_SEARCH.get(_normalize_region_key(s), s)
         key = mapped.lower()
         if key in seen:
+            n_dup += 1
             continue
         seen.add(key)
         out.append(mapped)
+    logger.debug(
+        "canonicalize_search_locations: n_in=%d n_out=%d n_blank=%d n_dup_dropped=%d in=%r out=%r",
+        len(raw_in),
+        len(out),
+        n_blank,
+        n_dup,
+        raw_in,
+        out,
+    )
     return out
 
 
@@ -435,20 +452,40 @@ def resolve_search_location_input(text: str) -> str | list[str]:
     """
     stripped = (text or "").strip()
     if not stripped:
+        logger.debug("resolve_search_location_input: blank")
         return ""
     match = lookup_region(stripped)
     if match is None:
+        logger.debug("resolve_search_location_input: bare_or_unknown input=%r", stripped)
         return stripped
     locations = unique_search_locations(match.cities)
     if not locations:
+        logger.warning(
+            "resolve_search_location_input: metro=%s has no search locations; using input=%r",
+            match.name,
+            stripped,
+        )
         return stripped
-    return locations[0] if len(locations) == 1 else locations
+    if len(locations) == 1:
+        logger.debug(
+            "resolve_search_location_input: metro=%s n_locations=1 location=%r",
+            match.name,
+            locations[0],
+        )
+        return locations[0]
+    logger.debug(
+        "resolve_search_location_input: metro=%s n_locations=%d",
+        match.name,
+        len(locations),
+    )
+    return locations
 
 
 def expand_search_region(region: str) -> dict[str, Any]:
     """Expand a metro name into picker rows, or return { error } if unknown."""
     text = (region or "").strip()
     if not text:
+        logger.warning("expand_search_region: blank region")
         return {
             "error": (
                 "region is required and must be a non-empty string. "
@@ -457,12 +494,15 @@ def expand_search_region(region: str) -> dict[str, Any]:
         }
     match = lookup_region(text)
     if match is None:
+        logger.warning("expand_search_region: unknown region=%r", text)
         return {
             "error": (
                 f"Unknown region {text!r}. Known regions: {', '.join(known_region_names())}. "
                 "Ask the user which cities to include."
             )
         }
+    n_cities = len(match.cities)
+    logger.debug("expand_search_region: region=%s n_cities=%d", match.name, n_cities)
     return {
         "region": match.name,
         "cities": [

@@ -10,6 +10,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from rental_search_agent.geocoding import NEAREST_TRANSIT_LOCATION
+from rental_search_agent.logging_config import format_run_id_suffix, log_stage
 from rental_search_agent.models import GeocodedReference, Listing, ProximityRule
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,18 @@ def get_nearest_transit_station(lat: float, lon: float) -> Optional[Tuple[float,
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        logger.warning("Places nearby search failed: %s", e)
+        logger.warning("Places nearby search failed: %s", type(e).__name__)
         return None
-    if data.get("status") not in ("OK", "ZERO_RESULTS"):
-        logger.warning("Places API status: %s", data.get("status"))
+    status = data.get("status")
+    if status == "ZERO_RESULTS":
+        logger.debug("Places ZERO_RESULTS for transit nearby search")
+        return None
+    if status not in ("OK", "ZERO_RESULTS"):
+        logger.warning("Places API status=%s", status)
         return None
     results = data.get("results") or []
     if not results:
+        logger.debug("Places OK but empty results for transit nearby search")
         return None
     first = results[0]
     geometry = first.get("geometry") or {}
@@ -73,6 +79,7 @@ def get_nearest_transit_station(lat: float, lon: float) -> Optional[Tuple[float,
     station_lon = loc.get("lng")
     name = first.get("name") or "Transit station"
     if station_lat is None or station_lon is None:
+        logger.warning("Places missing geometry for nearest transit station")
         return None
     result = (float(station_lat), float(station_lon), name)
     if len(_PLACES_CACHE) < _PLACES_CACHE_MAX:
@@ -100,9 +107,14 @@ def _get_directions(
         with urllib.request.urlopen(url, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        logger.warning("Directions request failed: %s", e)
+        logger.warning("Directions request failed: %s", type(e).__name__)
         return None
-    if data.get("status") != "OK":
+    status = data.get("status")
+    if status != "OK":
+        if status == "ZERO_RESULTS":
+            logger.debug("Directions ZERO_RESULTS mode=%s", mode)
+        else:
+            logger.warning("Directions API status=%s mode=%s", status, mode)
         return None
     routes = data.get("routes") or []
     if not routes:
@@ -169,7 +181,7 @@ def _get_distance_matrix_batch(
         with urllib.request.urlopen(url, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        logger.warning("Distance Matrix request failed: %s", e)
+        logger.warning("Distance Matrix request failed: %s", type(e).__name__)
         return results
 
     if data.get("status") != "OK":
@@ -270,117 +282,175 @@ def enrich_listings_with_proximity(
             listing_objs.append(item)
 
     n = len(listing_objs)
-    prox_data: List[Dict[str, Any]] = [{} for _ in range(n)]
+    n_rules = len(rules)
+    rid_suffix = format_run_id_suffix()
 
-    # Separate rules into fixed-destination vs. nearest-transit-station
-    transit_station_rules: List[ProximityRule] = []
-    fixed_dest_rules: List[ProximityRule] = []
-    for rule in rules:
-        if (rule.location or "").strip().lower() == NEAREST_TRANSIT_LOCATION.lower():
-            transit_station_rules.append(rule)
-        else:
-            fixed_dest_rules.append(rule)
+    with log_stage(
+        logger,
+        "enrich_listings_with_proximity",
+        n_listings=n,
+        n_rules=n_rules,
+    ):
+        prox_data: List[Dict[str, Any]] = [{} for _ in range(n)]
 
-    # ------------------------------------------------------------------
-    # Fixed-destination rules: Distance Matrix API (batched by mode)
-    # ------------------------------------------------------------------
-    if fixed_dest_rules:
-        # Resolve each rule to its destination coords; mark unresolvable rules as None
-        rule_to_dest: Dict[str, Tuple[float, float]] = {}
-        for rule in fixed_dest_rules:
-            rk = _rule_key(rule)
-            ref = refs_by_location.get((rule.location or "").strip())
-            if ref:
-                rule_to_dest[rk] = (ref.lat, ref.lon)
+        # Separate rules into fixed-destination vs. nearest-transit-station
+        transit_station_rules: List[ProximityRule] = []
+        fixed_dest_rules: List[ProximityRule] = []
+        for rule in rules:
+            if (rule.location or "").strip().lower() == NEAREST_TRANSIT_LOCATION.lower():
+                transit_station_rules.append(rule)
             else:
+                fixed_dest_rules.append(rule)
+
+        missing_coords = sum(
+            1
+            for lst in listing_objs
+            if lst.latitude is None or lst.longitude is None
+        )
+        if missing_coords:
+            logger.debug(
+                "enrich proximity: %d/%d listings missing coordinates%s",
+                missing_coords,
+                n,
+                rid_suffix,
+            )
+        if n_rules and n and missing_coords * 2 > n:
+            logger.warning(
+                "enrich proximity: majority of listings lack coordinates "
+                "(%d/%d) with %d rule(s)%s",
+                missing_coords,
+                n,
+                n_rules,
+                rid_suffix,
+            )
+
+        # ------------------------------------------------------------------
+        # Fixed-destination rules: Distance Matrix API (batched by mode)
+        # ------------------------------------------------------------------
+        if fixed_dest_rules:
+            # Resolve each rule to its destination coords; mark unresolvable rules as None
+            rule_to_dest: Dict[str, Tuple[float, float]] = {}
+            unresolved_refs = 0
+            for rule in fixed_dest_rules:
+                rk = _rule_key(rule)
+                ref = refs_by_location.get((rule.location or "").strip())
+                if ref:
+                    rule_to_dest[rk] = (ref.lat, ref.lon)
+                else:
+                    unresolved_refs += 1
+                    logger.debug(
+                        "enrich proximity: unresolved ref location=%r%s",
+                        (rule.location or "").strip(),
+                        rid_suffix,
+                    )
+                    for i in range(n):
+                        prox_data[i][rk] = None
+            if unresolved_refs:
+                logger.debug(
+                    "enrich proximity: %d fixed rule(s) missing geocoded refs%s",
+                    unresolved_refs,
+                    rid_suffix,
+                )
+
+            # Group resolvable rules by API mode
+            mode_to_rules: Dict[str, List[ProximityRule]] = defaultdict(list)
+            for rule in fixed_dest_rules:
+                rk = _rule_key(rule)
+                if rk in rule_to_dest:
+                    mode_to_rules[_normalize_mode(rule.mode)].append(rule)
+
+            # Listings with valid coordinates
+            coord_listings: List[Tuple[int, float, float]] = [
+                (i, float(lst.latitude), float(lst.longitude))
+                for i, lst in enumerate(listing_objs)
+                if lst.latitude is not None and lst.longitude is not None
+            ]
+            coord_set = {i for i, _, _ in coord_listings}
+
+            for mode_api, mode_rules in mode_to_rules.items():
+                destinations = [rule_to_dest[_rule_key(r)] for r in mode_rules]
+
+                # Mark listings without coordinates
                 for i in range(n):
-                    prox_data[i][rk] = None
+                    if i not in coord_set:
+                        for rule in mode_rules:
+                            prox_data[i][_rule_key(rule)] = None
 
-        # Group resolvable rules by API mode
-        mode_to_rules: Dict[str, List[ProximityRule]] = defaultdict(list)
-        for rule in fixed_dest_rules:
-            rk = _rule_key(rule)
-            if rk in rule_to_dest:
-                mode_to_rules[_normalize_mode(rule.mode)].append(rule)
+                # Batch origins in chunks of _MATRIX_BATCH_SIZE
+                for batch_start in range(0, len(coord_listings), _MATRIX_BATCH_SIZE):
+                    orig_batch = coord_listings[batch_start : batch_start + _MATRIX_BATCH_SIZE]
+                    orig_indices = [t[0] for t in orig_batch]
+                    origins = [(t[1], t[2]) for t in orig_batch]
 
-        # Listings with valid coordinates
-        coord_listings: List[Tuple[int, float, float]] = [
-            (i, float(lst.latitude), float(lst.longitude))
-            for i, lst in enumerate(listing_objs)
-            if lst.latitude is not None and lst.longitude is not None
-        ]
-        coord_set = {i for i, _, _ in coord_listings}
+                    # Batch destinations in chunks of _MATRIX_BATCH_SIZE (rarely more than one chunk)
+                    for dest_start in range(0, len(destinations), _MATRIX_BATCH_SIZE):
+                        dest_batch = destinations[dest_start : dest_start + _MATRIX_BATCH_SIZE]
+                        rules_batch = mode_rules[dest_start : dest_start + _MATRIX_BATCH_SIZE]
 
-        for mode_api, mode_rules in mode_to_rules.items():
-            destinations = [rule_to_dest[_rule_key(r)] for r in mode_rules]
+                        matrix = _get_distance_matrix_batch(origins, dest_batch, mode_api)
 
-            # Mark listings without coordinates
-            for i in range(n):
-                if i not in coord_set:
-                    for rule in mode_rules:
+                        for batch_i, orig_i in enumerate(orig_indices):
+                            row = matrix[batch_i] if batch_i < len(matrix) else []
+                            for j, rule in enumerate(rules_batch):
+                                rk = _rule_key(rule)
+                                cell = row[j] if j < len(row) else None
+                                if cell is None:
+                                    prox_data[orig_i][rk] = None
+                                else:
+                                    distance_km, duration_min = cell
+                                    prox_data[orig_i][rk] = {
+                                        "distance_km": round(distance_km, 2),
+                                        "duration_min": round(duration_min, 1),
+                                    }
+
+        # ------------------------------------------------------------------
+        # Nearest-transit-station rules: parallelized per listing
+        # ------------------------------------------------------------------
+        if transit_station_rules:
+            # Mark listings without coordinates upfront
+            listings_to_enrich = [
+                i for i, lst in enumerate(listing_objs)
+                if lst.latitude is not None and lst.longitude is not None
+            ]
+            for i, lst in enumerate(listing_objs):
+                if lst.latitude is None or lst.longitude is None:
+                    for rule in transit_station_rules:
                         prox_data[i][_rule_key(rule)] = None
 
-            # Batch origins in chunks of _MATRIX_BATCH_SIZE
-            for batch_start in range(0, len(coord_listings), _MATRIX_BATCH_SIZE):
-                orig_batch = coord_listings[batch_start : batch_start + _MATRIX_BATCH_SIZE]
-                orig_indices = [t[0] for t in orig_batch]
-                origins = [(t[1], t[2]) for t in orig_batch]
+            if listings_to_enrich:
+                def _enrich_idx(i: int) -> Tuple[int, Dict[str, Any]]:
+                    return (i, _enrich_single_listing_transit(listing_objs[i], transit_station_rules))
 
-                # Batch destinations in chunks of _MATRIX_BATCH_SIZE (rarely more than one chunk)
-                for dest_start in range(0, len(destinations), _MATRIX_BATCH_SIZE):
-                    dest_batch = destinations[dest_start : dest_start + _MATRIX_BATCH_SIZE]
-                    rules_batch = mode_rules[dest_start : dest_start + _MATRIX_BATCH_SIZE]
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {executor.submit(_enrich_idx, i): i for i in listings_to_enrich}
+                    for future in concurrent.futures.as_completed(futures):
+                        orig_i = futures[future]
+                        try:
+                            _, result = future.result()
+                            prox_data[orig_i].update(result)
+                        except Exception as e:
+                            logger.warning(
+                                "Transit enrichment failed for listing index %d: %s",
+                                orig_i,
+                                type(e).__name__,
+                            )
+                            for rule in transit_station_rules:
+                                prox_data[orig_i].setdefault(_rule_key(rule), None)
 
-                    matrix = _get_distance_matrix_batch(origins, dest_batch, mode_api)
+        # Assemble output
+        out: List[Dict[str, Any]] = []
+        for i, listing in enumerate(listing_objs):
+            listing_dict = listing.model_dump()
+            listing_dict["proximity"] = prox_data[i]
+            out.append(listing_dict)
 
-                    for batch_i, orig_i in enumerate(orig_indices):
-                        row = matrix[batch_i] if batch_i < len(matrix) else []
-                        for j, rule in enumerate(rules_batch):
-                            rk = _rule_key(rule)
-                            cell = row[j] if j < len(row) else None
-                            if cell is None:
-                                prox_data[orig_i][rk] = None
-                            else:
-                                distance_km, duration_min = cell
-                                prox_data[orig_i][rk] = {
-                                    "distance_km": round(distance_km, 2),
-                                    "duration_min": round(duration_min, 1),
-                                }
-
-    # ------------------------------------------------------------------
-    # Nearest-transit-station rules: parallelized per listing
-    # ------------------------------------------------------------------
-    if transit_station_rules:
-        # Mark listings without coordinates upfront
-        listings_to_enrich = [
-            i for i, lst in enumerate(listing_objs)
-            if lst.latitude is not None and lst.longitude is not None
-        ]
-        for i, lst in enumerate(listing_objs):
-            if lst.latitude is None or lst.longitude is None:
-                for rule in transit_station_rules:
-                    prox_data[i][_rule_key(rule)] = None
-
-        if listings_to_enrich:
-            def _enrich_idx(i: int) -> Tuple[int, Dict[str, Any]]:
-                return (i, _enrich_single_listing_transit(listing_objs[i], transit_station_rules))
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {executor.submit(_enrich_idx, i): i for i in listings_to_enrich}
-                for future in concurrent.futures.as_completed(futures):
-                    orig_i = futures[future]
-                    try:
-                        _, result = future.result()
-                        prox_data[orig_i].update(result)
-                    except Exception as e:
-                        logger.warning("Transit enrichment failed for listing index %d: %s", orig_i, e)
-                        for rule in transit_station_rules:
-                            prox_data[orig_i].setdefault(_rule_key(rule), None)
-
-    # Assemble output
-    out: List[Dict[str, Any]] = []
-    for i, listing in enumerate(listing_objs):
-        listing_dict = listing.model_dump()
-        listing_dict["proximity"] = prox_data[i]
-        out.append(listing_dict)
-    return out
+        # Timing owned by log_stage; DEBUG summary only (apply/adapter own INFO boundaries).
+        logger.debug(
+            "enrich_listings_with_proximity done n_listings=%d n_rules=%d "
+            "missing_coords=%d%s",
+            n,
+            n_rules,
+            missing_coords,
+            rid_suffix,
+        )
+        return out

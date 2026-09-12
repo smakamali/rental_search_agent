@@ -7,6 +7,7 @@ import pytest
 
 import rental_search_agent.proximity as proximity_module
 from rental_search_agent.proximity import (
+    _get_directions,
     _get_distance_matrix_batch,
     enrich_listings_with_proximity,
     get_nearest_transit_station,
@@ -155,6 +156,53 @@ class TestGetNearestTransitStation:
                 get_nearest_transit_station(49.20, -122.80)
         assert mock_open.call_count == 2
 
+    def test_debug_logs_zero_results(self, caplog):
+        payload = {"status": "ZERO_RESULTS", "results": []}
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                with caplog.at_level("DEBUG", logger="rental_search_agent.proximity"):
+                    result = get_nearest_transit_station(49.28, -123.12)
+        assert result is None
+        assert any("ZERO_RESULTS" in r.getMessage() for r in caplog.records)
+
+    def test_warns_on_missing_geometry(self, caplog):
+        payload = {
+            "status": "OK",
+            "results": [{"name": "Station", "geometry": {"location": {}}}],
+        }
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                with caplog.at_level("WARNING", logger="rental_search_agent.proximity"):
+                    result = get_nearest_transit_station(49.28, -123.12)
+        assert result is None
+        assert any("missing geometry" in r.getMessage() for r in caplog.records)
+
+
+class TestGetDirectionsLogging:
+    def test_warns_on_request_denied_without_url(self, caplog):
+        payload = {"status": "REQUEST_DENIED", "routes": []}
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "secret-maps-key"}):
+                with caplog.at_level("WARNING", logger="rental_search_agent.proximity"):
+                    result = _get_directions(49.28, -123.12, 49.27, -123.0, "driving")
+        assert result is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("status=REQUEST_DENIED" in m for m in warnings)
+        joined = " ".join(warnings)
+        assert "secret-maps-key" not in joined
+        assert "maps.googleapis.com" not in joined
+
+    def test_debug_logs_zero_results(self, caplog):
+        payload = {"status": "ZERO_RESULTS", "routes": []}
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                with caplog.at_level("DEBUG", logger="rental_search_agent.proximity"):
+                    result = _get_directions(49.28, -123.12, 49.27, -123.0, "walking")
+        assert result is None
+        assert any(
+            r.levelname == "DEBUG" and "ZERO_RESULTS" in r.getMessage()
+            for r in caplog.records
+        )
 
 # ---------------------------------------------------------------------------
 # Tests: _get_distance_matrix_batch
@@ -409,3 +457,37 @@ class TestEnrichListingsWithProximity:
         result = enrich_listings_with_proximity(listings, [], [])
         assert len(result) == 1
         assert result[0]["proximity"] == {}
+
+    def test_logs_start_end_and_majority_missing_coords_warning(self, caplog):
+        listings = [
+            _sample_listing_dict(id="a", lat=None, lon=None),
+            _sample_listing_dict(id="b", lat=None, lon=None),
+            _sample_listing_dict(id="c", lat=49.28, lon=-123.12),
+        ]
+        # Fix None coords: helper always sets lat/lon; override explicitly
+        listings[0]["latitude"] = None
+        listings[0]["longitude"] = None
+        listings[1]["latitude"] = None
+        listings[1]["longitude"] = None
+        rules = [ProximityRule(location="Downtown Vancouver", mode="drive", max_minutes=30)]
+        geocoded = [
+            GeocodedReference(
+                location="Downtown Vancouver", lat=49.28, lon=-123.1, display_name="Downtown"
+            )
+        ]
+        payload = _distance_matrix_ok_response(dist_m=1000, dur_s=120)
+        with patch("urllib.request.urlopen", return_value=_make_urlopen_response(payload)):
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                with caplog.at_level("DEBUG", logger="rental_search_agent.proximity"):
+                    enrich_listings_with_proximity(listings, rules, geocoded)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("stage start name=enrich_listings_with_proximity" in m for m in messages)
+        assert any("enrich_listings_with_proximity done" in m and "n_listings=3" in m for m in messages)
+        assert any(
+            r.levelname == "WARNING" and "majority of listings lack coordinates" in r.getMessage()
+            for r in caplog.records
+        )
+        assert any(
+            r.levelname == "DEBUG" and "missing coordinates" in r.getMessage()
+            for r in caplog.records
+        )

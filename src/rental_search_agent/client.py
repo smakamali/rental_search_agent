@@ -25,6 +25,13 @@ from rental_search_agent.geocoding import (
     geocode_proximity_references as do_geocode_proximity_references,
 )
 from rental_search_agent.listing_analysis import analyze_listing_against_preferences as do_analyze_listing_against_preferences
+from rental_search_agent.logging_config import (
+    clear_run_id,
+    get_run_id,
+    log_stage,
+    new_run_id,
+    set_run_id,
+)
 from rental_search_agent.models import (
     GeocodedReference,
     Listing,
@@ -65,6 +72,8 @@ from rental_search_agent.server import (
     modify_viewing_plan,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _preferences_file() -> Path:
     """Path to optional JSON file for persisting preferences (shared with Streamlit)."""
@@ -81,6 +90,11 @@ def _load_preferences_from_file() -> dict:
         data = json.loads(path.read_text())
         return {k: data.get(k, "") or "" for k in PREF_KEYS}
     except Exception:
+        logger.warning(
+            "Failed to load preferences from %s; using defaults",
+            path,
+            exc_info=True,
+        )
         return default
 
 
@@ -91,7 +105,7 @@ def _save_preferences_to_file(prefs: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
     except Exception:
-        pass
+        logger.warning("Failed to save preferences to %s", path, exc_info=True)
 
 
 def _preferences_block(prefs: dict) -> str:
@@ -103,10 +117,77 @@ def _persist_fill_in_from_chat(chat_criteria: dict | None) -> None:
     """Fill empty stored search preference fields from chat criteria; never overwrite non-empty."""
     if not chat_criteria:
         return
-    stored = _load_preferences_from_file()
-    filled = fill_empty_stored_from_chat(stored, chat_criteria)
-    if filled != stored:
-        _save_preferences_to_file(filled)
+    try:
+        stored = _load_preferences_from_file()
+        filled = fill_empty_stored_from_chat(stored, chat_criteria)
+        if filled != stored:
+            _save_preferences_to_file(filled)
+    except Exception:
+        logger.warning("Failed to persist preference fill-in from chat", exc_info=True)
+
+
+def _filters_log_summary(filters: dict | None) -> str:
+    """Compact, non-secret summary of rental_search filters for logs."""
+    if not isinstance(filters, dict):
+        return ""
+    parts: list[str] = []
+    loc = filters.get("location")
+    if loc is not None:
+        try:
+            parts.append(f"location={location_as_display(loc)}")
+        except Exception:
+            parts.append(f"location={loc!r}")
+    for key in (
+        "listing_type",
+        "min_bedrooms",
+        "max_bedrooms",
+        "min_bathrooms",
+        "max_bathrooms",
+        "min_sqft",
+        "max_sqft",
+        "price_min",
+        "price_max",
+    ):
+        val = filters.get(key)
+        if val is not None and val != "":
+            parts.append(f"{key}={val}")
+    return " ".join(parts)
+
+
+def _tool_result_log_summary(name: str, parsed: object) -> str:
+    """Brief one-line summary of a tool JSON result for tool_end logs."""
+    if not isinstance(parsed, dict):
+        return "result=non-dict"
+    if "error" in parsed:
+        err = str(parsed.get("error") or "")[:160]
+        return f"error={err!r}"
+    if name == "rental_search":
+        failed = parsed.get("failed_locations") or []
+        return (
+            f"total_count={parsed.get('total_count')} "
+            f"listings={len(parsed.get('listings') or [])} "
+            f"failed_locations={len(failed) if isinstance(failed, list) else failed}"
+        )
+    if "listings" in parsed:
+        listings = parsed.get("listings") or []
+        count = parsed.get("total_count", len(listings) if isinstance(listings, list) else "?")
+        return f"total_count={count}"
+    if "slots" in parsed:
+        slots = parsed.get("slots") or []
+        return f"slots={len(slots) if isinstance(slots, list) else '?'}"
+    if "entries" in parsed:
+        entries = parsed.get("entries") or []
+        return f"entries={len(entries) if isinstance(entries, list) else '?'}"
+    if "rules" in parsed:
+        rules = parsed.get("rules") or []
+        return f"rules={len(rules) if isinstance(rules, list) else '?'}"
+    if "refs" in parsed:
+        refs = parsed.get("refs") or []
+        return f"refs={len(refs) if isinstance(refs, list) else '?'}"
+    if "request_user_input" in parsed:
+        return "ask_user"
+    keys = ",".join(list(parsed.keys())[:6])
+    return f"keys={keys}"
 
 
 def _merge_listing_dicts(existing: list[dict], incoming: list[dict]) -> list[dict]:
@@ -917,24 +998,59 @@ def run_tool(
         region = arguments.get("region") or ""
         return json.dumps(do_expand_search_region(region if isinstance(region, str) else str(region)))
     if name == "rental_search":
+        filters_arg = arguments.get("filters") if isinstance(arguments, dict) else None
+        filters_summary = _filters_log_summary(filters_arg if isinstance(filters_arg, dict) else None)
+        own_run_id = False
+        if get_run_id() is None:
+            set_run_id(new_run_id())
+            own_run_id = True
+        logger.info(
+            "rental_search start run_id=%s %s",
+            get_run_id(),
+            filters_summary,
+        )
         try:
-            f = RentalSearchFilters.model_validate(arguments["filters"])
-        except Exception as e:
-            return json.dumps({"error": f"Invalid filters: {e}"})
-        # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
-        try:
-            dumped = f.model_dump(exclude_none=True)
-            dumped["location"] = f.location_display()
-            _persist_fill_in_from_chat(dumped)
-        except Exception:
-            pass
-        try:
-            resp = search(f)
-        except SearchBackendError as e:
-            return json.dumps({"error": str(e)})
-        data = resp.model_dump()
-        data["listings"] = _with_display_rank(data["listings"])
-        return json.dumps(data)
+            try:
+                f = RentalSearchFilters.model_validate(arguments["filters"])
+            except Exception as e:
+                logger.warning("rental_search invalid filters: %s", e)
+                return json.dumps({"error": f"Invalid filters: {e}"})
+            # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
+            try:
+                dumped = f.model_dump(exclude_none=True)
+                dumped["location"] = f.location_display()
+                _persist_fill_in_from_chat(dumped)
+            except Exception:
+                logger.debug("rental_search preference fill-in failed", exc_info=True)
+            try:
+                stage_ctx = {"filters": filters_summary} if filters_summary else {}
+                with log_stage(logger, "rental_search", **stage_ctx):
+                    resp = search(f)
+            except SearchBackendError as e:
+                logger.warning("rental_search backend failure: %s", e)
+                return json.dumps({"error": str(e)})
+            data = resp.model_dump()
+            data["listings"] = _with_display_rank(data["listings"])
+            failed = data.get("failed_locations") or []
+            logger.info(
+                "rental_search end run_id=%s total_count=%s listings=%s "
+                "searched_locations=%s failed_locations=%s %s",
+                get_run_id(),
+                data.get("total_count"),
+                len(data.get("listings") or []),
+                len(data.get("searched_locations") or []),
+                len(failed) if isinstance(failed, list) else failed,
+                filters_summary,
+            )
+            if failed:
+                logger.warning(
+                    "rental_search partial failures failed_locations=%s",
+                    failed,
+                )
+            return json.dumps(data)
+        finally:
+            if own_run_id:
+                clear_run_id()
     if name == "filter_listings":
         listings = current_listings if current_listings is not None else []
         if not listings:
@@ -1114,7 +1230,7 @@ def run_tool(
             logger.debug("calendar_get_available_slots: returned %d slots", len(result.get("slots", [])))
             return json.dumps(result)
         except ValueError as e:
-            logger.debug("calendar_get_available_slots: error %s", e)
+            logger.warning("calendar_get_available_slots failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "draft_viewing_plan":
         try:
@@ -1128,7 +1244,7 @@ def run_tool(
             logger.debug("draft_viewing_plan: created %d entries", len(result.get("entries", [])))
             return json.dumps(result)
         except ValueError as e:
-            logger.debug("draft_viewing_plan: error %s", e)
+            logger.warning("draft_viewing_plan failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "modify_viewing_plan":
         plan_entries = current_plan_entries if current_plan_entries is not None else []
@@ -1148,7 +1264,7 @@ def run_tool(
             logger.debug("modify_viewing_plan: %d entries", len(result.get("entries", [])))
             return json.dumps(result)
         except ValueError as e:
-            logger.debug("modify_viewing_plan: error %s", e)
+            logger.warning("modify_viewing_plan failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "calendar_create_event":
         try:
@@ -1171,7 +1287,7 @@ def run_tool(
             logger.debug("calendar_create_event: created %s", result.get("id"))
             return json.dumps(result)
         except ValueError as e:
-            logger.debug("calendar_create_event: error %s", e)
+            logger.warning("calendar_create_event failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "calendar_update_event":
         try:
@@ -1185,12 +1301,14 @@ def run_tool(
             )
             return json.dumps(result)
         except ValueError as e:
+            logger.warning("calendar_update_event failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "calendar_delete_event":
         try:
             result = calendar_delete_event(arguments["event_id"])
             return json.dumps(result)
         except ValueError as e:
+            logger.warning("calendar_delete_event failed: %s", e)
             return json.dumps({"error": str(e)})
     if name == "calendar_list_events":
         try:
@@ -1202,6 +1320,7 @@ def run_tool(
             )
             return json.dumps(result)
         except ValueError as e:
+            logger.warning("calendar_list_events failed: %s", e)
             return json.dumps({"error": str(e)})
     return json.dumps({"error": f"Unknown tool: {name}"})
 
@@ -1238,39 +1357,23 @@ def prompt_user_for_ask_user(payload: dict) -> str:
     return json.dumps({"answer": line})
 
 
-_DEBUG_LOGGING_SETUP = False
-
-
-def _setup_debug_logging(project_root: Path) -> None:
-    """Configure file-based debug logging so output appears even if stderr is captured (e.g. by Streamlit)."""
-    global _DEBUG_LOGGING_SETUP
-    if _DEBUG_LOGGING_SETUP:
-        return
-    _DEBUG_LOGGING_SETUP = True
-    log_file = project_root / "rental_search_agent_debug.log"
-    handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    pkg_logger = logging.getLogger("rental_search_agent")
-    pkg_logger.addHandler(handler)
-    pkg_logger.setLevel(logging.DEBUG)
-
-
 def _load_env_file(path: Path) -> None:
-    """Load KEY=VALUE lines from path into os.environ if not already set."""
+    """Load KEY=VALUE lines from path into os.environ if not already set, then configure logging."""
+    from rental_search_agent.logging_config import configure_logging
+
     project_root = path.parent if path.name == ".env" else Path(__file__).resolve().parent.parent.parent
-    _setup_debug_logging(project_root)
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value.strip()
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value.strip()
+    # After env load so LOG_LEVEL / LOG_FILE from .env are visible.
+    configure_logging(project_root=project_root)
 
 
 def _make_llm_client() -> tuple[OpenAI, str]:
@@ -1282,9 +1385,6 @@ def _make_llm_client() -> tuple[OpenAI, str]:
         print(str(e), file=sys.stderr)
         print("See https://openrouter.ai for OpenRouter or set OPENAI_API_KEY for OpenAI.", file=sys.stderr)
         sys.exit(1)
-
-
-logger = logging.getLogger(__name__)
 
 
 def _infer_last_sort_by(messages: list[dict]) -> str | None:
@@ -1508,6 +1608,18 @@ def run_agent_step_events(
       {"type": "done", "messages": [...], "ask_user_payload": dict | None, "listing_state": dict | None}
         - always the last event; carries the same info run_agent_step returns as a tuple.
     """
+    set_run_id(new_run_id())
+    logger.info("agent_step started run_id=%s", get_run_id())
+    try:
+        yield from _run_agent_step_events_body(client, model, messages, stream=stream)
+    finally:
+        clear_run_id()
+
+
+def _run_agent_step_events_body(
+    client: OpenAI, model: str, messages: list[dict], *, stream: bool = True
+) -> Iterator[dict]:
+    """Inner agent-step generator; caller owns run_id lifecycle."""
     last_listing_state: dict | None = None
     seq = 0
     while True:
@@ -1607,6 +1719,7 @@ def run_agent_step_events(
                         proximity_rules_for_query=parsed_proximity_rules,
                     )
                 ok = True
+                parsed_result: object = None
                 try:
                     parsed_result = json.loads(result_str)
                     ok = not (isinstance(parsed_result, dict) and "error" in parsed_result)
@@ -1614,6 +1727,17 @@ def run_agent_step_events(
                     pass
                 if label:
                     yield {"type": "tool_end", "name": name, "label": label, "ok": ok, "seq": seq}
+                summary = _tool_result_log_summary(name, parsed_result)
+                if ok:
+                    logger.log(
+                        logging.INFO if name == "rental_search" else logging.DEBUG,
+                        "tool_end name=%s ok=%s %s",
+                        name,
+                        ok,
+                        summary,
+                    )
+                else:
+                    logger.warning("tool_end name=%s ok=%s %s", name, ok, summary)
                 # Update derived context from tool results so chained tools in same batch see fresh data
                 if name == "rental_search":
                     try:
@@ -1659,6 +1783,10 @@ def run_agent_step_events(
                                     stored, active_search_criteria
                                 )
                                 if pipeline_needed(effective):
+                                    logger.info(
+                                        "auto-apply applying after rental_search listings=%d",
+                                        len(master_listings),
+                                    )
                                     seq += 1
                                     apply_label = TOOL_STATUS_LABELS.get(
                                         APPLY_TOOL_NAME, "Applying search preferences..."
@@ -1687,6 +1815,23 @@ def run_agent_step_events(
                                         "ok": apply_ok,
                                         "seq": seq,
                                     }
+                                    if pending_apply_result is not None:
+                                        if (
+                                            pending_apply_result.warnings
+                                            or pending_apply_result.skipped
+                                        ):
+                                            logger.warning(
+                                                "auto-apply soft failures warnings=%s skipped=%s",
+                                                pending_apply_result.warnings,
+                                                pending_apply_result.skipped,
+                                            )
+                                        logger.info(
+                                            "auto-apply complete applied=%s listings=%d "
+                                            "display_source=%s",
+                                            pending_apply_result.applied,
+                                            len(pending_apply_result.listings or []),
+                                            pending_apply_result.display_source,
+                                        )
                                     if (
                                         pending_apply_result
                                         and pending_apply_result.applied
@@ -1707,6 +1852,10 @@ def run_agent_step_events(
                                             )
                                     else:
                                         pending_apply_result = None
+                                else:
+                                    logger.info(
+                                        "auto-apply skipping (pipeline not needed)"
+                                    )
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if name == "enrich_listings_with_proximity":
@@ -1855,9 +2004,11 @@ def run_agent_step(client: OpenAI, model: str, messages: list[dict]) -> tuple[li
 
 def run_agent_loop() -> None:
     """Run the chat loop: user message -> LLM -> tool calls -> resolve ask_user in CLI -> loop until reply."""
+    logger.info("CLI agent starting")
     project_root = Path(__file__).resolve().parent.parent.parent
     _load_env_file(project_root / ".env")
     client, model = _make_llm_client()
+    logger.info("CLI agent config ready model=%s", model)
     prefs = _load_preferences_from_file()
     system_content = current_date_context() + flow_instructions() + "\n\n" + _preferences_block(prefs)
     messages: list[dict] = [
@@ -1882,6 +2033,7 @@ def run_agent_loop() -> None:
             if messages and messages[-1].get("role") == "assistant" and messages[-1].get("content"):
                 print("\nAssistant:", messages[-1]["content"])
             break
+    logger.info("CLI agent exiting")
     print("Goodbye.")
 
 

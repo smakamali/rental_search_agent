@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from rental_search_agent.filtering import filter_listings
 from rental_search_agent.geocoding import geocode_proximity_references
+from rental_search_agent.logging_config import format_run_id_suffix, log_stage
 from rental_search_agent.match_scoring import score_listings_by_preferences
 from rental_search_agent.models import ListingFilterCriteria, ProximityRule
 from rental_search_agent.preference_resolution import (
@@ -379,6 +380,7 @@ def apply_search_preferences(
     structural criteria here while scoring with the just-saved form prefs.
     """
     current = _to_dicts(listings)
+    n_in = len(current)
     warnings: list[str] = []
     skipped: list[str] = []
     last_sort_by: Optional[str] = None
@@ -386,88 +388,113 @@ def apply_search_preferences(
     applied = False
     proximity_rules: list[ProximityRule] = []
     proximity_rule_dicts: list[dict] = []
+    n_after_structural = n_in
+    n_after_proximity = n_in
+    n_after_score = n_in
 
-    struct_src = structural_prefs if structural_prefs is not None else prefs
-    criteria_dict = structural_filter_criteria(struct_src)
-    if criteria_dict:
-        try:
-            resp = filter_listings(current, criteria_dict)
-            current = _to_dicts(resp.listings)
-            applied = True
-            display_source = "filter"
-        except Exception as e:
-            logger.warning("Structural filter in apply pipeline failed: %s", e)
-            warnings.append(f"Could not apply structural filters: {e}")
-            skipped.append("structural")
-    else:
-        skipped.append("structural")
-
-    proximity_text = (prefs.proximity_preferences or "").strip()
-    if proximity_text:
-        _emit(progress, "enrich_listings_with_proximity", "start")
-        prox_ok = False
-        try:
-            proximity_rules = list(parse_proximity_preferences(proximity_text) or [])
-            if not proximity_rules:
-                warnings.append("No proximity rules could be parsed from preferences.")
-                skipped.append("proximity")
-            else:
-                refs = geocode_proximity_references(proximity_rules)
-                current = enrich_listings_with_proximity(current, proximity_rules, refs)
-                resp = filter_listings(
-                    current,
-                    ListingFilterCriteria(),
-                    sort_by="proximity",
-                    ascending=True,
-                    proximity_rules=proximity_rules,
-                )
+    with log_stage(logger, "apply_search_preferences", n_in=n_in):
+        struct_src = structural_prefs if structural_prefs is not None else prefs
+        criteria_dict = structural_filter_criteria(struct_src)
+        if criteria_dict:
+            _emit(progress, "filter_listings", "start")
+            struct_ok = False
+            try:
+                resp = filter_listings(current, criteria_dict)
                 current = _to_dicts(resp.listings)
-                proximity_rule_dicts = [r.model_dump() for r in proximity_rules]
-                last_sort_by = "proximity"
-                display_source = "enrich"
                 applied = True
-                prox_ok = True
-        except ValueError as e:
-            logger.warning("Proximity step skipped: %s", e)
-            warnings.append(str(e))
-            skipped.append("proximity")
-        except Exception as e:
-            logger.warning("Proximity step failed: %s", e)
-            warnings.append(f"Could not compute proximity: {e}")
-            skipped.append("proximity")
-        _emit(progress, "enrich_listings_with_proximity", "end", prox_ok)
-    else:
-        skipped.append("proximity")
+                display_source = "filter"
+                struct_ok = True
+            except Exception as e:
+                logger.warning(
+                    "Structural filter in apply pipeline failed: %s", e, exc_info=True
+                )
+                warnings.append(f"Could not apply structural filters: {e}")
+                skipped.append("structural")
+            _emit(progress, "filter_listings", "end", struct_ok)
+        else:
+            skipped.append("structural")
+        n_after_structural = len(current)
 
-    if prefs.has_score_relevant_prefs() or proximity_rule_dicts:
-        _emit(progress, "score_listings_by_preferences", "start")
-        score_ok = False
-        try:
-            current = score_listings_by_preferences(
-                current,
-                preferences_text=prefs.qualitative_preferences or "",
-                effective_prefs=prefs,
-                proximity_rules=proximity_rule_dicts,
-            )
-            last_sort_by = "match_score"
-            display_source = "score"
-            applied = True
-            score_ok = True
-        except Exception as e:
-            logger.warning("Scoring step failed: %s", e)
-            warnings.append(f"Could not score listings: {e}")
+        proximity_text = (prefs.proximity_preferences or "").strip()
+        if proximity_text:
+            _emit(progress, "enrich_listings_with_proximity", "start")
+            prox_ok = False
+            try:
+                proximity_rules = list(parse_proximity_preferences(proximity_text) or [])
+                if not proximity_rules:
+                    warnings.append("No proximity rules could be parsed from preferences.")
+                    skipped.append("proximity")
+                else:
+                    refs = geocode_proximity_references(proximity_rules)
+                    current = enrich_listings_with_proximity(current, proximity_rules, refs)
+                    resp = filter_listings(
+                        current,
+                        ListingFilterCriteria(),
+                        sort_by="proximity",
+                        ascending=True,
+                        proximity_rules=proximity_rules,
+                    )
+                    current = _to_dicts(resp.listings)
+                    proximity_rule_dicts = [r.model_dump() for r in proximity_rules]
+                    last_sort_by = "proximity"
+                    display_source = "enrich"
+                    applied = True
+                    prox_ok = True
+            except ValueError as e:
+                logger.warning("Proximity step skipped: %s", e, exc_info=True)
+                warnings.append(str(e))
+                skipped.append("proximity")
+            except Exception as e:
+                logger.warning("Proximity step failed: %s", e, exc_info=True)
+                warnings.append(f"Could not compute proximity: {e}")
+                skipped.append("proximity")
+            _emit(progress, "enrich_listings_with_proximity", "end", prox_ok)
+        else:
+            skipped.append("proximity")
+        n_after_proximity = len(current)
+
+        if prefs.has_score_relevant_prefs() or proximity_rule_dicts:
+            _emit(progress, "score_listings_by_preferences", "start")
+            score_ok = False
+            try:
+                current = score_listings_by_preferences(
+                    current,
+                    preferences_text=prefs.qualitative_preferences or "",
+                    effective_prefs=prefs,
+                    proximity_rules=proximity_rule_dicts,
+                )
+                last_sort_by = "match_score"
+                display_source = "score"
+                applied = True
+                score_ok = True
+            except Exception as e:
+                logger.warning("Scoring step failed: %s", e, exc_info=True)
+                warnings.append(f"Could not score listings: {e}")
+                skipped.append("score")
+            _emit(progress, "score_listings_by_preferences", "end", score_ok)
+        else:
             skipped.append("score")
-        _emit(progress, "score_listings_by_preferences", "end", score_ok)
-    else:
-        skipped.append("score")
+        n_after_score = len(current)
 
-    current = with_display_rank(current)
-    return ApplyPreferencesResult(
-        listings=current,
-        proximity_rules=proximity_rule_dicts,
-        last_sort_by=last_sort_by,
-        warnings=warnings,
-        skipped=skipped,
-        display_source=display_source,
-        applied=applied,
-    )
+        current = with_display_rank(current)
+        rid_suffix = format_run_id_suffix()
+        logger.info(
+            "apply_search_preferences summary n_in=%d after_structural=%d "
+            "after_proximity=%d after_score=%d skipped=%s warnings=%d%s",
+            n_in,
+            n_after_structural,
+            n_after_proximity,
+            n_after_score,
+            ",".join(skipped) if skipped else "-",
+            len(warnings),
+            rid_suffix,
+        )
+        return ApplyPreferencesResult(
+            listings=current,
+            proximity_rules=proximity_rule_dicts,
+            last_sort_by=last_sort_by,
+            warnings=warnings,
+            skipped=skipped,
+            display_source=display_source,
+            applied=applied,
+        )
