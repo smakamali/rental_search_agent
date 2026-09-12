@@ -1169,6 +1169,10 @@ def run_tool(
                         "sign_in_required": True,
                     }
                 )
+            # Charge guest credit when a scrape is attempted (not only on success),
+            # so transient Apify failures cannot bypass cost limits.
+            used = policy.record_scrape()
+            set_searches_used(used)
             # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
             try:
                 dumped = f.model_dump(exclude_none=True)
@@ -1182,10 +1186,13 @@ def run_tool(
                     resp = search(f)
             except SearchBackendError as e:
                 logger.warning("rental_search backend failure: %s", e)
-                return json.dumps({"error": str(e)})
-            # Burn a guest search credit only after a successful scrape.
-            used = policy.record_scrape()
-            set_searches_used(used)
+                return json.dumps(
+                    {
+                        "error": str(e),
+                        "anon_searches_used": get_searches_used(),
+                        "anon_searches_remaining": policy.remaining_searches(),
+                    }
+                )
             set_has_results(True)
             data = resp.model_dump()
             data["listings"] = _with_display_rank(data["listings"])
@@ -1272,12 +1279,33 @@ def run_tool(
     if name == "parse_proximity_preferences":
         text = (arguments.get("proximity_text") or "").strip()
         rules = do_parse_proximity_preferences(text)
+        policy = get_capability_policy()
+        if not policy.can_proximity_rules(len(rules)):
+            return json.dumps(
+                {
+                    "error": policy.proximity_denied_message(),
+                    "code": "guest_proximity_limit",
+                    "sign_in_required": True,
+                    "rules": [r.model_dump() for r in rules],
+                }
+            )
         return json.dumps({"rules": [r.model_dump() for r in rules]})
     if name == "geocode_location":
         try:
             loc = (arguments.get("location") or "").strip()
             if not loc:
                 return json.dumps({"error": "location is required and must be non-empty."})
+            policy = get_capability_policy()
+            # Guests may geocode at most ANON_MAX_PROXIMITY_RULES destinations per call;
+            # a single location is always within a max of 1+.
+            if not policy.principal.has_full_access and policy.max_proximity_rules < 1:
+                return json.dumps(
+                    {
+                        "error": policy.proximity_denied_message(),
+                        "code": "guest_proximity_limit",
+                        "sign_in_required": True,
+                    }
+                )
             ref = do_geocode_location(loc)
             return json.dumps(ref.model_dump())
         except ValueError as e:
@@ -1286,6 +1314,15 @@ def run_tool(
         try:
             raw_rules = arguments.get("rules") or []
             rule_objs = [ProximityRule.model_validate(r) for r in raw_rules]
+            policy = get_capability_policy()
+            if not policy.can_proximity_rules(len(rule_objs)):
+                return json.dumps(
+                    {
+                        "error": policy.proximity_denied_message(),
+                        "code": "guest_proximity_limit",
+                        "sign_in_required": True,
+                    }
+                )
             refs = do_geocode_proximity_references(rule_objs)
             return json.dumps({"refs": [r.model_dump() for r in refs]})
         except Exception as e:

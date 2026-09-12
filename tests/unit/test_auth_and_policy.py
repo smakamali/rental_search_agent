@@ -57,6 +57,12 @@ class TestPrincipal:
         assert p.is_dev
         assert p.has_full_access
 
+    def test_guest_when_dev_principal_disabled(self, monkeypatch):
+        monkeypatch.setenv("ALLOW_DEV_PRINCIPAL", "false")
+        p = current_principal(auth_configured=False)
+        assert p.is_guest
+        assert not p.has_full_access
+
     def test_guest_when_configured_not_logged_in(self, monkeypatch):
         class U:
             is_logged_in = False

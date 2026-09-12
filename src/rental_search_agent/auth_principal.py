@@ -4,10 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
+import os
 
 from rental_search_agent.auth_allowlist import email_on_allowlist
 
 PrincipalKind = Literal["guest", "authenticated", "dev"]
+
+
+def allow_dev_principal() -> bool:
+    """When OIDC is not configured, use unrestricted local ``dev`` principal.
+
+    Set ``ALLOW_DEV_PRINCIPAL=false`` on shared/deployed hosts so missing secrets
+    fall back to capped ``guest`` instead of full access + shared file prefs.
+    Default: true (local developer convenience).
+    """
+    raw = (os.environ.get("ALLOW_DEV_PRINCIPAL") or "true").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 @dataclass(frozen=True)
@@ -87,14 +99,17 @@ def _read_st_user() -> Any | None:
 def current_principal(*, auth_configured: bool | None = None) -> Principal:
     """Return guest / authenticated / dev principal for the UI.
 
-    - OIDC not configured → ``dev`` (local unrestricted FileStore path).
+    - OIDC not configured + ``ALLOW_DEV_PRINCIPAL`` → ``dev`` (local unrestricted).
+    - OIDC not configured + ``ALLOW_DEV_PRINCIPAL=false`` → capped ``guest``.
     - Not logged in → ``guest``.
     - Logged in + allowlist pass (or allowlist off) → ``authenticated``.
     - Logged in + allowlist fail → ``guest`` with ``allowlist_denied=True``.
     """
     configured = _auth_configured() if auth_configured is None else auth_configured
     if not configured:
-        return Principal(kind="dev", user_id="local", name="Local dev")
+        if allow_dev_principal():
+            return Principal(kind="dev", user_id="local", name="Local dev")
+        return Principal(kind="guest")
 
     user = _read_st_user()
     is_logged_in = bool(getattr(user, "is_logged_in", False)) if user is not None else False
@@ -104,7 +119,16 @@ def current_principal(*, auth_configured: bool | None = None) -> Principal:
     email = str(getattr(user, "email", "") or "")
     name = str(getattr(user, "name", "") or "")
     picture = str(getattr(user, "picture", "") or "")
-    sub = str(getattr(user, "sub", "") or "") or email or "unknown"
+    sub = str(getattr(user, "sub", "") or "").strip()
+    if not sub:
+        # Avoid collapsing identities into a shared "unknown" SQLite key.
+        return Principal(
+            kind="guest",
+            email=email,
+            name=name,
+            picture_url=picture,
+            allowlist_denied=False,
+        )
 
     if not email_on_allowlist(email):
         return Principal(

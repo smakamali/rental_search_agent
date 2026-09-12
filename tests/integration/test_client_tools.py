@@ -909,22 +909,23 @@ class TestGuestCapabilityGates:
         finally:
             clear_runtime()
 
-    def test_multi_city_rental_search_denied_for_guest(self):
+    def test_geocode_proximity_denied_for_guest_over_cap(self, monkeypatch):
         from rental_search_agent.auth_principal import Principal
         from rental_search_agent.session_runtime import clear_runtime, set_runtime
 
-        set_runtime(Principal(kind="guest"), searches_used=0)
+        monkeypatch.setenv("ANON_MAX_PROXIMITY_RULES", "1")
+        set_runtime(Principal(kind="guest"))
         try:
             raw = run_tool(
-                "rental_search",
+                "geocode_proximity_references",
                 {
-                    "filters": {
-                        "min_bedrooms": 1,
-                        "location": ["Vancouver, BC", "Burnaby, BC"],
-                    }
+                    "rules": [
+                        {"location": "a", "mode": "drive", "max_minutes": 10},
+                        {"location": "b", "mode": "drive", "max_minutes": 10},
+                    ]
                 },
             )
             data = json.loads(raw)
-            assert data.get("code") == "guest_multi_city_denied"
+            assert data.get("code") == "guest_proximity_limit"
         finally:
             clear_runtime()

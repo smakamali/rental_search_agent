@@ -125,12 +125,48 @@ def _sync_searches_from_runtime() -> None:
     st.session_state["anon_searches_used"] = get_searches_used()
 
 
+def _oidc_logged_in() -> bool:
+    try:
+        import streamlit as st
+
+        user = getattr(st, "user", None)
+        return bool(getattr(user, "is_logged_in", False)) if user is not None else False
+    except Exception:
+        return False
+
+
+def _reset_session_for_identity_change() -> None:
+    """Clear prefs/listings/chat when leaving an authenticated identity (e.g. sign-out)."""
+    st.session_state["user_preferences"] = {k: "" for k in PREF_KEYS}
+    st.session_state["display_list"] = []
+    st.session_state["master_list"] = []
+    st.session_state["search_master"] = []
+    st.session_state["display_source"] = None
+    st.session_state["last_sort_by"] = None
+    st.session_state["apply_warnings"] = []
+    st.session_state["analyze_listing_id"] = None
+    st.session_state["analyze_listing"] = None
+    st.session_state["analysis_result"] = {}
+    st.session_state["chat_summary"] = ""
+    st.session_state["chat_summary_message_count"] = None
+    st.session_state["anon_searches_used"] = 0
+    st.session_state["_guest_prefs_hint_shown"] = False
+    st.session_state["messages"] = [
+        {"role": "system", "content": _build_system_content()},
+    ]
+    st.session_state["pending_ask"] = None
+
+
 def _handle_auth_transition(principal: Principal) -> None:
-    """On first authenticated sighting this session, merge guest prefs and load durable prefs."""
+    """On login merge guest prefs; on leaving an authenticated user, clear session data."""
     prev = st.session_state.get("_auth_user_id")
     if principal.is_authenticated:
         if prev != principal.user_id:
-            guest_prefs = dict(_ensure_prefs_dict())
+            # Switching accounts: do not carry previous user's prefs into merge.
+            if prev and prev not in ("local", None) and prev != principal.user_id:
+                guest_prefs = {k: "" for k in PREF_KEYS}
+            else:
+                guest_prefs = dict(_ensure_prefs_dict())
             merged = merge_guest_prefs_on_login(principal, guest_prefs)
             st.session_state["user_preferences"] = dict(merged)
             st.session_state["_auth_user_id"] = principal.user_id
@@ -142,6 +178,10 @@ def _handle_auth_transition(principal: Principal) -> None:
     elif principal.is_dev:
         st.session_state["_auth_user_id"] = "local"
     else:
+        # Guest (including after logout / allowlist deny). If we just left an
+        # authenticated identity, wipe session so the next user cannot see it.
+        if prev and prev not in ("local", None):
+            _reset_session_for_identity_change()
         st.session_state["_auth_user_id"] = None
 
 
@@ -162,7 +202,11 @@ def _render_auth_sidebar(principal: Principal) -> None:
                     "You can keep using guest mode with limited searches."
                 )
             st.caption("Try the tool as a guest, then sign in to save preferences and unlock multi-city search.")
-            if st.button("Sign in with Google", key="auth_sign_in", type="primary"):
+            # Allowlist-denied users are still OIDC-logged-in; offer Sign out.
+            if _oidc_logged_in():
+                if st.button("Sign out", key="auth_sign_out_denied"):
+                    st.logout()
+            elif st.button("Sign in with Google", key="auth_sign_in", type="primary"):
                 st.login("google")
             rem = CapabilityPolicy(
                 principal=principal,
@@ -590,6 +634,15 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
             if len(filters.location_list()) > 1 and not policy.can_multi_city():
                 st.session_state["apply_warnings"] = [policy.multi_city_denied_message()]
                 return
+            # Charge guest credit on scrape attempt (mirrors rental_search tool).
+            used = policy.record_scrape()
+            st.session_state["anon_searches_used"] = used
+            set_runtime(
+                principal,
+                searches_used=used,
+                has_results=bool(st.session_state.get("display_list") or st.session_state.get("search_master")),
+                prefs_holder=_ensure_prefs_dict(),
+            )
             try:
                 with log_stage(logger, "sidebar_scrape"):
                     resp = search(filters)
@@ -601,8 +654,6 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
                 logger.warning("Sidebar search failed: %s", e, exc_info=True)
                 st.session_state["apply_warnings"] = [f"Search failed: {e}"]
                 return
-            used = policy.record_scrape()
-            st.session_state["anon_searches_used"] = used
             set_runtime(
                 principal,
                 searches_used=used,
@@ -896,6 +947,13 @@ def main() -> None:
     st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
     _ensure_env_loaded()
     _init_session_state()
+    try:
+        _main_body()
+    finally:
+        clear_runtime()
+
+
+def _main_body() -> None:
     principal = _bind_runtime()
     _handle_auth_transition(principal)
     principal = _bind_runtime()
@@ -946,94 +1004,104 @@ def main() -> None:
     analyze_listing = st.session_state.get("analyze_listing")
     analysis_result = st.session_state.get("analysis_result", {})
     if analyze_listing_id and analyze_listing:
-        prefs = _sync_preferences_from_file()
-        qualitative = (prefs.get("qualitative_preferences") or "").strip()
-        proximity = (prefs.get("proximity_preferences") or "").strip()
-        preferences_text = qualitative
-        if proximity:
-            preferences_text = (
-                f"{preferences_text}\n\nProximity: {proximity}".strip()
-                if preferences_text
-                else f"Proximity: {proximity}"
-            )
-        if not preferences_text:
-            # Allow analyze when any score-relevant stored preference exists
-            from rental_search_agent.preference_resolution import stored_prefs_to_effective
+        from rental_search_agent.session_runtime import get_capability_policy as _gcp
 
-            if not stored_prefs_to_effective(prefs).has_score_relevant_prefs():
-                with st.expander("Analysis result", expanded=True):
-                    st.warning("Set Search Preferences in the sidebar first, then click Analyze again.")
-                    if st.button("Clear analysis"):
-                        st.session_state["analyze_listing_id"] = None
-                        st.session_state["analyze_listing"] = None
-                        st.rerun()
-                preferences_text = ""
-            else:
-                preferences_text = "Match my search preferences"
-        if preferences_text:
-            messages = st.session_state["messages"]
-            current_count = len(messages)
-            if st.session_state.get("chat_summary_message_count") != current_count:
-                with st.spinner("Summarizing conversation..."):
-                    summary = summarize_conversation_for_preferences(messages)
-                    st.session_state["chat_summary"] = summary or ""
-                    st.session_state["chat_summary_message_count"] = current_count
-                    st.session_state["analysis_result"] = {}
-                st.rerun()
-            conversation_context = st.session_state.get("chat_summary") or ""
-            if analyze_listing_id not in analysis_result:
-                with st.spinner("Analyzing listing..."):
-                    try:
-                        chat_messages = st.session_state.get("messages") or []
-                        search_criteria = _get_active_search_criteria_from_messages(chat_messages)
-                        proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                        chat = dict(search_criteria or {})
-                        if qualitative and not is_placeholder_qualitative(qualitative):
-                            chat["qualitative_preferences"] = qualitative
-                        effective = merge_chat_over_stored(prefs, chat)
-                        if is_placeholder_qualitative(effective.qualitative_preferences):
-                            effective = effective.model_copy(update={"qualitative_preferences": ""})
-                        result = analyze_listing_against_preferences(
-                            analyze_listing,
-                            preferences_text,
-                            conversation_context=conversation_context or None,
-                            stored_prefs=prefs,
-                            chat_criteria=chat,
-                            proximity_rules=proximity_rules or [],
-                            effective_prefs=effective,
-                        )
-                        st.session_state.setdefault("analysis_result", {})[
-                            analyze_listing_id
-                        ] = result
-                    except Exception as e:
-                        logger.warning(
-                            "Listing analysis failed listing_id=%s: %s",
-                            analyze_listing_id,
-                            e,
-                            exc_info=True,
-                        )
-                        st.session_state.setdefault("analysis_result", {})[
-                            analyze_listing_id
-                        ] = {"error": str(e)}
-                st.rerun()
-            result = st.session_state["analysis_result"].get(analyze_listing_id)
-            if result and isinstance(result, dict):
-                if "error" in result:
+        if not _gcp().can_analyze():
+            with st.expander("Analysis result", expanded=True):
+                st.warning("Run a search first (or sign in) to analyze listings.")
+                if st.button("Clear analysis"):
+                    st.session_state["analyze_listing_id"] = None
+                    st.session_state["analyze_listing"] = None
+                    st.rerun()
+        else:
+            prefs = _sync_preferences_from_file()
+            qualitative = (prefs.get("qualitative_preferences") or "").strip()
+            proximity = (prefs.get("proximity_preferences") or "").strip()
+            preferences_text = qualitative
+            if proximity:
+                preferences_text = (
+                    f"{preferences_text}\n\nProximity: {proximity}".strip()
+                    if preferences_text
+                    else f"Proximity: {proximity}"
+                )
+            if not preferences_text:
+                # Allow analyze when any score-relevant stored preference exists
+                from rental_search_agent.preference_resolution import stored_prefs_to_effective
+
+                if not stored_prefs_to_effective(prefs).has_score_relevant_prefs():
                     with st.expander("Analysis result", expanded=True):
-                        st.error(result["error"])
+                        st.warning("Set Search Preferences in the sidebar first, then click Analyze again.")
                         if st.button("Clear analysis"):
                             st.session_state["analyze_listing_id"] = None
                             st.session_state["analyze_listing"] = None
-                            st.session_state["analysis_result"] = {}
                             st.rerun()
+                    preferences_text = ""
                 else:
-                    addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
-                    with st.expander(f"Analysis: {addr}", expanded=True):
-                        render_listing_analysis(analyze_listing, result)
-                        if st.button("Clear analysis"):
-                            st.session_state["analyze_listing_id"] = None
-                            st.session_state["analyze_listing"] = None
-                            st.rerun()
+                    preferences_text = "Match my search preferences"
+            if preferences_text:
+                messages = st.session_state["messages"]
+                current_count = len(messages)
+                if st.session_state.get("chat_summary_message_count") != current_count:
+                    with st.spinner("Summarizing conversation..."):
+                        summary = summarize_conversation_for_preferences(messages)
+                        st.session_state["chat_summary"] = summary or ""
+                        st.session_state["chat_summary_message_count"] = current_count
+                        st.session_state["analysis_result"] = {}
+                    st.rerun()
+                conversation_context = st.session_state.get("chat_summary") or ""
+                if analyze_listing_id not in analysis_result:
+                    with st.spinner("Analyzing listing..."):
+                        try:
+                            chat_messages = st.session_state.get("messages") or []
+                            search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                            proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                            chat = dict(search_criteria or {})
+                            if qualitative and not is_placeholder_qualitative(qualitative):
+                                chat["qualitative_preferences"] = qualitative
+                            effective = merge_chat_over_stored(prefs, chat)
+                            if is_placeholder_qualitative(effective.qualitative_preferences):
+                                effective = effective.model_copy(update={"qualitative_preferences": ""})
+                            result = analyze_listing_against_preferences(
+                                analyze_listing,
+                                preferences_text,
+                                conversation_context=conversation_context or None,
+                                stored_prefs=prefs,
+                                chat_criteria=chat,
+                                proximity_rules=proximity_rules or [],
+                                effective_prefs=effective,
+                            )
+                            st.session_state.setdefault("analysis_result", {})[
+                                analyze_listing_id
+                            ] = result
+                        except Exception as e:
+                            logger.warning(
+                                "Listing analysis failed listing_id=%s: %s",
+                                analyze_listing_id,
+                                e,
+                                exc_info=True,
+                            )
+                            st.session_state.setdefault("analysis_result", {})[
+                                analyze_listing_id
+                            ] = {"error": str(e)}
+                    st.rerun()
+                result = st.session_state["analysis_result"].get(analyze_listing_id)
+                if result and isinstance(result, dict):
+                    if "error" in result:
+                        with st.expander("Analysis result", expanded=True):
+                            st.error(result["error"])
+                            if st.button("Clear analysis"):
+                                st.session_state["analyze_listing_id"] = None
+                                st.session_state["analyze_listing"] = None
+                                st.session_state["analysis_result"] = {}
+                                st.rerun()
+                    else:
+                        addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
+                        with st.expander(f"Analysis: {addr}", expanded=True):
+                            render_listing_analysis(analyze_listing, result)
+                            if st.button("Clear analysis"):
+                                st.session_state["analyze_listing_id"] = None
+                                st.session_state["analyze_listing"] = None
+                                st.rerun()
 
     if listings:
         render_search_results(listings)
@@ -1042,7 +1110,6 @@ def main() -> None:
 
     _render_chat_panel(client, model)
     _sync_searches_from_runtime()
-    clear_runtime()
 
 
 def run_ui() -> None:
