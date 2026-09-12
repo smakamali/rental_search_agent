@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# Streamlit secrets (Google OIDC) — keep example only
+.streamlit/secrets.toml
+
 # Google Calendar credentials and token (secrets)
 .rental_search_agent/
 

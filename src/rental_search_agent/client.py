@@ -56,6 +56,19 @@ from rental_search_agent.preference_resolution import (
     preferences_block as _shared_preferences_block,
     qualitative_from_preferences_text,
 )
+from rental_search_agent.preference_store import (
+    LOCAL_USER_ID,
+    FilePreferenceStore,
+    default_preferences_file_path,
+)
+from rental_search_agent.session_runtime import (
+    get_capability_policy,
+    get_searches_used,
+    load_active_preferences,
+    save_active_preferences,
+    set_has_results,
+    set_searches_used,
+)
 from rental_search_agent.proximity import enrich_listings_with_proximity as do_enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.match_scoring import score_listings_by_preferences as do_score_listings_by_preferences
@@ -77,35 +90,36 @@ logger = logging.getLogger(__name__)
 
 def _preferences_file() -> Path:
     """Path to optional JSON file for persisting preferences (shared with Streamlit)."""
-    return Path.home() / ".rental_search_agent" / "preferences.json"
+    return default_preferences_file_path()
 
 
 def _load_preferences_from_file() -> dict:
-    """Load preferences from file if it exists; otherwise return default dict."""
-    default = {k: "" for k in PREF_KEYS}
-    path = _preferences_file()
-    if not path.exists():
-        return default
-    try:
-        data = json.loads(path.read_text())
-        return {k: data.get(k, "") or "" for k in PREF_KEYS}
-    except Exception:
-        logger.warning(
-            "Failed to load preferences from %s; using defaults",
-            path,
-            exc_info=True,
-        )
-        return default
+    """Load preferences for the active runtime (holder/SQLite) or local JSON file."""
+    from rental_search_agent.session_runtime import _prefs_holder
+
+    if _prefs_holder.get() is not None:
+        return load_active_preferences()
+    principal = get_capability_policy().principal
+    if principal.is_authenticated and principal.user_id:
+        return load_active_preferences()
+    return FilePreferenceStore(_preferences_file()).load(LOCAL_USER_ID)
 
 
 def _save_preferences_to_file(prefs: dict) -> None:
-    """Write preferences to file. No-op on failure."""
-    path = _preferences_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
-    except Exception:
-        logger.warning("Failed to save preferences to %s", path, exc_info=True)
+    """Persist preferences for the active runtime or local JSON file."""
+    from rental_search_agent.session_runtime import _prefs_holder
+
+    if _prefs_holder.get() is not None:
+        save_active_preferences(prefs)
+        return
+    principal = get_capability_policy().principal
+    if principal.is_authenticated and principal.user_id:
+        save_active_preferences(prefs)
+        return
+    if principal.is_guest:
+        save_active_preferences(prefs)
+        return
+    FilePreferenceStore(_preferences_file()).save(LOCAL_USER_ID, prefs)
 
 
 def _preferences_block(prefs: dict) -> str:
@@ -1108,6 +1122,15 @@ def run_tool(
             "allow_multiple": arguments.get("allow_multiple", False),
         })
     if name == "expand_search_region":
+        policy = get_capability_policy()
+        if not policy.can_multi_city():
+            return json.dumps(
+                {
+                    "error": policy.multi_city_denied_message(),
+                    "code": "guest_multi_city_denied",
+                    "sign_in_required": True,
+                }
+            )
         region = arguments.get("region") or ""
         return json.dumps(do_expand_search_region(region if isinstance(region, str) else str(region)))
     if name == "rental_search":
@@ -1128,6 +1151,28 @@ def run_tool(
             except Exception as e:
                 logger.warning("rental_search invalid filters: %s", e)
                 return json.dumps({"error": f"Invalid filters: {e}"})
+            policy = get_capability_policy()
+            locations = f.location_list()
+            if len(locations) > 1 and not policy.can_multi_city():
+                return json.dumps(
+                    {
+                        "error": policy.multi_city_denied_message(),
+                        "code": "guest_multi_city_denied",
+                        "sign_in_required": True,
+                    }
+                )
+            if not policy.can_scrape():
+                return json.dumps(
+                    {
+                        "error": policy.scrape_denied_message(),
+                        "code": "guest_search_limit",
+                        "sign_in_required": True,
+                    }
+                )
+            # Charge guest credit when a scrape is attempted (not only on success),
+            # so transient Apify failures cannot bypass cost limits.
+            used = policy.record_scrape()
+            set_searches_used(used)
             # Fill empty stored Search Preferences from chat filters (never overwrite non-empty).
             try:
                 dumped = f.model_dump(exclude_none=True)
@@ -1141,9 +1186,20 @@ def run_tool(
                     resp = search(f)
             except SearchBackendError as e:
                 logger.warning("rental_search backend failure: %s", e)
-                return json.dumps({"error": str(e)})
+                return json.dumps(
+                    {
+                        "error": str(e),
+                        "anon_searches_used": get_searches_used(),
+                        "anon_searches_remaining": policy.remaining_searches(),
+                    }
+                )
+            set_has_results(True)
             data = resp.model_dump()
             data["listings"] = _with_display_rank(data["listings"])
+            data["anon_searches_used"] = get_searches_used()
+            rem = policy.remaining_searches()
+            if rem is not None:
+                data["anon_searches_remaining"] = max(0, rem)
             failed = data.get("failed_locations") or []
             logger.info(
                 "rental_search end run_id=%s total_count=%s listings=%s "
@@ -1223,12 +1279,33 @@ def run_tool(
     if name == "parse_proximity_preferences":
         text = (arguments.get("proximity_text") or "").strip()
         rules = do_parse_proximity_preferences(text)
+        policy = get_capability_policy()
+        if not policy.can_proximity_rules(len(rules)):
+            return json.dumps(
+                {
+                    "error": policy.proximity_denied_message(),
+                    "code": "guest_proximity_limit",
+                    "sign_in_required": True,
+                    "rules": [r.model_dump() for r in rules],
+                }
+            )
         return json.dumps({"rules": [r.model_dump() for r in rules]})
     if name == "geocode_location":
         try:
             loc = (arguments.get("location") or "").strip()
             if not loc:
                 return json.dumps({"error": "location is required and must be non-empty."})
+            policy = get_capability_policy()
+            # Guests may geocode at most ANON_MAX_PROXIMITY_RULES destinations per call;
+            # a single location is always within a max of 1+.
+            if not policy.principal.has_full_access and policy.max_proximity_rules < 1:
+                return json.dumps(
+                    {
+                        "error": policy.proximity_denied_message(),
+                        "code": "guest_proximity_limit",
+                        "sign_in_required": True,
+                    }
+                )
             ref = do_geocode_location(loc)
             return json.dumps(ref.model_dump())
         except ValueError as e:
@@ -1237,6 +1314,15 @@ def run_tool(
         try:
             raw_rules = arguments.get("rules") or []
             rule_objs = [ProximityRule.model_validate(r) for r in raw_rules]
+            policy = get_capability_policy()
+            if not policy.can_proximity_rules(len(rule_objs)):
+                return json.dumps(
+                    {
+                        "error": policy.proximity_denied_message(),
+                        "code": "guest_proximity_limit",
+                        "sign_in_required": True,
+                    }
+                )
             refs = do_geocode_proximity_references(rule_objs)
             return json.dumps({"refs": [r.model_dump() for r in refs]})
         except Exception as e:
@@ -1251,12 +1337,30 @@ def run_tool(
             if not listings:
                 return json.dumps({"error": "No current listings to enrich. Run a search (or filter) first."})
             rule_objs = [ProximityRule.model_validate(r) for r in rules_raw]
+            policy = get_capability_policy()
+            if not policy.can_proximity_rules(len(rule_objs)):
+                return json.dumps(
+                    {
+                        "error": policy.proximity_denied_message(),
+                        "code": "guest_proximity_limit",
+                        "sign_in_required": True,
+                    }
+                )
             ref_objs = [GeocodedReference.model_validate(r) for r in refs_raw]
             enriched = do_enrich_listings_with_proximity(listings, rule_objs, ref_objs)
             return json.dumps({"listings": _with_display_rank(enriched), "total_count": len(enriched)})
         except Exception as e:
             return json.dumps({"error": str(e)})
     if name == "score_listings_by_preferences":
+        policy = get_capability_policy()
+        if not policy.can_score():
+            return json.dumps(
+                {
+                    "error": "Sign in with Google or run a search first to rank listings by preferences.",
+                    "code": "guest_scoring_denied",
+                    "sign_in_required": True,
+                }
+            )
         listings = current_listings if current_listings is not None else []
         if not listings:
             return json.dumps({"error": "No current search results to score. Run a search first."})
@@ -1297,6 +1401,15 @@ def run_tool(
         except Exception as e:
             return json.dumps({"error": str(e)})
     if name == "analyze_listing_preferences":
+        policy = get_capability_policy()
+        if not policy.can_analyze():
+            return json.dumps(
+                {
+                    "error": "Sign in with Google or run a search first to analyze listings.",
+                    "code": "guest_analyze_denied",
+                    "sign_in_required": True,
+                }
+            )
         listing = arguments.get("listing")
         preferences_text = (arguments.get("preferences_text") or "").strip()
         if not listing or not isinstance(listing, dict):

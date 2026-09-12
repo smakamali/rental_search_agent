@@ -85,7 +85,15 @@ Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or
 
 ### Streamlit UI
 
-Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit"); they are stored in `~/.rental_search_agent/preferences.json` and shared with the CLI. Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, plus `APIFY_TOKEN` in `.env` or your environment), then run:
+Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit").
+
+**Accounts:** Guests can try the UI with limited free scrapes per browser session (`ANON_MAX_SEARCHES`, default 3). Sign in with Google to save preferences (SQLite at `PREFS_DB_PATH` / `~/.rental_search_agent/preferences.db`), unlock multi-city metro search, and remove guest caps. Without Streamlit OIDC secrets configured, the app runs in local **dev** mode (`ALLOW_DEV_PRINCIPAL=true` by default) and still uses `~/.rental_search_agent/preferences.json` (shared with the CLI). On a shared host, set `ALLOW_DEV_PRINCIPAL=false` so missing secrets fall back to capped guest mode instead of full access.
+
+Google sign-in setup: copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to `.streamlit/secrets.toml` and add a Google OAuth Web client (redirect URI must match). Optional closed beta: set `AUTH_ALLOWLIST_ENABLED=true` and `AUTH_ALLOWLIST` (emails and/or `@domains`).
+
+Guest limits (env): `ANON_MAX_SEARCHES`, `ANON_MAX_PROXIMITY_RULES`. Filter/sort on an existing result set does not burn a search credit.
+
+Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, plus `APIFY_TOKEN` in `.env` or your environment), then run:
 
 ```bash
 rental-search-ui

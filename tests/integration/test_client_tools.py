@@ -876,3 +876,56 @@ class TestGetViewingPlanFromMessages:
         messages = [{"role": "tool", "content": json.dumps({"slots": []})}]
         result = _get_viewing_plan_from_messages(messages)
         assert result == []
+
+
+class TestGuestCapabilityGates:
+    def test_rental_search_denied_when_guest_out_of_credits(self, monkeypatch):
+        from rental_search_agent.auth_principal import Principal
+        from rental_search_agent.session_runtime import clear_runtime, set_runtime
+
+        monkeypatch.setenv("ANON_MAX_SEARCHES", "1")
+        set_runtime(Principal(kind="guest"), searches_used=1)
+        try:
+            raw = run_tool(
+                "rental_search",
+                {"filters": {"min_bedrooms": 1, "location": "Vancouver, BC"}},
+            )
+            data = json.loads(raw)
+            assert data.get("code") == "guest_search_limit"
+            assert data.get("sign_in_required") is True
+        finally:
+            clear_runtime()
+
+    def test_expand_search_region_denied_for_guest(self):
+        from rental_search_agent.auth_principal import Principal
+        from rental_search_agent.session_runtime import clear_runtime, set_runtime
+
+        set_runtime(Principal(kind="guest"))
+        try:
+            raw = run_tool("expand_search_region", {"region": "Metro Vancouver"})
+            data = json.loads(raw)
+            assert data.get("code") == "guest_multi_city_denied"
+            assert data.get("sign_in_required") is True
+        finally:
+            clear_runtime()
+
+    def test_geocode_proximity_denied_for_guest_over_cap(self, monkeypatch):
+        from rental_search_agent.auth_principal import Principal
+        from rental_search_agent.session_runtime import clear_runtime, set_runtime
+
+        monkeypatch.setenv("ANON_MAX_PROXIMITY_RULES", "1")
+        set_runtime(Principal(kind="guest"))
+        try:
+            raw = run_tool(
+                "geocode_proximity_references",
+                {
+                    "rules": [
+                        {"location": "a", "mode": "drive", "max_minutes": 10},
+                        {"location": "b", "mode": "drive", "max_minutes": 10},
+                    ]
+                },
+            )
+            data = json.loads(raw)
+            assert data.get("code") == "guest_proximity_limit"
+        finally:
+            clear_runtime()

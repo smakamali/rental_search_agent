@@ -92,13 +92,16 @@ class TestRunToolRentalSearchLogging:
 
 class TestClientPreferencesLoadLogging:
     def test_corrupt_preferences_file_warns(self, caplog, tmp_path, monkeypatch):
+        from rental_search_agent.session_runtime import clear_runtime
+
+        clear_runtime()
         prefs_path = tmp_path / "preferences.json"
         prefs_path.write_text("{not-json", encoding="utf-8")
         monkeypatch.setattr(
             "rental_search_agent.client._preferences_file",
             lambda: prefs_path,
         )
-        with caplog.at_level(logging.WARNING, logger="rental_search_agent.client"):
+        with caplog.at_level(logging.WARNING, logger="rental_search_agent.preference_store"):
             loaded = _load_preferences_from_file()
         assert isinstance(loaded, dict)
         assert any("Failed to load preferences" in r.getMessage() for r in caplog.records)
@@ -116,7 +119,7 @@ class TestStreamlitPreferencesLoadLogging:
             "rental_search_agent.streamlit_app._preferences_file",
             lambda: prefs_path,
         )
-        with caplog.at_level(logging.WARNING, logger="rental_search_agent.streamlit_app"):
+        with caplog.at_level(logging.WARNING, logger="rental_search_agent.preference_store"):
             loaded = st_load()
         assert isinstance(loaded, dict)
         assert any("Failed to load preferences" in r.getMessage() for r in caplog.records)
