@@ -3,6 +3,10 @@
 from rental_search_agent.search_regions import (
     METRO_VANCOUVER,
     GREATER_TORONTO,
+    HAMILTON,
+    OTTAWA,
+    HALIFAX,
+    CALGARY,
     canonicalize_search_locations,
     expand_search_region,
     known_region_names,
@@ -49,6 +53,7 @@ class TestExpandSearchRegion:
         assert "City of North Vancouver" in labels
         assert "District of North Vancouver" in labels
         assert "Township of Langley" in labels
+        assert "Tsawwassen First Nation" in labels
         assert len(result["cities"]) >= 21
 
     def test_unknown_returns_error(self):
@@ -95,6 +100,26 @@ class TestCatalogFitsCap:
     def test_gta_picker_fits_cap(self):
         assert len(GREATER_TORONTO.cities) <= MAX_SEARCH_LOCATIONS
         assert len(unique_search_locations(GREATER_TORONTO.cities)) <= MAX_SEARCH_LOCATIONS
+        labels = {c.label for c in GREATER_TORONTO.cities}
+        assert {"Uxbridge", "Scugog", "Brock"} <= labels
+
+    def test_hamilton_is_cma_municipalities_only(self):
+        labels = [c.label for c in HAMILTON.cities]
+        assert labels == ["Hamilton", "Burlington", "Grimsby"]
+
+    def test_ottawa_excludes_amalgamated_neighbourhoods(self):
+        labels = {c.label for c in OTTAWA.cities}
+        assert "Ottawa" in labels and "Gatineau" in labels
+        assert labels.isdisjoint({"Kanata", "Orleans", "Nepean", "Barrhaven", "Stittsville", "Vanier"})
+
+    def test_halifax_is_hrm_plus_east_hants(self):
+        labels = [c.label for c in HALIFAX.cities]
+        assert labels == ["Halifax Regional Municipality", "East Hants"]
+
+    def test_calgary_excludes_okotoks(self):
+        labels = {c.label for c in CALGARY.cities}
+        assert "Okotoks" not in labels
+        assert "Crossfield" in labels
 
 
 class TestResolveSearchLocationInput:

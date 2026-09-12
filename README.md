@@ -33,6 +33,7 @@ pip install -e .
 | `APIFY_TOKEN` | **Required** for property search. [Apify](https://console.apify.com/settings/integrations) API token. |
 | `APIFY_ACTOR_ID` | Optional. Actor id (default: `igolaizola/realtor-canada-scraper-ppe`). |
 | `APIFY_MAX_ITEMS` | Optional. Max listings per search (default: `100`). |
+| `APIFY_MAX_CONCURRENT` | Optional. Max concurrent multi-city Apify actor runs (default: `5`). |
 | `APIFY_FETCH_DETAILS` | Optional. Fetch listing descriptions (`PublicRemarks`) via the actor's `fetchDetails` option (default: `true`). Extra Apify PPE cost and longer run time. |
 | `APIFY_MAX_RETRIES` | Optional. Extra Apify actor attempts after a transient failure/timeout (default: `2`, so 3 tries total). |
 | `APIFY_RETRY_BASE_SECONDS` | Optional. Base delay for exponential backoff between retries (default: `1.0` → 1s, then 2s). |

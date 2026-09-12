@@ -4,9 +4,9 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# Cap so a full Metro Vancouver picker selection (21 municipalities + Tsawwassen) fits.
-MAX_SEARCH_LOCATIONS = 22
-# Bound each city string so a 22-item list cannot carry unbounded payloads.
+# Cap so a full GTA picker selection (25 municipalities) fits.
+MAX_SEARCH_LOCATIONS = 25
+# Bound each city string so a full multi-city list cannot carry unbounded payloads.
 MAX_SEARCH_LOCATION_CHARS = 200
 
 

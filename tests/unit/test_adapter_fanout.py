@@ -4,13 +4,36 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rental_search_agent.adapter import SearchBackendError, merge_listings_by_id, search
+from rental_search_agent.adapter import (
+    SearchBackendError,
+    get_fanout_max_workers,
+    merge_listings_by_id,
+    search,
+)
 from rental_search_agent.models import Listing, RentalSearchFilters, RentalSearchResponse
 from tests.fixtures.sample_data import sample_listing
 
 
 def _resp(*listings: Listing) -> RentalSearchResponse:
     return RentalSearchResponse(listings=list(listings), total_count=len(listings))
+
+
+class TestGetFanoutMaxWorkers:
+    def test_default_is_five(self, monkeypatch):
+        monkeypatch.delenv("APIFY_MAX_CONCURRENT", raising=False)
+        assert get_fanout_max_workers() == 5
+
+    def test_reads_env(self, monkeypatch):
+        monkeypatch.setenv("APIFY_MAX_CONCURRENT", "3")
+        assert get_fanout_max_workers() == 3
+
+    def test_invalid_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("APIFY_MAX_CONCURRENT", "nope")
+        assert get_fanout_max_workers() == 5
+
+    def test_clamps_to_at_least_one(self, monkeypatch):
+        monkeypatch.setenv("APIFY_MAX_CONCURRENT", "0")
+        assert get_fanout_max_workers() == 1
 
 
 class TestMergeListingsById:
@@ -141,3 +164,31 @@ class TestAdapterSearchFanout:
         backend.search.assert_called_once()
         assert backend.search.call_args.args[0].location == "North Vancouver, BC"
         assert result.searched_locations == ["North Vancouver, BC"]
+
+    def test_fanout_respects_apify_max_concurrent(self, monkeypatch):
+        monkeypatch.setenv("APIFY_MAX_CONCURRENT", "2")
+        backend = MagicMock()
+        cities = ["Vancouver, BC", "Burnaby, BC", "Surrey, BC", "Richmond, BC"]
+        filters = RentalSearchFilters(min_bedrooms=1, location=cities)
+
+        future_by_city: dict[str, MagicMock] = {}
+
+        def _submit(_fn, _backend, _filters, city):
+            fut = MagicMock()
+            fut.result.return_value = _resp(sample_listing(id=f"id-{city}", address=city))
+            future_by_city[city] = fut
+            return fut
+
+        with patch("rental_search_agent.adapter.get_search_backend", return_value=backend):
+            with patch("rental_search_agent.adapter.ThreadPoolExecutor") as pool_cls:
+                pool = pool_cls.return_value.__enter__.return_value
+                pool.submit.side_effect = _submit
+                with patch(
+                    "rental_search_agent.adapter.as_completed",
+                    side_effect=lambda futures: list(futures),
+                ):
+                    result = search(filters)
+
+        pool_cls.assert_called_once_with(max_workers=2)
+        assert result.total_count == 4
+        assert set(result.searched_locations) == set(cities)

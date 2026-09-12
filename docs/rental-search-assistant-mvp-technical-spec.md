@@ -277,7 +277,7 @@ The client uses **[OpenRouter](https://openrouter.ai)** as the default LLM backe
 | `max_sqft` | number (integer) | No | Maximum square footage. Omit for no upper limit. |
 | `price_min` | number | No | Minimum rent (CAD/month). |
 | `price_max` | number | No | Maximum rent (CAD/month). At least one of `price_min` or `price_max` should be set if user gave a range. |
-| `location` | string or array of strings | Yes | One city (`"Vancouver, BC"`) or a list of cities for a multi-city search. Not a metro name. Max 22 cities. |
+| `location` | string or array of strings | Yes | One city (`"Vancouver, BC"`) or a list of cities for a multi-city search. Not a metro name. Max 25 cities. |
 | `listing_type` | string | No | Transaction type: `"for_rent"` or `"for_sale"`. Default `"for_rent"`. |
 
 **Example:**
