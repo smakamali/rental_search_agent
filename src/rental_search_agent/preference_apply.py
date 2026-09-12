@@ -425,21 +425,28 @@ def apply_search_preferences(
                     warnings.append("No proximity rules could be parsed from preferences.")
                     skipped.append("proximity")
                 else:
-                    refs = geocode_proximity_references(proximity_rules)
-                    current = enrich_listings_with_proximity(current, proximity_rules, refs)
-                    resp = filter_listings(
-                        current,
-                        ListingFilterCriteria(),
-                        sort_by="proximity",
-                        ascending=True,
-                        proximity_rules=proximity_rules,
-                    )
-                    current = _to_dicts(resp.listings)
-                    proximity_rule_dicts = [r.model_dump() for r in proximity_rules]
-                    last_sort_by = "proximity"
-                    display_source = "enrich"
-                    applied = True
-                    prox_ok = True
+                    from rental_search_agent.session_runtime import get_capability_policy
+
+                    policy = get_capability_policy()
+                    if not policy.can_proximity_rules(len(proximity_rules)):
+                        warnings.append(policy.proximity_denied_message())
+                        skipped.append("proximity")
+                    else:
+                        refs = geocode_proximity_references(proximity_rules)
+                        current = enrich_listings_with_proximity(current, proximity_rules, refs)
+                        resp = filter_listings(
+                            current,
+                            ListingFilterCriteria(),
+                            sort_by="proximity",
+                            ascending=True,
+                            proximity_rules=proximity_rules,
+                        )
+                        current = _to_dicts(resp.listings)
+                        proximity_rule_dicts = [r.model_dump() for r in proximity_rules]
+                        last_sort_by = "proximity"
+                        display_source = "enrich"
+                        applied = True
+                        prox_ok = True
             except ValueError as e:
                 logger.warning("Proximity step skipped: %s", e, exc_info=True)
                 warnings.append(str(e))
@@ -454,24 +461,33 @@ def apply_search_preferences(
         n_after_proximity = len(current)
 
         if prefs.has_score_relevant_prefs() or proximity_rule_dicts:
-            _emit(progress, "score_listings_by_preferences", "start")
-            score_ok = False
-            try:
-                current = score_listings_by_preferences(
-                    current,
-                    preferences_text=prefs.qualitative_preferences or "",
-                    effective_prefs=prefs,
-                    proximity_rules=proximity_rule_dicts,
+            from rental_search_agent.session_runtime import get_capability_policy
+
+            score_policy = get_capability_policy()
+            if not score_policy.can_score():
+                warnings.append(
+                    "Preference scoring skipped for guests until a search has been run."
                 )
-                last_sort_by = "match_score"
-                display_source = "score"
-                applied = True
-                score_ok = True
-            except Exception as e:
-                logger.warning("Scoring step failed: %s", e, exc_info=True)
-                warnings.append(f"Could not score listings: {e}")
                 skipped.append("score")
-            _emit(progress, "score_listings_by_preferences", "end", score_ok)
+            else:
+                _emit(progress, "score_listings_by_preferences", "start")
+                score_ok = False
+                try:
+                    current = score_listings_by_preferences(
+                        current,
+                        preferences_text=prefs.qualitative_preferences or "",
+                        effective_prefs=prefs,
+                        proximity_rules=proximity_rule_dicts,
+                    )
+                    last_sort_by = "match_score"
+                    display_source = "score"
+                    applied = True
+                    score_ok = True
+                except Exception as e:
+                    logger.warning("Scoring step failed: %s", e, exc_info=True)
+                    warnings.append(f"Could not score listings: {e}")
+                    skipped.append("score")
+                _emit(progress, "score_listings_by_preferences", "end", score_ok)
         else:
             skipped.append("score")
         n_after_score = len(current)

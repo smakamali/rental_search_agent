@@ -94,6 +94,8 @@ UX
 
 [x] Chat in a floating panel on the bottom-right that scrolls independently of the results panel.
 
+[] In the analyze section, add highlights generated from the listing description that are relevant to the user's preferences.
+
 ================================================================================
 BUGS (PROXIMITY / RANKING)
 ================================================================================
@@ -121,7 +123,11 @@ BUGS (PROXIMITY / RANKING)
 SESSION AND AUTH
 ================================================================================
 
-[] User session with Google authentication, with preferences saved per user.
+[x] User session with Google authentication, with preferences saved per user.
+    Streamlit: optional Google OIDC (st.login), guest try-mode with session_state
+    search credits, SQLite prefs for signed-in users, FileStore for local/CLI/dev.
+    Optional AUTH_ALLOWLIST_ENABLED / AUTH_ALLOWLIST. CapabilityPolicy gates
+    scrapes, multi-city, and proximity rule count for guests.
 
 ================================================================================
 TESTING AND MCP

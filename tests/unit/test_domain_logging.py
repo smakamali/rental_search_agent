@@ -140,7 +140,9 @@ class TestPreferenceResolutionLogging:
                 prefs = load_stored_preferences()
         assert prefs["location"] == ""
         assert any(
-            "load_stored_preferences failed" in r.getMessage() for r in caplog.records
+            "load_stored_preferences failed" in r.getMessage()
+            or "Failed to load preferences" in r.getMessage()
+            for r in caplog.records
         )
 
     def test_merge_debug_effective_keys(self, caplog):

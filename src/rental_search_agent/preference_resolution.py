@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping, Optional
-import json
 import logging
 
 from pydantic import BaseModel, Field
@@ -176,25 +175,24 @@ def qualitative_from_preferences_text(text: str | None) -> str:
 
 
 def preferences_file_path() -> Path:
-    return Path.home() / ".rental_search_agent" / "preferences.json"
+    """Path to the local shared preferences JSON file."""
+    from rental_search_agent.preference_store import default_preferences_file_path
+
+    return default_preferences_file_path()
 
 
 def load_stored_preferences() -> dict[str, str]:
-    """Load persisted Search Preferences JSON; empty strings for missing keys."""
-    default = {k: "" for k in PREF_KEYS}
-    path = preferences_file_path()
-    if not path.exists():
-        return default
-    try:
-        data = json.loads(path.read_text())
-        return {k: data.get(k, "") or "" for k in PREF_KEYS}
-    except Exception:
-        logger.warning(
-            "load_stored_preferences failed; using defaults path=%s",
-            path,
-            exc_info=True,
-        )
-        return default
+    """Load persisted Search Preferences via the file PreferenceStore."""
+    from rental_search_agent.preference_store import LOCAL_USER_ID, FilePreferenceStore
+
+    return FilePreferenceStore(preferences_file_path()).load(LOCAL_USER_ID)
+
+
+def save_stored_preferences(prefs: Mapping[str, Any]) -> None:
+    """Persist Search Preferences via the file PreferenceStore."""
+    from rental_search_agent.preference_store import LOCAL_USER_ID, FilePreferenceStore
+
+    FilePreferenceStore(preferences_file_path()).save(LOCAL_USER_ID, prefs)
 
 
 def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:

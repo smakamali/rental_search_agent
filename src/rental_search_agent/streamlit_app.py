@@ -42,6 +42,22 @@ from rental_search_agent.preference_resolution import (
     preferences_block as _shared_preferences_block,
     stored_prefs_to_effective,
 )
+from rental_search_agent.preference_store import (
+    LOCAL_USER_ID,
+    FilePreferenceStore,
+    default_preferences_file_path,
+    normalize_preferences,
+)
+from rental_search_agent.auth_principal import Principal, current_principal
+from rental_search_agent.capability_policy import CapabilityPolicy
+from rental_search_agent.session_runtime import (
+    clear_runtime,
+    get_searches_used,
+    load_active_preferences,
+    merge_guest_prefs_on_login,
+    save_active_preferences,
+    set_runtime,
+)
 from rental_search_agent.proximity_parser import parse_proximity_preferences
 from rental_search_agent.streamlit_analysis import render_listing_analysis
 from rental_search_agent.streamlit_results import (
@@ -69,35 +85,91 @@ def _preferences_block(prefs: dict) -> str:
 
 def _preferences_file() -> Path:
     """Path to optional JSON file for persisting preferences across sessions."""
-    return Path.home() / ".rental_search_agent" / "preferences.json"
+    return default_preferences_file_path()
 
 
 def _load_preferences_from_file() -> dict:
-    """Load preferences from file if it exists; otherwise return default dict."""
-    default = {k: "" for k in PREF_KEYS}
-    path = _preferences_file()
-    if not path.exists():
-        return default
-    try:
-        data = json.loads(path.read_text())
-        return {k: data.get(k, "") or "" for k in PREF_KEYS}
-    except Exception:
-        logger.warning(
-            "Failed to load preferences from %s; using defaults",
-            path,
-            exc_info=True,
-        )
-        return default
+    """Load preferences for tests / local file path injection."""
+    return FilePreferenceStore(_preferences_file()).load(LOCAL_USER_ID)
 
 
 def _save_preferences_to_file(prefs: dict) -> None:
-    """Write preferences to file. No-op on failure (e.g. directory missing)."""
-    path = _preferences_file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({k: prefs.get(k, "") for k in PREF_KEYS}, indent=2))
-    except Exception:
-        logger.warning("Failed to save preferences to %s", path, exc_info=True)
+    """Save preferences for tests / local file path injection."""
+    FilePreferenceStore(_preferences_file()).save(LOCAL_USER_ID, prefs)
+
+
+def _ensure_prefs_dict() -> dict:
+    prefs = st.session_state.get("user_preferences")
+    if not isinstance(prefs, dict):
+        prefs = {k: "" for k in PREF_KEYS}
+        st.session_state["user_preferences"] = prefs
+    return prefs
+
+
+def _bind_runtime() -> Principal:
+    """Set session_runtime from Streamlit session + current principal."""
+    principal = current_principal()
+    prefs = _ensure_prefs_dict()
+    searches_used = int(st.session_state.get("anon_searches_used") or 0)
+    has_results = bool(st.session_state.get("display_list") or st.session_state.get("search_master"))
+    set_runtime(
+        principal,
+        searches_used=searches_used,
+        has_results=has_results,
+        prefs_holder=prefs,
+    )
+    return principal
+
+
+def _sync_searches_from_runtime() -> None:
+    st.session_state["anon_searches_used"] = get_searches_used()
+
+
+def _handle_auth_transition(principal: Principal) -> None:
+    """On first authenticated sighting this session, merge guest prefs and load durable prefs."""
+    prev = st.session_state.get("_auth_user_id")
+    if principal.is_authenticated:
+        if prev != principal.user_id:
+            guest_prefs = dict(_ensure_prefs_dict())
+            merged = merge_guest_prefs_on_login(principal, guest_prefs)
+            st.session_state["user_preferences"] = dict(merged)
+            st.session_state["_auth_user_id"] = principal.user_id
+            if st.session_state.get("messages"):
+                st.session_state["messages"][0] = {
+                    "role": "system",
+                    "content": _build_system_content(),
+                }
+    elif principal.is_dev:
+        st.session_state["_auth_user_id"] = "local"
+    else:
+        st.session_state["_auth_user_id"] = None
+
+
+def _render_auth_sidebar(principal: Principal) -> None:
+    with st.sidebar:
+        st.subheader("Account")
+        if principal.is_dev:
+            st.caption("Local mode (Google sign-in not configured). Prefs save to this machine.")
+        elif principal.is_authenticated:
+            label = principal.name or principal.email or "Signed in"
+            st.caption(f"Signed in as {label}")
+            if st.button("Sign out", key="auth_sign_out"):
+                st.logout()
+        else:
+            if principal.allowlist_denied:
+                st.warning(
+                    "Your Google account is not on the beta allowlist. "
+                    "You can keep using guest mode with limited searches."
+                )
+            st.caption("Try the tool as a guest, then sign in to save preferences and unlock multi-city search.")
+            if st.button("Sign in with Google", key="auth_sign_in", type="primary"):
+                st.login("google")
+            rem = CapabilityPolicy(
+                principal=principal,
+                searches_used=int(st.session_state.get("anon_searches_used") or 0),
+            ).remaining_searches()
+            if rem is not None:
+                st.caption(f"Free searches remaining this session: {rem}")
 
 
 def _build_system_content() -> str:
@@ -107,9 +179,10 @@ def _build_system_content() -> str:
 
 
 def _sync_preferences_from_file() -> dict:
-    """Reload preferences.json into session so chat fill-in is visible to UI/Analyze."""
-    loaded = _load_preferences_from_file()
-    st.session_state["user_preferences"] = loaded
+    """Reload durable/session prefs into session so chat fill-in is visible to UI/Analyze."""
+    _bind_runtime()
+    loaded = load_active_preferences()
+    st.session_state["user_preferences"] = dict(loaded)
     if st.session_state.get("messages"):
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
     return loaded
@@ -144,8 +217,13 @@ def _get_client_and_model():
 
 def _init_session_state() -> None:
     _ensure_env_loaded()
+    if "anon_searches_used" not in st.session_state:
+        st.session_state["anon_searches_used"] = 0
+    if "_auth_user_id" not in st.session_state:
+        st.session_state["_auth_user_id"] = None
     if "user_preferences" not in st.session_state:
-        st.session_state["user_preferences"] = _load_preferences_from_file()
+        # Placeholder until principal is bound; filled in run_ui after auth transition.
+        st.session_state["user_preferences"] = {k: "" for k in PREF_KEYS}
     if "messages" not in st.session_state:
         st.session_state["messages"] = [
             {"role": "system", "content": _build_system_content()},
@@ -338,8 +416,10 @@ def _apply_listing_state(listing_state: dict | None) -> None:
 
 def _run_user_prompt(client, model, prompt: str) -> None:
     """Append a user message, run one agent step, and rerun."""
+    _bind_runtime()
     st.session_state["messages"].append({"role": "user", "content": prompt})
     payload, listing_state = _run_agent_step_with_ui(client, model)
+    _sync_searches_from_runtime()
     _apply_listing_state(listing_state)
     if payload is not None:
         st.session_state["pending_ask"] = payload
@@ -368,6 +448,7 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
     assistant's final text streamed in as it arrives. Updates st.session_state['messages'] in
     place. Returns (ask_user_payload, listing_state) — same info run_agent_step returns besides
     messages, which is already applied to session state."""
+    _bind_runtime()
     step_placeholders: dict[int, "st.delta_generator.DeltaGenerator"] = {}
     final_event: dict | None = None
     with st.chat_message("assistant"):
@@ -398,6 +479,9 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
                     if ph is not None:
                         icon = "\u2705" if event["ok"] else "\u26a0\ufe0f"
                         ph.markdown(f"- {icon} {event['label']}")
+                    # Keep guest search counter in sync after rental_search.
+                    _sync_searches_from_runtime()
+                    _bind_runtime()
                 elif etype == "text_delta":
                     acc_text += event["delta"]
                     text_placeholder.markdown(acc_text)
@@ -433,9 +517,22 @@ def _search_master_listings() -> list[dict]:
 
 
 def _commit_preferences(new_prefs: dict) -> None:
-    """Persist sidebar prefs and refresh the system prompt."""
-    st.session_state["user_preferences"] = new_prefs
-    _save_preferences_to_file(new_prefs)
+    """Persist sidebar prefs (durable for auth/dev; session-only for guests) and refresh system prompt."""
+    principal = _bind_runtime()
+    normalized = normalize_preferences(new_prefs)
+    st.session_state["user_preferences"] = normalized
+    save_active_preferences(normalized)
+    if principal.is_guest:
+        st.session_state.setdefault("apply_warnings", [])
+        # Soft hint once per save — keep short.
+        hint = "Guest mode: preferences are saved for this browser session only. Sign in to keep them."
+        if hint not in (st.session_state.get("apply_warnings") or []):
+            # Don't spam warnings list on every save; use a session flag.
+            if not st.session_state.get("_guest_prefs_hint_shown"):
+                st.session_state["_guest_prefs_hint_shown"] = True
+                st.session_state["apply_warnings"] = list(
+                    st.session_state.get("apply_warnings") or []
+                ) + [hint]
     messages = st.session_state.get("messages") or []
     if messages:
         messages[0] = {"role": "system", "content": _build_system_content()}
@@ -459,6 +556,12 @@ def _apply_pipeline_to_session(result, *, search_master: list[dict] | None = Non
 
 def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
     """Save already done. Scrape when needed, otherwise re-rank the current master list."""
+    principal = _bind_runtime()
+    policy = CapabilityPolicy(
+        principal=principal,
+        searches_used=int(st.session_state.get("anon_searches_used") or 0),
+        has_results=bool(st.session_state.get("display_list") or st.session_state.get("search_master")),
+    )
     search_master = _search_master_listings()
     messages = st.session_state.get("messages") or []
     request = prepare_sidebar_search(
@@ -471,6 +574,9 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
         st.session_state["apply_warnings"] = request.warnings
         logger.warning("Sidebar search rejected: %s", request.warnings)
         return
+    if request.kind == "scrape" and not policy.can_scrape():
+        st.session_state["apply_warnings"] = [policy.scrape_denied_message()]
+        return
     set_run_id(new_run_id())
     try:
         if request.kind == "scrape":
@@ -480,6 +586,9 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
             except Exception as e:
                 logger.warning("Sidebar search invalid filters: %s", e, exc_info=True)
                 st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
+                return
+            if len(filters.location_list()) > 1 and not policy.can_multi_city():
+                st.session_state["apply_warnings"] = [policy.multi_city_denied_message()]
                 return
             try:
                 with log_stage(logger, "sidebar_scrape"):
@@ -492,6 +601,14 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
                 logger.warning("Sidebar search failed: %s", e, exc_info=True)
                 st.session_state["apply_warnings"] = [f"Search failed: {e}"]
                 return
+            used = policy.record_scrape()
+            st.session_state["anon_searches_used"] = used
+            set_runtime(
+                principal,
+                searches_used=used,
+                has_results=True,
+                prefs_holder=_ensure_prefs_dict(),
+            )
             data = resp.model_dump()
             listings = with_display_rank(data.get("listings") or [])
             data["listings"] = listings
@@ -543,6 +660,7 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
 def _render_preferences_sidebar() -> None:
     """Sidebar Search Preferences form. Contact/viewing fields stay persisted but hidden."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
+    principal = current_principal()
     with st.sidebar:
         st.subheader("Search Preferences")
         st.caption(
@@ -552,15 +670,23 @@ def _render_preferences_sidebar() -> None:
             "Search scrapes when location, buy/rent, or structural fields change, "
             "or when there are no results yet; otherwise it re-ranks."
         )
+        if principal.is_guest:
+            st.info(
+                "Guest mode: preferences are session-only. "
+                "Sign in to save them. Multi-city metro search requires sign-in."
+            )
         for warning in st.session_state.get("apply_warnings") or []:
             st.warning(warning)
         with st.form("preferences_form"):
             location = st.text_input(
                 "Location",
                 value=prefs.get("location", ""),
-                placeholder="e.g. Vancouver, BC or Metro Vancouver",
+                placeholder="e.g. Vancouver, BC"
+                + ("" if principal.is_guest else " or Metro Vancouver"),
                 key="pref_location",
             )
+            if principal.is_guest:
+                st.caption("Tip: use a single city. Metro multi-city search unlocks after sign-in.")
             saved_listing_type = str(prefs.get("listing_type") or "").strip()
             listing_choice = st.segmented_control(
                 "Buy / Rent",
@@ -609,7 +735,7 @@ def _render_preferences_sidebar() -> None:
             proximity = st.text_area(
                 "Proximity preferences",
                 value=prefs.get("proximity_preferences", ""),
-                placeholder="e.g. max 30 min drive to downtown, 5 min walk to transit",
+                placeholder="e.g. max 30 min drive to downtown",
                 key="pref_proximity",
             )
             qualitative = st.text_area(
@@ -658,7 +784,9 @@ def _render_preferences_sidebar() -> None:
                         with st.spinner(request.spinner):
                             _run_sidebar_search(new_prefs, previous)
                 else:
-                    st.session_state["apply_warnings"] = []
+                    # Keep guest hint if present; clear other scrape warnings.
+                    if not principal.is_guest:
+                        st.session_state["apply_warnings"] = []
                 st.rerun()
         if not st.session_state.get("chat_open", True):
             if st.button("Open chat", key="sidebar_chat_open"):
@@ -709,7 +837,9 @@ def _render_ask_form(pending: dict) -> None:
                 st.stop()
             # Run step in a loop until no more pending ask (or we get final reply)
             while True:
+                _bind_runtime()
                 payload, listing_state = _run_agent_step_with_ui(client, model)
+                _sync_searches_from_runtime()
                 _apply_listing_state(listing_state)
                 if payload is not None:
                     st.session_state["pending_ask"] = payload
@@ -760,12 +890,24 @@ def _render_chat_panel(client, model) -> None:
 
 
 def main() -> None:
+    from rental_search_agent.logging_config import configure_logging
+
+    configure_logging()
     st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
     _ensure_env_loaded()
     _init_session_state()
+    principal = _bind_runtime()
+    _handle_auth_transition(principal)
+    principal = _bind_runtime()
+    if principal.is_dev and not st.session_state.get("_dev_prefs_loaded"):
+        st.session_state["user_preferences"] = _load_preferences_from_file()
+        st.session_state["_dev_prefs_loaded"] = True
+        st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
+        principal = _bind_runtime()
     _inject_chat_blob_css()
     st.title("Property Search Assistant")
 
+    _render_auth_sidebar(principal)
     _render_preferences_sidebar()
 
     client, model = _get_client_and_model()
@@ -899,6 +1041,8 @@ def main() -> None:
         st.caption("Enter location and beds in Search Preferences, then click Search.")
 
     _render_chat_panel(client, model)
+    _sync_searches_from_runtime()
+    clear_runtime()
 
 
 def run_ui() -> None:
