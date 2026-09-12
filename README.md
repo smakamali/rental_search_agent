@@ -1,134 +1,79 @@
-# Property Search Assistant MVP
+# Property Search Assistant
 
-Chat-based Canadian property search assistant (rent **or** sale): natural-language search, shortlist, viewing plan drafting (with Google Calendar), and simulated viewing requests. Uses REALTOR.CA via **Apify** (`igolaizola/realtor-canada-scraper-ppe`).
+Canadian property search assistant (rent **or** sale) for [REALTOR.CA](https://www.realtor.ca/) listings. Describe what you want in chat, or set Search Preferences in the Streamlit sidebar; the agent scrapes via **Apify**, then filters, enriches commute times, and ranks results for a table and map.
 
-**LLM:** The client uses [OpenRouter](https://openrouter.ai) by default (one API key, 400+ models). You can still use direct OpenAI via `OPENAI_API_KEY`.
+**Chat scope:** search and refine only. Calendar / viewing-booking tools exist on the MCP server but are disabled in the UI and CLI agent.
+
+**LLM:** [OpenRouter](https://openrouter.ai) by default (one key, many models), or direct OpenAI.
+
+Docs: [Overview](docs/overview.md) · [Architecture](docs/architecture.md) · [Tools](docs/tools.md) · [Configuration](docs/configuration.md)
 
 ## Setup
 
-### Conda environment
-
-Create and activate the project environment:
+### Environment
 
 ```bash
 conda create -n realtor_agent python=3.10
 conda activate realtor_agent
-```
-
-Install dependencies and the package in editable mode:
-
-```bash
 pip install -r requirements.txt
 pip install -e .
 ```
 
-### Environment variables
+### Keys
 
-| Variable | Description |
-|----------|-------------|
-| `OPENROUTER_API_KEY` | **Recommended** for the client. [OpenRouter](https://openrouter.ai) API key — one key for 400+ models (OpenAI, Anthropic, etc.). |
-| `OPENROUTER_MODEL` | Optional. OpenRouter model ID (default: `openai/gpt-4o-mini`). Examples: `anthropic/claude-3.5-sonnet`, `google/gemini-pro`. |
-| `OPENAI_API_KEY` | Alternative to OpenRouter. Direct OpenAI API key (used if `OPENROUTER_API_KEY` is not set). |
-| `OPENAI_MODEL` | Optional when using OpenAI. Model name (default: `gpt-4o-mini`). |
-| `APIFY_TOKEN` | **Required** for property search. [Apify](https://console.apify.com/settings/integrations) API token. |
-| `APIFY_ACTOR_ID` | Optional. Actor id (default: `igolaizola/realtor-canada-scraper-ppe`). |
-| `APIFY_MAX_ITEMS` | Optional. Max listings per search (default: `100`). |
-| `APIFY_MAX_CONCURRENT` | Optional. Max concurrent multi-city Apify actor runs (default: `5`). |
-| `APIFY_FETCH_DETAILS` | Optional. Fetch listing descriptions (`PublicRemarks`) via the actor's `fetchDetails` option (default: `true`). Extra Apify PPE cost and longer run time. |
-| `APIFY_MAX_RETRIES` | Optional. Extra Apify actor attempts after a transient failure/timeout (default: `2`, so 3 tries total). |
-| `APIFY_RETRY_BASE_SECONDS` | Optional. Base delay for exponential backoff between retries (default: `1.0` → 1s, then 2s). |
-| `SEARCH_MARKET` | Optional. Only `ca` is implemented (US planned). |
-| `GOOGLE_CALENDAR_CREDENTIALS_PATH` | Optional. Path to Google OAuth credentials JSON (default: `.rental_search_agent/credentials.json`). Required for calendar tools. |
-| `GOOGLE_CALENDAR_TOKEN_PATH` | Optional. Path to store OAuth token (default: `.rental_search_agent/token.json`). |
-| `GOOGLE_MAPS_API_KEY` | Required for **proximity preferences**: geocoding, drive/walk/transit times. Enable Geocoding, Directions, and Places APIs in Google Cloud. |
-| `TIMEZONE` | Optional. Timezone for calendar and date display (default: `America/Vancouver`). |
-| `LOG_LEVEL` | Optional. Package log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default: `INFO`). |
-| `LOG_FILE` | Optional. If set, also write logs to this file (relative paths resolve from the project root). Console logging is always enabled. Useful when Streamlit captures stderr. |
+Copy [`.env.example`](.env.example) to `.env`. Minimum for search:
+
+| Variable | Role |
+|----------|------|
+| `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | Chat agent (+ embeddings for ranking) |
+| `APIFY_TOKEN` | REALTOR.CA scrape via Apify |
+| `GOOGLE_MAPS_API_KEY` | Optional but required for proximity / commute prefs |
+
+Full variable list: [docs/configuration.md](docs/configuration.md).
 
 ## Running
 
-### MCP server (stdio)
-
-For use by Cursor, Claude, or other MCP clients:
-
-```bash
-rental-search-mcp
-```
-
-Or:
-
-```bash
-python -m rental_search_agent.server
-```
-
-The server exposes tools including `ask_user`, `expand_search_region`, `rental_search`, `filter_listings`, `summarize_listings`, `parse_proximity_preferences`, `geocode_location`, `geocode_proximity_references`, `enrich_listings_with_proximity`, `simulate_viewing_request`, calendar tools, `draft_viewing_plan`, and `modify_viewing_plan`. It uses stdio by default.
-
-### Chat client (CLI)
-
-Runs the agent loop with a CLI: you type your search, the LLM calls tools; when it calls `ask_user`, you are prompted for answers or multi-select in the terminal.
-
-```bash
-set OPENROUTER_API_KEY=your-openrouter-key
-set APIFY_TOKEN=your-apify-token
-rental-search-client
-```
-
-Or with OpenAI directly: `set OPENAI_API_KEY=your-key` (then `OPENROUTER_API_KEY` is ignored).
-
-Or:
-
-```bash
-python -m rental_search_agent.client
-```
-
-Use `OPENROUTER_MODEL` to switch models (e.g. `anthropic/claude-3.5-sonnet`); or `OPENAI_MODEL` when using OpenAI directly.
-
-### Streamlit UI
-
-Web chat interface using the same agent and tools. Displays search results in a table (with optional proximity column) and on a map (when coordinates are available). You can set **proximity preferences** in the sidebar (e.g. "max 30 min drive to downtown, 5 min walk to transit").
-
-**Accounts:** Guests can try the UI with limited free scrapes per browser session (`ANON_MAX_SEARCHES`, default 3). Sign in with Google to save preferences (SQLite at `PREFS_DB_PATH` / `~/.rental_search_agent/preferences.db`), unlock multi-city metro search, and remove guest caps. Without Streamlit OIDC secrets configured, the app runs in local **dev** mode (`ALLOW_DEV_PRINCIPAL=true` by default) and still uses `~/.rental_search_agent/preferences.json` (shared with the CLI). On a shared host, set `ALLOW_DEV_PRINCIPAL=false` so missing secrets fall back to capped guest mode instead of full access.
-
-Google sign-in setup: copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to `.streamlit/secrets.toml` and add a Google OAuth Web client (redirect URI must match). Optional closed beta: set `AUTH_ALLOWLIST_ENABLED=true` and `AUTH_ALLOWLIST` (emails and/or `@domains`).
-
-Guest limits (env): `ANON_MAX_SEARCHES`, `ANON_MAX_PROXIMITY_RULES`. Filter/sort on an existing result set does not burn a search credit.
-
-Set the same environment variables as the CLI (e.g. `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, plus `APIFY_TOKEN` in `.env` or your environment), then run:
+### Streamlit UI (primary)
 
 ```bash
 rental-search-ui
+# or: streamlit run src/rental_search_agent/streamlit_app.py
 ```
 
-Or:
+Includes chat, Search Preferences sidebar, ranked table/map, and Analyze. Guests get capped scrapes (`ANON_MAX_SEARCHES`). Sign in with Google for unlimited search, multi-city metro picks, and durable prefs. Without OIDC secrets, the app uses a local **dev** principal by default (`ALLOW_DEV_PRINCIPAL=true`); on shared hosts set `ALLOW_DEV_PRINCIPAL=false`.
+
+Google sign-in: copy [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) to `.streamlit/secrets.toml` and configure a Google OAuth Web client. Optional closed beta: `AUTH_ALLOWLIST_ENABLED` / `AUTH_ALLOWLIST`.
+
+### CLI client
 
 ```bash
-streamlit run src/rental_search_agent/streamlit_app.py
+rental-search-client
+# or: python -m rental_search_agent.client
 ```
 
-The CLI remains available as `rental-search-client` or `python -m rental_search_agent.client` for terminal use.
+Same agent loop in the terminal; `ask_user` prompts on stdin.
 
-## Google Calendar (optional)
+### MCP server (stdio)
 
-Calendar tools (`calendar_get_available_slots`, `calendar_create_event`, etc.) use the Google Calendar API. To enable:
+For Cursor, Claude, or other MCP hosts (full tool set including calendar/viewing):
 
-1. Create a project in [Google Cloud Console](https://console.cloud.google.com) and enable the Calendar API.
-2. Download OAuth client credentials (Desktop app) as `credentials.json`.
-3. Place it in `.rental_search_agent/` (or set `GOOGLE_CALENDAR_CREDENTIALS_PATH`).
-4. On first use, a browser will open for OAuth; the token is saved at `.rental_search_agent/token.json`.
+```bash
+rental-search-mcp
+# or: python -m rental_search_agent.server
+```
 
-Without credentials, calendar tools return an error; the agent can fall back to a simulated-only flow (no events created).
+## Features (short)
 
-## Multi-city / metro search
+- **Metro search** — expand region → multi-select cities → parallel scrape + dedupe
+- **Proximity** — free-text commute rules via Google Maps APIs (AND semantics; unknown distance kept)
+- **Preference pipeline** — after scrape: structural filter → proximity → weighted `match_score`
+- **Sidebar Search** — scrape or re-rank without chat when prefs change
 
-A named metro (e.g. Metro Vancouver, GTA) is expanded with `expand_search_region`, then confirmed with `ask_user` (multi-select of municipalities). One `rental_search` then accepts `location` as a list of cities; the adapter scrapes those cities in parallel and returns a single deduped master list. Explicit city lists (e.g. "Vancouver and Burnaby") skip the metro picker. A bare city name remains a single-city search.
+## Google Calendar (MCP only)
 
-## Proximity preferences (optional)
-
-You can set **geographic proximity** constraints (e.g. "max 30 min drive to downtown", "5 min walk to transit") in the Streamlit sidebar or in `~/.rental_search_agent/preferences.json` (the CLI reads the same file). The agent parses them, geocodes locations, enriches listings with real distance and drive/walk/transit times via Google APIs, and filters by them (AND semantics). Listings without coordinates are kept and shown as "distance unknown". Requires `GOOGLE_MAPS_API_KEY` and enabling **Geocoding**, **Directions**, and **Places** APIs in your Google Cloud project.
+Calendar tools need OAuth credentials (Desktop app) under `.rental_search_agent/` (or paths set in env). First use opens a browser; token is saved locally. Without credentials, calendar tools error. These tools are **not** available in the Streamlit/CLI chat agent.
 
 ## Testing
-
-With the `realtor_agent` conda env active:
 
 ```bash
 pip install -e ".[dev]"
@@ -138,10 +83,5 @@ pytest --cov=rental_search_agent --cov-report=term-missing
 
 ## Backend
 
-- **In scope:** Canada REALTOR.CA via **Apify** actor `igolaizola/realtor-canada-scraper-ppe` (`for_rent` and `for_sale`). Backend is pluggable for a future US market.
-- **Out of scope (this MVP):** US actors, `for_sale_or_rent` / sold modes, licensed CREA DDF.
-
-## Docs
-
-- [Technical spec](docs/rental-search-assistant-mvp-technical-spec.md)
-- [MVP overview](docs/rental-search-assistant-mvp.md)
+- **In scope:** Canada REALTOR.CA via Apify actor `igolaizola/realtor-canada-scraper-ppe` (`for_rent`, `for_sale`). Pluggable seam for a future US market (`SEARCH_MARKET`).
+- **Out of scope:** US actors, `for_sale_or_rent` / sold modes, licensed CREA DDF, real viewing-form automation in chat.
