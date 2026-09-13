@@ -65,6 +65,14 @@ from rental_search_agent.session_runtime import (
 )
 from rental_search_agent.proximity_parser import parse_proximity_preferences
 from rental_search_agent.streamlit_analysis import render_listing_analysis
+from rental_search_agent.streamlit_landing import (
+    center_panel_kind,
+    inject_landing_css,
+    render_chat_empty_state,
+    render_landing_page,
+    render_zero_results,
+    should_render_chat_empty_state,
+)
 from rental_search_agent.streamlit_results import (
     _analyze_button_key,
     _build_map_data,
@@ -160,6 +168,7 @@ def _reset_session_for_identity_change() -> None:
         {"role": "system", "content": _build_system_content()},
     ]
     st.session_state["pending_ask"] = None
+    st.session_state["pending_chat_prompt"] = None
 
 
 def _handle_auth_transition(principal: Principal) -> None:
@@ -1204,6 +1213,42 @@ def _apply_pipeline_to_session(result, *, search_master: list[dict] | None = Non
         )
 
 
+def _execute_preference_search(new_prefs: dict, previous_prefs: dict) -> None:
+    """Shared Search entry for the sidebar button and the landing hero action."""
+    request = prepare_sidebar_search(
+        new_prefs,
+        previous_prefs,
+        has_master=bool(_search_master_listings()),
+        last_filters=get_last_rental_search_filters(
+            st.session_state.get("messages") or []
+        ),
+    )
+    if request.kind == "error":
+        st.session_state["apply_warnings"] = request.warnings
+        return
+    with st.spinner(request.spinner):
+        _run_sidebar_search(new_prefs, previous_prefs)
+
+
+def _queue_chat_prompt(prompt: str) -> None:
+    """Open Chat and run prompt through the existing pending_chat_prompt path."""
+    st.session_state["chat_open"] = True
+    st.session_state["pending_chat_prompt"] = prompt
+    st.rerun()
+
+
+def _open_chat_panel() -> None:
+    st.session_state["chat_open"] = True
+    st.rerun()
+
+
+def _landing_search_from_saved_prefs() -> None:
+    """Landing 'Search with preferences' — same pipeline as sidebar Search."""
+    prefs = dict(st.session_state.get("user_preferences") or {})
+    _execute_preference_search(prefs, prefs)
+    st.rerun()
+
+
 def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
     """Save already done. Scrape when needed, otherwise re-rank the current master list."""
     principal = _bind_runtime()
@@ -1433,11 +1478,11 @@ def _render_preferences_sidebar() -> None:
                 )
 
             with st.container(border=True):
-                st.markdown("**Listing preferences**")
+                st.markdown("**Amenities**")
                 qualitative = st.text_area(
-                    "Listing preferences",
+                    "Amenities",
                     value=prefs.get("qualitative_preferences", ""),
-                    placeholder="e.g. balcony, parking, gym, pet-friendly",
+                    placeholder="e.g. balcony, storage, parking, gym, pet-friendly",
                     key="pref_qualitative",
                     label_visibility="collapsed",
                 )
@@ -1446,13 +1491,10 @@ def _render_preferences_sidebar() -> None:
                     section="Preferences",
                 )
 
-            btn_cols = st.columns([1.15, 1])
-            with btn_cols[0]:
-                saved = st.form_submit_button("Save", use_container_width=True)
-            with btn_cols[1]:
-                searched = st.form_submit_button(
-                    "Search", type="primary", use_container_width=True
-                )
+            searched = st.form_submit_button(
+                "Search", type="primary", use_container_width=True
+            )
+            saved = st.form_submit_button("Save preferences", use_container_width=True)
             if saved or searched:
                 parsed_budget = parse_budget_input(budget)
                 if (budget or "").strip() and parsed_budget is None:
@@ -1480,19 +1522,7 @@ def _render_preferences_sidebar() -> None:
                 previous = dict(prefs)
                 _commit_preferences(new_prefs)
                 if searched:
-                    request = prepare_sidebar_search(
-                        new_prefs,
-                        previous,
-                        has_master=bool(_search_master_listings()),
-                        last_filters=get_last_rental_search_filters(
-                            st.session_state.get("messages") or []
-                        ),
-                    )
-                    if request.kind == "error":
-                        st.session_state["apply_warnings"] = request.warnings
-                    else:
-                        with st.spinner(request.spinner):
-                            _run_sidebar_search(new_prefs, previous)
+                    _execute_preference_search(new_prefs, previous)
                 else:
                     # Keep guest hint if present; clear other scrape warnings.
                     if not principal.is_guest:
@@ -1579,8 +1609,16 @@ def _render_chat_panel(client, model) -> None:
         # Height is driven by CSS on st-key-chat_history so short viewports do not fight
         # a fixed 720px Python height against the full-height dock.
         with st.container(key="chat_history"):
-            _render_chat_history()
             pending_prompt = st.session_state.pop("pending_chat_prompt", None)
+            pending = st.session_state.get("pending_ask")
+            if should_render_chat_empty_state(
+                st.session_state.get("messages"),
+                pending_ask=pending,
+                pending_chat_prompt=pending_prompt,
+            ):
+                render_chat_empty_state(on_prompt=_queue_chat_prompt)
+            else:
+                _render_chat_history()
             if pending_prompt:
                 _run_user_prompt(client, model, pending_prompt)
         pending = st.session_state.get("pending_ask")
@@ -1591,7 +1629,7 @@ def _render_chat_panel(client, model) -> None:
             prompt = st.text_input(
                 "Message",
                 label_visibility="collapsed",
-                placeholder="e.g. 2 bed rental in Vancouver under 3000",
+                placeholder="e.g. 2 bed condo in Vancouver under 3000",
             )
             submitted = st.form_submit_button("Send")
             if submitted and (prompt or "").strip():
@@ -1628,6 +1666,7 @@ def _main_body() -> None:
         principal = _bind_runtime()
     _inject_chat_blob_css()
     _inject_app_chrome_css()
+    inject_landing_css()
     render_app_header(principal)
     _render_preferences_sidebar()
 
@@ -1765,10 +1804,25 @@ def _main_body() -> None:
                                 on_close=_close_analysis,
                             )
 
-    if listings:
+    panel_kind = center_panel_kind(
+        listings=listings,
+        display_source=st.session_state.get("display_source"),
+        search_master=st.session_state.get("search_master"),
+        last_filters=get_last_rental_search_filters(
+            st.session_state.get("messages") or []
+        ),
+    )
+    if panel_kind == "results":
         render_search_results(listings)
+    elif panel_kind == "zero_results":
+        render_zero_results()
     else:
-        st.caption("Enter location and beds in Search Preferences, then click Search.")
+        render_landing_page(
+            prefs,
+            on_search=_landing_search_from_saved_prefs,
+            on_ask_in_chat=_open_chat_panel,
+            on_example=_queue_chat_prompt,
+        )
 
     _render_chat_panel(client, model)
     _sync_searches_from_runtime()

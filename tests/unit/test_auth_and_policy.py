@@ -7,7 +7,11 @@ import pytest
 from rental_search_agent.auth_allowlist import email_on_allowlist, parse_allowlist
 from rental_search_agent.auth_principal import Principal, current_principal
 from rental_search_agent.capability_policy import CapabilityPolicy
-from rental_search_agent.streamlit_app import _account_initials, _clear_analysis_selection
+from rental_search_agent.streamlit_app import (
+    _account_initials,
+    _clear_analysis_selection,
+    _reset_session_for_identity_change,
+)
 from rental_search_agent.session_runtime import (
     clear_runtime,
     merge_guest_prefs_on_login,
@@ -202,3 +206,20 @@ class TestHeaderAccountHelpers:
         ss["analyze_listing_id"] = "R1"
         _clear_analysis_selection(wipe_cache=True)
         assert ss["analysis_result"] == {}
+
+    def test_identity_reset_clears_pending_chat_prompt(self, monkeypatch):
+        ss: dict = {
+            "pending_chat_prompt": "2 bed condo in Vancouver",
+            "pending_ask": {"question": "Which city?"},
+            "messages": [{"role": "user", "content": "hi"}],
+            "user_preferences": {"location": "Vancouver"},
+        }
+
+        class _FakeSt:
+            session_state = ss
+
+        monkeypatch.setattr("rental_search_agent.streamlit_app.st", _FakeSt)
+        _reset_session_for_identity_change()
+        assert ss["pending_chat_prompt"] is None
+        assert ss["pending_ask"] is None
+        assert ss["messages"][0]["role"] == "system"
