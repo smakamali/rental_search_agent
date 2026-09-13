@@ -1,6 +1,9 @@
 """Tests for display formatting helpers used by listing analysis."""
 
 from rental_search_agent.display_format import (
+    criterion_source_help,
+    criterion_source_label,
+    format_budget_input,
     format_count,
     format_criterion_comparison,
     format_currency,
@@ -8,6 +11,10 @@ from rental_search_agent.display_format import (
     format_percentage,
     format_sqft,
     get_score_color,
+    listing_preference_chips,
+    parse_budget_input,
+    proximity_chips_from_rules,
+    proximity_chips_from_text,
     score_to_pct,
     split_listing_address,
 )
@@ -27,6 +34,26 @@ class TestFormatCurrency:
         assert format_currency(None) == "—"
         assert format_currency(float("nan")) == "—"
         assert format_currency("") == "—"
+
+
+class TestBudgetInput:
+    def test_format_budget_input(self):
+        assert format_budget_input(1_000_000) == "$1,000,000"
+        assert format_budget_input("1000000") == "$1,000,000"
+        assert format_budget_input("1000000.0") == "$1,000,000"
+        assert format_budget_input("") == ""
+        assert format_budget_input(None) == ""
+
+    def test_parse_budget_input(self):
+        assert parse_budget_input(1000000) == "1000000"
+        assert parse_budget_input("1000000") == "1000000"
+        assert parse_budget_input("1000000.0") == "1000000"
+        assert parse_budget_input("$1,000,000") == "1000000"
+        assert parse_budget_input("1,000,000") == "1000000"
+        assert parse_budget_input("  $ 2,800 ") == "2800"
+        assert parse_budget_input("") is None
+        assert parse_budget_input("abc") is None
+        assert parse_budget_input("$-1") is None
 
 
 class TestFormatOthers:
@@ -76,7 +103,7 @@ class TestComparisonAndAddress:
         assert format_criterion_comparison("2 min", "≤", "5 min") == "2 min ≤ 5 min"
         assert format_criterion_comparison("14 min", "≤", "30 min") == "14 min ≤ 30 min"
         assert format_criterion_comparison(None, None, None) == "Not mentioned"
-        assert format_criterion_comparison("2", None, "2–3") == "2 (2–3)"
+        assert format_criterion_comparison("2", None, "2–3") == "2 in required 2–3"
 
     def test_split_address(self):
         headline, locality = split_listing_address(
@@ -85,3 +112,38 @@ class TestComparisonAndAddress:
         )
         assert headline == "3008 939 EXPO BOULEVARD"
         assert "Vancouver" in locality
+
+
+class TestSourceLabels:
+    def test_canonical_labels(self):
+        assert criterion_source_label("MLS") == "MLS"
+        assert criterion_source_label("Calculated") == "Calculated"
+        # Deterministic inference is NOT labeled AI.
+        assert criterion_source_label("Inferred") == "Inferred"
+        assert criterion_source_label("Inferred") != "AI Inferred"
+        assert "AI" not in (criterion_source_help("Inferred") or "")
+        assert criterion_source_help("Inferred")
+        assert criterion_source_label("AI Inferred") == "AI Inferred"
+        assert "AI" in (criterion_source_help("AI Inferred") or "")
+
+
+class TestPreferenceChips:
+    def test_proximity_chips_from_text(self):
+        text = "5 min to transit station\n30 min drive to 800 Burrard St, Vancouver"
+        chips = proximity_chips_from_text(text)
+        assert any("5 min" in c and "transit" in c.lower() for c in chips)
+        assert any("30 min" in c and "Burrard" in c for c in chips)
+
+    def test_proximity_chips_from_rules(self):
+        chips = proximity_chips_from_rules(
+            [
+                {"location": "nearest transit station", "mode": "walk", "max_minutes": 5},
+                {"location": "800 Burrard St", "mode": "drive", "max_minutes": 30},
+            ]
+        )
+        assert chips[0] == "≤ 5 min to transit"
+        assert "30 min" in chips[1] and "Burrard" in chips[1]
+
+    def test_listing_preference_chips(self):
+        assert listing_preference_chips("balcony, parking") == ["balcony", "parking"]
+        assert listing_preference_chips("") == []

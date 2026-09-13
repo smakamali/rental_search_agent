@@ -1,6 +1,11 @@
 """Tests for listing-analysis view-model, gauges, and requirement precedence."""
 
-from rental_search_agent.analysis_view import build_analysis_view, checklist_item_to_row
+from rental_search_agent.analysis_view import (
+    _build_highlights,
+    build_analysis_view,
+    checklist_item_to_row,
+)
+from rental_search_agent.display_format import criterion_source_label
 from rental_search_agent.preference_criteria import (
     build_structural_checklist,
     evaluate_coverage,
@@ -11,7 +16,7 @@ from rental_search_agent.preference_resolution import (
     merge_chat_over_stored,
     resolve_active_requirement,
 )
-from rental_search_agent.streamlit_analysis import _gauge_svg_html
+from rental_search_agent.streamlit_analysis import _gauge_svg_html, _criteria_row_html
 
 
 def _listing(**kwargs):
@@ -220,6 +225,102 @@ class TestAnalysisView:
                    for h in view.highlights)
         joined = " ".join(h.body for h in view.highlights)
         assert "2 min" in joined or "$879,000" in joined or "2 bedrooms" in joined
+        assert all(h.icon_key for h in view.highlights)
+
+    def test_combined_walk_drive_highlight_uses_walk_destination(self):
+        walk = checklist_item_to_row({
+            "id": "proximity:school|walk",
+            "name": "Walk to nearest school",
+            "status": "met",
+            "observed": "8 min",
+            "required": "15 min",
+            "comparator": "≤",
+            "group": "proximity",
+        })
+        drive = checklist_item_to_row({
+            "id": "proximity:office|drive",
+            "name": "Drive to 800 Burrard st",
+            "status": "met",
+            "observed": "14 min",
+            "required": "30 min",
+            "comparator": "≤",
+            "group": "proximity",
+        })
+        highlights = _build_highlights([walk, drive])
+        commute = next(h for h in highlights if h.title == "Convenient commute")
+        assert "to transit" not in commute.body
+        assert "nearest school" in commute.body
+        assert "800 Burrard st" in commute.body
+        assert commute.body == "8 min to nearest school, 14 min to 800 Burrard st."
+
+    def test_beds_range_comparison_readable(self):
+        row = checklist_item_to_row({
+            "id": "beds", "name": "Bedrooms", "status": "met",
+            "observed": "2", "required": "2–3", "comparator": None,
+            "source": "MLS", "group": "structural",
+        })
+        assert row.comparison_text == "2 in required 2–3"
+        assert row.source_label == "MLS"
+        assert row.marker == "✓"
+        assert row.status_label == "Met"
+
+    def test_status_and_source_presentation(self):
+        met = checklist_item_to_row({
+            "id": "budget", "status": "met", "name": "Price",
+            "observed": "$999,000", "required": "$1,000,000", "comparator": "≤",
+            "source": "MLS",
+        })
+        unmet = checklist_item_to_row({
+            "id": "balcony", "status": "unmet", "name": "Balcony",
+            "observed": "No", "source": "Inferred",
+        })
+        partial = checklist_item_to_row({
+            "id": "baths", "status": "partial", "name": "Bathrooms",
+            "observed": "1", "required": "1.5", "comparator": "≥", "source": "MLS",
+        })
+        unknown = checklist_item_to_row({
+            "id": "storage", "status": "unknown", "name": "Storage",
+            "detail": "Not mentioned",
+        })
+        assert met.marker == "✓" and met.status_label == "Met"
+        assert unmet.marker == "✕" and unmet.status_label == "Unmet"
+        assert unmet.source_label == "Inferred"
+        assert unmet.source_label != "AI Inferred"
+        assert unmet.source_help and "AI" not in unmet.source_help
+        assert partial.marker == "~" and partial.status_label == "Close"
+        assert unknown.marker == "?" and unknown.status_label == "Not mentioned"
+        assert criterion_source_label("Calculated") == "Calculated"
+
+    def test_weighted_score_line_and_open_questions(self):
+        from rental_search_agent.analysis_view import weighted_score_line
+
+        line = weighted_score_line(
+            {"structural": 0.3, "proximity": 0.3, "amenity": 0.25, "semantic": 0.15}
+        )
+        assert line and "Structural 30%" in line and "Semantic 15%" in line
+        assert weighted_score_line({}) is None
+        assert weighted_score_line(None) is None
+
+        view = build_analysis_view(
+            _listing(),
+            {
+                "match_score_pct": 88,
+                "score_breakdown": {
+                    "components": {"structural": 1.0},
+                    "included": ["structural"],
+                    "weights_used": {"structural": 1.0},
+                    "checklist": [
+                        {
+                            "id": "budget", "group": "structural", "name": "Price",
+                            "status": "met", "observed": "$879,000",
+                            "required": "$1,000,000", "comparator": "≤", "source": "MLS",
+                        },
+                    ],
+                },
+            },
+        )
+        assert view.open_questions == []
+        assert view.strength_blurb.startswith("This property")
 
     def test_property_type_uses_house_category(self):
         from rental_search_agent.analysis_view import listing_property_category, listing_property_type
@@ -240,3 +341,14 @@ class TestGaugeHtml:
         html = _gauge_svg_html(None, "Semantic", size=108)
         assert "—" in html
         assert "unavailable" in html
+
+    def test_criteria_row_status_colors_and_no_ai_inferred_mislabel(self):
+        row = checklist_item_to_row({
+            "id": "balcony", "status": "unmet", "name": "Balcony",
+            "observed": "No", "source": "Inferred", "group": "amenity",
+        })
+        html = _criteria_row_html(row)
+        assert "rsa-crit-unmet" in html
+        assert "Inferred" in html
+        assert "AI Inferred" not in html
+        assert "✕" in html

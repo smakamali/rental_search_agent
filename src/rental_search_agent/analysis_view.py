@@ -10,7 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
-from rental_search_agent.display_format import format_criterion_comparison, score_to_pct, split_listing_address
+from rental_search_agent.display_format import (
+    criterion_source_help,
+    criterion_source_label,
+    format_criterion_comparison,
+    score_to_pct,
+    split_listing_address,
+)
 from rental_search_agent.scoring_config import DEFAULT_WEIGHTS, get_score_weights
 
 COMPONENT_ORDER = ("structural", "proximity", "amenity", "semantic")
@@ -20,18 +26,17 @@ COMPONENT_HELP = {
     "proximity": "Location-based criteria such as transit access and commute.",
     "amenity": "Building and unit features such as parking, balcony, and storage.",
     "semantic": (
-        "Similarity between the listing description and your broader stated "
-        "preferences. A lower semantic score does not mean the listing fails "
-        "explicit requirements — it can be lower when the listing says little "
-        "about lifestyle or qualitative preferences."
+        "Semantic similarity compares the listing text with broader qualitative "
+        "preferences. It is experimental and can be lower when listing text is "
+        "sparse; explicit criteria are scored separately."
     ),
 }
 
 COMPONENT_CAPTION = {
-    "structural": "Price, size, beds, baths, type",
-    "proximity": "Location and commute",
-    "amenity": "Building and unit features",
-    "semantic": "Lifestyle and stated preferences",
+    "structural": "Price, size, beds, baths",
+    "proximity": "Location & commute",
+    "amenity": "Building & unit features",
+    "semantic": "Listing details",
 }
 
 GROUP_ORDER = ("structural", "proximity", "amenity")
@@ -55,6 +60,15 @@ STATUS_LABEL = {
     "unknown": "Not mentioned",
 }
 
+# Decorative highlight icons (Unicode; text stands alone for accessibility).
+HIGHLIGHT_ICON = {
+    "commute": "📍",
+    "space": "🏠",
+    "budget": "💲",
+    "parking": "🚗",
+    "other": "✓",
+}
+
 
 @dataclass
 class CriteriaRow:
@@ -66,6 +80,8 @@ class CriteriaRow:
     required: Optional[str]
     comparator: Optional[str]
     source: Optional[str]
+    source_label: str
+    source_help: Optional[str]
     comparison_text: str
     marker: str
     status_label: str
@@ -75,6 +91,7 @@ class CriteriaRow:
 class Highlight:
     title: str
     body: str
+    icon_key: str = "other"
 
 
 @dataclass
@@ -108,17 +125,17 @@ def match_strength(pct: Optional[int]) -> tuple[str, str]:
     if pct >= 90:
         return (
             "Strong match",
-            "This property meets most of your search criteria and aligns well with your preferences.",
+            "This property aligns closely with your search criteria.",
         )
     if pct >= 75:
         return (
             "Good match",
-            "This property meets many of your search criteria, with some room for trade-offs.",
+            "This property aligns well with your search criteria.",
         )
     if pct >= 60:
         return (
             "Fair match",
-            "This property meets some of your search criteria; review the gaps before deciding.",
+            "This property partially matches your search criteria.",
         )
     return (
         "Weaker match",
@@ -169,6 +186,8 @@ def checklist_item_to_row(item: dict) -> CriteriaRow:
         required=str(required).strip() if required else None,
         comparator=str(comparator).strip() if comparator else None,
         source=source_s,
+        source_label=criterion_source_label(source_s),
+        source_help=criterion_source_help(source_s),
         comparison_text=comparison,
         marker=STATUS_MARKER[status],
         status_label=STATUS_LABEL[status],
@@ -199,18 +218,31 @@ def _build_highlights(rows: Sequence[CriteriaRow]) -> list[Highlight]:
         (r for r in met if r.id.startswith("proximity:") and "drive" in r.name.lower()),
         None,
     )
-    if walk and walk.observed:
+    if walk and walk.observed and drive and drive.observed:
+        walk_loc = walk.name.replace("Walk to ", "", 1)
+        loc = drive.name.replace("Drive to ", "", 1)
+        out.append(Highlight(
+            "Convenient commute",
+            f"{walk.observed} to {walk_loc}, {drive.observed} to {loc}.",
+            icon_key="commute",
+        ))
+    elif walk and walk.observed:
         loc = walk.name.replace("Walk to ", "", 1)
         mins = _minutes_from_observed(walk.observed)
         title = "Excellent transit access" if mins is not None and mins <= 5 else "Transit access"
         out.append(Highlight(
             title,
             f"{walk.observed} to {loc}, within your {walk.required or 'limit'}.",
+            icon_key="commute",
         ))
-    if drive and drive.observed and len(out) < 4:
+    elif drive and drive.observed:
         loc = drive.name.replace("Drive to ", "", 1)
         suffix = f", within your {drive.required} limit." if drive.required else "."
-        out.append(Highlight("Convenient commute", f"Approximately {drive.observed} to {loc}{suffix}"))
+        out.append(Highlight(
+            "Convenient commute",
+            f"Approximately {drive.observed} to {loc}{suffix}",
+            icon_key="commute",
+        ))
 
     beds = by_id.get("beds")
     baths = by_id.get("baths")
@@ -223,24 +255,27 @@ def _build_highlights(rows: Sequence[CriteriaRow]) -> list[Highlight]:
     if size and size.observed:
         space_bits.append(size.observed)
     if space_bits and len(out) < 4:
-        out.append(Highlight("Meets your space needs", ", ".join(space_bits) + "."))
+        out.append(Highlight("Meets your space needs", ", ".join(space_bits) + ".", icon_key="space"))
 
     budget = by_id.get("budget")
     if budget and budget.observed and budget.required and len(out) < 4:
+        cmp_ = budget.comparator or "≤"
         out.append(Highlight(
             "Within budget",
-            f"{budget.observed} versus your {budget.required} maximum.",
+            f"{budget.observed} {cmp_} {budget.required}",
+            icon_key="budget",
         ))
 
     parking = by_id.get("parking")
     if parking and len(out) < 4:
         detail = parking.observed or "Yes"
-        out.append(Highlight("Parking", f"Parking is listed ({detail})."))
+        out.append(Highlight("Parking", f"Parking is listed ({detail}).", icon_key="parking"))
 
     return out[:4]
 
 
 def _semantic_note(components: dict[str, Optional[float]], included: Sequence[str]) -> bool:
+    """True when Semantic is low relative to other components (tooltip affordance only)."""
     if "semantic" not in included:
         return False
     sem = components.get("semantic")
@@ -340,3 +375,23 @@ def listing_property_category(listing: dict) -> Optional[str]:
 
 def format_weight_pct(weight: float) -> str:
     return f"{int(round(float(weight) * 100))}%"
+
+
+def weighted_score_line(weights_used: dict[str, float] | None) -> Optional[str]:
+    """Compact weighted-score composition from actual weights used for this listing."""
+    if not weights_used:
+        return None
+    bits = []
+    labels = {
+        "structural": "Structural",
+        "proximity": "Proximity",
+        "amenity": "Amenities",
+        "semantic": "Semantic",
+    }
+    for key in COMPONENT_ORDER:
+        if key not in weights_used:
+            continue
+        bits.append(f"{labels.get(key, key.capitalize())} {format_weight_pct(weights_used[key])}")
+    if not bits:
+        return None
+    return "Weighted score · " + " · ".join(bits)

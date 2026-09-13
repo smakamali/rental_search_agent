@@ -7,6 +7,7 @@ import pytest
 from rental_search_agent.auth_allowlist import email_on_allowlist, parse_allowlist
 from rental_search_agent.auth_principal import Principal, current_principal
 from rental_search_agent.capability_policy import CapabilityPolicy
+from rental_search_agent.streamlit_app import _account_initials, _clear_analysis_selection
 from rental_search_agent.session_runtime import (
     clear_runtime,
     merge_guest_prefs_on_login,
@@ -174,3 +175,30 @@ class TestSessionRuntimePrefs:
         assert clobber["location"] == "Toronto"
         clear_runtime()
         reset_preference_store_cache()
+
+
+class TestHeaderAccountHelpers:
+    def test_account_initials(self):
+        assert _account_initials(Principal(kind="authenticated", name="Amin K")) == "AK"
+        assert _account_initials(Principal(kind="authenticated", email="ada@x.com")) == "AD"
+        assert _account_initials(Principal(kind="guest")) == "?"
+
+    def test_clear_analysis_selection(self, monkeypatch):
+        ss: dict = {
+            "analyze_listing_id": "R1",
+            "analyze_listing": {"id": "R1"},
+            "analysis_result": {"R1": {"match_score_pct": 80}},
+        }
+
+        class _FakeSt:
+            session_state = ss
+
+        monkeypatch.setattr("rental_search_agent.streamlit_app.st", _FakeSt)
+        _clear_analysis_selection()
+        assert ss["analyze_listing_id"] is None
+        assert ss["analyze_listing"] is None
+        assert "R1" in ss["analysis_result"]
+        ss["analysis_result"] = {"R1": {"error": "x"}}
+        ss["analyze_listing_id"] = "R1"
+        _clear_analysis_selection(wipe_cache=True)
+        assert ss["analysis_result"] == {}

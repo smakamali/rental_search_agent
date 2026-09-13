@@ -1,0 +1,6 @@
+[client]
+# Hide Deploy / Running·Stop / developer chrome so our app header owns the top bar.
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false

@@ -21,6 +21,11 @@ from rental_search_agent.client import (
 from rental_search_agent.chat_summary import summarize_conversation_for_preferences
 from rental_search_agent.display_format import (
     escape_markdown_link_text as _escape_markdown_link_text,
+    format_budget_input,
+    listing_preference_chips,
+    parse_budget_input,
+    proximity_chips_from_rules,
+    proximity_chips_from_text,
     safe_http_url as _safe_http_url,
 )
 from rental_search_agent.filtering import filter_listings as do_filter_listings
@@ -185,35 +190,344 @@ def _handle_auth_transition(principal: Principal) -> None:
         st.session_state["_auth_user_id"] = None
 
 
-def _render_auth_sidebar(principal: Principal) -> None:
-    with st.sidebar:
-        st.subheader("Account")
+def _account_initials(principal: Principal) -> str:
+    name = (principal.name or "").strip()
+    if name:
+        parts = [p for p in name.split() if p]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[1][0]).upper()
+        return name[:2].upper()
+    email = (principal.email or "").strip()
+    if email:
+        local = email.split("@", 1)[0]
+        return (local[:2] or "?").upper()
+    return "?"
+
+
+def render_app_header(principal: Principal) -> None:
+    """Full-width fixed app header: brand left, account controls far right."""
+    import html as _html
+
+    def _chip(label: str, initials: str, *, title: str | None = None) -> None:
+        tip = _html.escape(title or label)
+        st.markdown(
+            f'<div class="rsa-account-chip" title="{tip}">'
+            f'<span class="rsa-account-avatar">{_html.escape(initials)}</span>'
+            f'<span class="rsa-account-name">{_html.escape(label)}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    def _account_controls() -> None:
         if principal.is_dev:
-            st.caption("Local mode (Google sign-in not configured). Prefs save to this machine.")
-        elif principal.is_authenticated:
+            _chip("Local mode", "LOC")
+            return
+        if principal.is_authenticated:
             label = principal.name or principal.email or "Signed in"
-            st.caption(f"Signed in as {label}")
-            if st.button("Sign out", key="auth_sign_out"):
-                st.logout()
-        else:
-            if principal.allowlist_denied:
-                st.warning(
-                    "Your Google account is not on the beta allowlist. "
-                    "You can keep using guest mode with limited searches."
-                )
-            st.caption("Try the tool as a guest, then sign in to save preferences and unlock multi-city search.")
-            # Allowlist-denied users are still OIDC-logged-in; offer Sign out.
-            if _oidc_logged_in():
-                if st.button("Sign out", key="auth_sign_out_denied"):
+            chip_col, btn_col = st.columns([1.55, 1.0], gap="small")
+            with chip_col:
+                _chip(label, _account_initials(principal))
+            with btn_col:
+                if st.button("Sign out", key="auth_sign_out", use_container_width=True):
                     st.logout()
-            elif st.button("Sign in with Google", key="auth_sign_in", type="primary"):
-                st.login("google")
-            rem = CapabilityPolicy(
-                principal=principal,
-                searches_used=int(st.session_state.get("anon_searches_used") or 0),
-            ).remaining_searches()
-            if rem is not None:
-                st.caption(f"Free searches remaining this session: {rem}")
+            return
+        if principal.allowlist_denied:
+            denied_label = principal.name or principal.email or "Guest"
+            if _oidc_logged_in():
+                chip_col, btn_col = st.columns([1.7, 1.0], gap="small")
+                with chip_col:
+                    _chip(
+                        f"{denied_label} · guest",
+                        _account_initials(principal),
+                        title="Not on beta allowlist",
+                    )
+                with btn_col:
+                    if st.button(
+                        "Sign out",
+                        key="auth_sign_out_denied",
+                        use_container_width=True,
+                    ):
+                        st.logout()
+            else:
+                _chip(
+                    f"{denied_label} · guest",
+                    _account_initials(principal),
+                    title="Not on beta allowlist",
+                )
+            return
+        if st.button("Sign in with Google", key="auth_sign_in"):
+            st.login("google")
+
+    with st.container(key="rsa_app_header"):
+        brand_col, account_col = st.columns([3.2, 1.35], vertical_alignment="center")
+        with brand_col:
+            st.markdown(
+                '<div class="rsa-header-brand">'
+                '<span class="rsa-header-icon" aria-hidden="true">'
+                '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">'
+                '<path d="M12 3l9 8h-3v9h-5v-6H11v6H6v-9H3l9-8z"/></svg>'
+                "</span>"
+                '<span class="rsa-header-title">Property Search Assistant</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        with account_col:
+            _account_controls()
+
+
+def _clear_analysis_selection(*, wipe_cache: bool = False) -> None:
+    """Centralized Close analysis state cleanup (owned by streamlit_app)."""
+    st.session_state["analyze_listing_id"] = None
+    st.session_state["analyze_listing"] = None
+    if wipe_cache:
+        st.session_state["analysis_result"] = {}
+
+
+def _inject_app_chrome_css() -> None:
+    """Full-width fixed header + preference sidebar chips."""
+    # Header sits under Streamlit's thin toolbar strip (~0) at the top of the app
+    # canvas. Leave right padding so Deploy/menu remain clickable.
+    st.markdown(
+        """
+        <style>
+        /* Full-width app header spanning sidebar + main + chat. */
+        [class*="st-key-rsa_app_header"] {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            width: 100vw !important;
+            max-width: 100vw !important;
+            height: 3.5rem !important;
+            z-index: 10050 !important;
+            margin: 0 !important;
+            padding: 0 1.1rem 0 1.1rem !important;
+            border: none !important;
+            border-bottom: 1px solid rgba(128, 128, 128, 0.28) !important;
+            border-radius: 0 !important;
+            background: rgba(14, 17, 22, 0.97) !important;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
+            backdrop-filter: blur(10px);
+            overflow: visible !important;
+            pointer-events: auto !important;
+        }
+        /* Hide Streamlit's built-in top chrome (Deploy / Stop / ⋮) so it cannot
+           intercept clicks over our Sign out control. */
+        header[data-testid="stHeader"] {
+            display: none !important;
+        }
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stStatusWidget"],
+        .stAppDeployButton,
+        .stDeployButton,
+        div[data-testid="stToolbarActions"] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+        }
+        #MainMenu {
+            visibility: hidden !important;
+        }
+        [class*="st-key-rsa_app_header"] > div[data-testid="stVerticalBlock"],
+        [class*="st-key-rsa_app_header"] [data-testid="stVerticalBlockBorderWrapper"]
+            > div[data-testid="stVerticalBlock"] {
+            height: 3.5rem !important;
+            justify-content: center !important;
+        }
+        [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"] {
+            display: flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            gap: 0.75rem !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            min-height: 3.5rem !important;
+        }
+        [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"]
+            > div[data-testid="stColumn"]:first-child {
+            flex: 1 1 auto !important;
+            min-width: 0 !important;
+        }
+        [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"]
+            > div[data-testid="stColumn"]:last-child {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            display: flex !important;
+            justify-content: flex-end !important;
+            align-items: center !important;
+        }
+        /* Nested account chip | button row */
+        [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"]
+            div[data-testid="stHorizontalBlock"] {
+            width: max-content !important;
+            max-width: 100% !important;
+            justify-content: flex-end !important;
+            gap: 0.4rem !important;
+            min-height: 0 !important;
+        }
+        [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"]
+            div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            width: auto !important;
+            flex: 0 0 auto !important;
+            display: flex !important;
+            align-items: center !important;
+        }
+        [class*="st-key-rsa_app_header"] [data-testid="element-container"],
+        [class*="st-key-rsa_app_header"] [data-testid="stMarkdownContainer"],
+        [class*="st-key-rsa_app_header"] .stMarkdown,
+        [class*="st-key-rsa_app_header"] .stButton {
+            margin: 0 !important;
+            padding: 0 !important;
+            width: auto !important;
+        }
+        [class*="st-key-rsa_app_header"] [data-testid="stMarkdownContainer"] p {
+            margin: 0 !important;
+            padding: 0 !important;
+            line-height: 1 !important;
+        }
+        [class*="st-key-rsa_app_header"] .stButton > button {
+            white-space: nowrap;
+            height: 1.85rem !important;
+            min-height: 1.85rem !important;
+            max-height: 1.85rem !important;
+            padding: 0 0.7rem !important;
+            margin: 0 !important;
+            line-height: 1 !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        .rsa-header-brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            height: 3.5rem;
+            white-space: nowrap;
+        }
+        .rsa-header-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #5b9fd4;
+            flex-shrink: 0;
+        }
+        .rsa-header-title {
+            font-size: 1.05rem;
+            font-weight: 650;
+            letter-spacing: 0.01em;
+            line-height: 1;
+        }
+        .rsa-account-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            height: 1.85rem;
+            font-size: 0.88rem;
+            opacity: 0.95;
+            white-space: nowrap;
+            padding: 0 0.1rem;
+            line-height: 1;
+            box-sizing: border-box;
+        }
+        .rsa-account-avatar {
+            width: 1.45rem; height: 1.45rem; border-radius: 50%;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 0.62rem; font-weight: 700;
+            border: 1px solid rgba(128,128,128,0.45);
+            background: rgba(91, 159, 212, 0.28);
+            color: #dcecff;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .rsa-account-name {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            max-width: 9rem;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+        }
+        /* Push sidebar + main content below the fixed header. */
+        section[data-testid="stSidebar"] {
+            top: 3.5rem !important;
+            height: calc(100vh - 3.5rem) !important;
+        }
+        section[data-testid="stSidebar"] > div:first-child {
+            height: 100% !important;
+        }
+        .stAppViewContainer .main .block-container {
+            padding-top: 4.35rem !important;
+        }
+        .rsa-pref-help { font-size: 0.85rem; opacity: 0.82; margin-bottom: 0.35rem; }
+        .rsa-chip-row {
+            display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.25rem 0 0.15rem;
+        }
+        .rsa-chip {
+            display: inline-flex; align-items: center;
+            font-size: 0.75rem; font-weight: 550;
+            border: 1px solid rgba(128,128,128,0.35); border-radius: 999px;
+            padding: 0.12rem 0.55rem; opacity: 0.9; max-width: 100%;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .rsa-chip-label {
+            font-size: 0.72rem; font-weight: 650; letter-spacing: 0.03em;
+            text-transform: uppercase; opacity: 0.65; margin-top: 0.2rem;
+        }
+        .rsa-guest-hint {
+            font-size: 0.8rem; opacity: 0.85; margin: 0.15rem 0 0.45rem;
+            line-height: 1.35;
+        }
+        @media (max-width: 900px) {
+            .rsa-account-name { max-width: 5rem; }
+            .rsa-header-title { font-size: 0.95rem; }
+            [class*="st-key-rsa_app_header"] {
+                padding: 0 0.75rem 0 0.75rem !important;
+            }
+        }
+        [data-theme="light"] [class*="st-key-rsa_app_header"],
+        .stApp[data-theme="light"] [class*="st-key-rsa_app_header"] {
+            background: rgba(250, 250, 250, 0.97) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_pref_chips(labels: list[str], *, section: str) -> None:
+    if not labels:
+        return
+    import html as _html
+
+    chips = "".join(
+        f'<span class="rsa-chip">{_html.escape(label)}</span>' for label in labels
+    )
+    st.markdown(
+        f'<div class="rsa-chip-label">{_html.escape(section)}</div>'
+        f'<div class="rsa-chip-row">{chips}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _proximity_display_chips(proximity_text: str) -> list[str]:
+    """Display-only proximity chips: prefer cached parsed rules, else local heuristic."""
+    text = (proximity_text or "").strip()
+    if not text:
+        return []
+    cache = st.session_state.get("proximity_parsed_rules")
+    try:
+        if cache is not None and cache[0] == text and cache[1]:
+            chips = proximity_chips_from_rules(cache[1])
+            if chips:
+                return chips
+    except Exception:
+        pass
+    try:
+        return proximity_chips_from_text(text)
+    except Exception:
+        return []
 
 
 def _build_system_content() -> str:
@@ -389,9 +703,8 @@ def _inject_chat_blob_css() -> None:
         <style>
         [class*="st-key-chat_blob"] {{
             position: fixed !important;
-            /* Clear Streamlit's top toolbar (Deploy / Stop / menu) so the collapse
-               control is not covered. Header is typically ~2.875–3.5rem. */
-            top: 3.75rem !important;
+            /* Sit under the full-width app header (3.5rem). */
+            top: 3.85rem !important;
             right: 0.75rem !important;
             bottom: 0.75rem !important;
             left: auto !important;
@@ -406,8 +719,8 @@ def _inject_chat_blob_css() -> None:
             overflow: visible !important;
         }}
         [class*="st-key-chat_history"] {{
-            height: calc(100vh - 16rem) !important;
-            max-height: calc(100vh - 16rem) !important;
+            height: calc(100vh - 16.25rem) !important;
+            max-height: calc(100vh - 16.25rem) !important;
             overflow: auto !important;
         }}
         [data-baseweb="popover"],
@@ -712,95 +1025,142 @@ def _render_preferences_sidebar() -> None:
     """Sidebar Search Preferences form. Contact/viewing fields stay persisted but hidden."""
     prefs = st.session_state.get("user_preferences") or {k: "" for k in PREF_KEYS}
     principal = current_principal()
+    pref_help = (
+        "Preferences are defaults for search, filtering, and match scoring. "
+        "Criteria stated in chat override these for the current search. "
+        "Empty fields may be filled from chat when you search. "
+        "Search scrapes again when location, buy/rent, or structural fields change, "
+        "or when there are no results yet; otherwise the existing result corpus may be re-ranked."
+    )
     with st.sidebar:
         st.subheader("Search Preferences")
         st.caption(
-            "Used as defaults for search, filtering, and match scoring. "
-            "Criteria stated in chat override these for that search. "
-            "Empty fields may be filled from chat when you search. "
-            "Search scrapes when location, buy/rent, or structural fields change, "
-            "or when there are no results yet; otherwise it re-ranks."
+            "Saved as defaults. Chat criteria override these for the current search.",
+            help=pref_help,
         )
         if principal.is_guest:
-            st.info(
-                "Guest mode: preferences are session-only. "
-                "Sign in to save them. Multi-city metro search requires sign-in."
+            rem = CapabilityPolicy(
+                principal=principal,
+                searches_used=int(st.session_state.get("anon_searches_used") or 0),
+            ).remaining_searches()
+            guest_bits = [
+                "Guest preferences are session-only.",
+                "Sign in to save preferences and unlock multi-city search.",
+            ]
+            if rem is not None:
+                guest_bits.append(f"Free searches remaining: {rem}.")
+            st.markdown(
+                f'<div class="rsa-guest-hint">{" ".join(guest_bits)}</div>',
+                unsafe_allow_html=True,
             )
+            if principal.allowlist_denied:
+                st.caption("Your Google account is not on the beta allowlist.")
         for warning in st.session_state.get("apply_warnings") or []:
             st.warning(warning)
         with st.form("preferences_form"):
-            location = st.text_input(
-                "Location",
-                value=prefs.get("location", ""),
-                placeholder="e.g. Vancouver, BC"
-                + ("" if principal.is_guest else " or Metro Vancouver"),
-                key="pref_location",
-            )
-            if principal.is_guest:
-                st.caption("Tip: use a single city. Metro multi-city search unlocks after sign-in.")
-            saved_listing_type = str(prefs.get("listing_type") or "").strip()
-            listing_choice = st.segmented_control(
-                "Buy / Rent",
-                options=["Rent", "Buy"],
-                default="Buy" if saved_listing_type == "for_sale" else "Rent",
-                key="pref_listing_mode",
-            )
-            budget = st.text_input(
-                "Budget max (CAD)",
-                value=prefs.get("budget_max", ""),
-                placeholder="e.g. 2800",
-                key="pref_budget_max",
-            )
-            col_beds = st.columns(2)
-            with col_beds[0]:
-                min_beds = st.text_input(
-                    "Beds min",
-                    value=prefs.get("min_bedrooms", ""),
-                    placeholder="e.g. 2",
-                    key="pref_min_bedrooms",
+            with st.container(border=True):
+                st.markdown("**Location & Type**")
+                location = st.text_input(
+                    "Location",
+                    value=prefs.get("location", ""),
+                    placeholder="e.g. Vancouver, BC"
+                    + ("" if principal.is_guest else " or Metro Vancouver"),
+                    key="pref_location",
                 )
-            with col_beds[1]:
-                max_beds = st.text_input(
-                    "Beds max",
-                    value=prefs.get("max_bedrooms", ""),
-                    placeholder="optional",
-                    key="pref_max_bedrooms",
+                if principal.is_guest:
+                    st.caption("Tip: use a single city. Metro multi-city search unlocks after sign-in.")
+                saved_listing_type = str(prefs.get("listing_type") or "").strip()
+                listing_choice = st.segmented_control(
+                    "Buy / Rent",
+                    options=["Rent", "Buy"],
+                    default="Buy" if saved_listing_type == "for_sale" else "Rent",
+                    key="pref_listing_mode",
                 )
-            min_baths = st.text_input(
-                "Baths min",
-                value=prefs.get("min_bathrooms", ""),
-                placeholder="e.g. 1.5",
-                key="pref_min_bathrooms",
-            )
-            require_den = st.checkbox(
-                "Require den",
-                value=str(prefs.get("require_den") or "").strip().lower() in ("1", "true", "yes", "y", "on"),
-                key="pref_require_den",
-            )
-            min_sqft = st.text_input(
-                "Size min (sqft)",
-                value=prefs.get("min_sqft", ""),
-                placeholder="e.g. 700",
-                key="pref_min_sqft",
-            )
-            proximity = st.text_area(
-                "Proximity preferences",
-                value=prefs.get("proximity_preferences", ""),
-                placeholder="e.g. max 30 min drive to downtown",
-                key="pref_proximity",
-            )
-            qualitative = st.text_area(
-                "Listing preferences",
-                value=prefs.get("qualitative_preferences", ""),
-                placeholder="e.g. balcony, parking, gym, pet-friendly",
-                key="pref_qualitative",
-            )
-            btn_cols = st.columns(2)
+
+            with st.container(border=True):
+                st.markdown("**Property**")
+                budget = st.text_input(
+                    "Budget max (CAD)",
+                    value=format_budget_input(prefs.get("budget_max", "")),
+                    placeholder="e.g. $1,000,000",
+                    key="pref_budget_max",
+                )
+                col_beds = st.columns(2)
+                with col_beds[0]:
+                    min_beds = st.text_input(
+                        "Beds min",
+                        value=prefs.get("min_bedrooms", ""),
+                        placeholder="e.g. 2",
+                        key="pref_min_bedrooms",
+                    )
+                with col_beds[1]:
+                    max_beds = st.text_input(
+                        "Beds max",
+                        value=prefs.get("max_bedrooms", ""),
+                        placeholder="optional",
+                        key="pref_max_bedrooms",
+                    )
+                min_baths = st.text_input(
+                    "Baths min",
+                    value=prefs.get("min_bathrooms", ""),
+                    placeholder="e.g. 1.5",
+                    key="pref_min_bathrooms",
+                )
+                require_den = st.checkbox(
+                    "Require den",
+                    value=str(prefs.get("require_den") or "").strip().lower()
+                    in ("1", "true", "yes", "y", "on"),
+                    key="pref_require_den",
+                )
+                min_sqft = st.text_input(
+                    "Size min (sq ft)",
+                    value=prefs.get("min_sqft", ""),
+                    placeholder="e.g. 700",
+                    key="pref_min_sqft",
+                )
+
+            with st.container(border=True):
+                st.markdown("**Proximity**")
+                proximity = st.text_area(
+                    "Proximity preferences",
+                    value=prefs.get("proximity_preferences", ""),
+                    placeholder="e.g. 5 min to transit station\n30 min drive to 800 Burrard St",
+                    key="pref_proximity",
+                    label_visibility="collapsed",
+                )
+                _render_pref_chips(
+                    _proximity_display_chips(proximity or prefs.get("proximity_preferences", "")),
+                    section="Parsed criteria",
+                )
+
+            with st.container(border=True):
+                st.markdown("**Listing preferences**")
+                qualitative = st.text_area(
+                    "Listing preferences",
+                    value=prefs.get("qualitative_preferences", ""),
+                    placeholder="e.g. balcony, parking, gym, pet-friendly",
+                    key="pref_qualitative",
+                    label_visibility="collapsed",
+                )
+                _render_pref_chips(
+                    listing_preference_chips(qualitative or prefs.get("qualitative_preferences", "")),
+                    section="Preferences",
+                )
+
+            btn_cols = st.columns([1.15, 1])
             with btn_cols[0]:
-                saved = st.form_submit_button("Save")
+                saved = st.form_submit_button("Save preferences", use_container_width=True)
             with btn_cols[1]:
-                searched = st.form_submit_button("Search")
+                searched = st.form_submit_button(
+                    "Search", type="primary", use_container_width=True
+                )
             if saved or searched:
+                parsed_budget = parse_budget_input(budget)
+                if (budget or "").strip() and parsed_budget is None:
+                    st.session_state["apply_warnings"] = [
+                        "Budget max could not be parsed. Use a number like 1000000 or $1,000,000."
+                    ]
+                    st.rerun()
                 new_prefs = {k: str(prefs.get(k, "") or "") for k in PREF_KEYS}
                 new_prefs.update(
                     {
@@ -808,7 +1168,7 @@ def _render_preferences_sidebar() -> None:
                         "listing_type": (
                             "for_sale" if listing_choice == "Buy" else "for_rent"
                         ),
-                        "budget_max": (budget or "").strip(),
+                        "budget_max": parsed_budget or "",
                         "min_bedrooms": (min_beds or "").strip(),
                         "max_bedrooms": (max_beds or "").strip(),
                         "min_bathrooms": (min_baths or "").strip(),
@@ -963,9 +1323,8 @@ def _main_body() -> None:
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
         principal = _bind_runtime()
     _inject_chat_blob_css()
-    st.title("Property Search Assistant")
-
-    _render_auth_sidebar(principal)
+    _inject_app_chrome_css()
+    render_app_header(principal)
     _render_preferences_sidebar()
 
     client, model = _get_client_and_model()
@@ -1006,12 +1365,14 @@ def _main_body() -> None:
     if analyze_listing_id and analyze_listing:
         from rental_search_agent.session_runtime import get_capability_policy as _gcp
 
+        def _close_analysis() -> None:
+            _clear_analysis_selection(wipe_cache=False)
+
         if not _gcp().can_analyze():
             with st.expander("Analysis result", expanded=True):
                 st.warning("Run a search first (or sign in) to analyze listings.")
-                if st.button("Clear analysis"):
-                    st.session_state["analyze_listing_id"] = None
-                    st.session_state["analyze_listing"] = None
+                if st.button("Close analysis", key="close_analysis_cap"):
+                    _clear_analysis_selection()
                     st.rerun()
         else:
             prefs = _sync_preferences_from_file()
@@ -1031,9 +1392,8 @@ def _main_body() -> None:
                 if not stored_prefs_to_effective(prefs).has_score_relevant_prefs():
                     with st.expander("Analysis result", expanded=True):
                         st.warning("Set Search Preferences in the sidebar first, then click Analyze again.")
-                        if st.button("Clear analysis"):
-                            st.session_state["analyze_listing_id"] = None
-                            st.session_state["analyze_listing"] = None
+                        if st.button("Close analysis", key="close_analysis_prefs"):
+                            _clear_analysis_selection()
                             st.rerun()
                     preferences_text = ""
                 else:
@@ -1089,19 +1449,17 @@ def _main_body() -> None:
                     if "error" in result:
                         with st.expander("Analysis result", expanded=True):
                             st.error(result["error"])
-                            if st.button("Clear analysis"):
-                                st.session_state["analyze_listing_id"] = None
-                                st.session_state["analyze_listing"] = None
-                                st.session_state["analysis_result"] = {}
+                            if st.button("Close analysis", key="close_analysis_err"):
+                                _clear_analysis_selection(wipe_cache=True)
                                 st.rerun()
                     else:
                         addr = analyze_listing.get("address") or analyze_listing.get("id") or "Listing"
                         with st.expander(f"Analysis: {addr}", expanded=True):
-                            render_listing_analysis(analyze_listing, result)
-                            if st.button("Clear analysis"):
-                                st.session_state["analyze_listing_id"] = None
-                                st.session_state["analyze_listing"] = None
-                                st.rerun()
+                            render_listing_analysis(
+                                analyze_listing,
+                                result,
+                                on_close=_close_analysis,
+                            )
 
     if listings:
         render_search_results(listings)
