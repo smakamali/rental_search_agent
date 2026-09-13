@@ -374,3 +374,19 @@ def proximity_criterion_name(mode: str | None, location: str | None) -> str:
 def escape_markdown_link_text(text: str) -> str:
     """Escape characters that would let untrusted text break out of a markdown link label."""
     return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def escape_css_style_url(url: str) -> str:
+    """Escape a URL for CSS url("...") inside an HTML <style> block.
+
+    CSS hex-escapes characters that could break the quoted url() or close the
+    <style> element (e.g. ``</style><script>`` in a listing photo URL).
+    """
+    escaped: list[str] = []
+    for ch in url:
+        code = ord(ch)
+        if ch in {"\\", '"', "'", "<", ">", "&"} or code < 32:
+            escaped.append(f"\\{code:x} ")
+        else:
+            escaped.append(ch)
+    return "".join(escaped)
