@@ -60,14 +60,9 @@ STATUS_LABEL = {
     "unknown": "Not mentioned",
 }
 
-# Decorative highlight icons (Unicode; text stands alone for accessibility).
-HIGHLIGHT_ICON = {
-    "commute": "📍",
-    "space": "🏠",
-    "budget": "💲",
-    "parking": "🚗",
-    "other": "✓",
-}
+# Decorative highlight icon keys (presentation-only; PNG assets in ui_assets).
+# "generic" is the fallback; "other" is accepted as an alias.
+HIGHLIGHT_ICON_KEYS = ("commute", "space", "budget", "parking", "generic")
 
 
 @dataclass
@@ -91,7 +86,7 @@ class CriteriaRow:
 class Highlight:
     title: str
     body: str
-    icon_key: str = "other"
+    icon_key: str = "generic"
 
 
 @dataclass

@@ -272,6 +272,154 @@ def render_app_header(principal: Principal) -> None:
             )
         with account_col:
             _account_controls()
+    _inject_sidebar_restore_control()
+
+
+def _inject_sidebar_restore_control() -> None:
+    """Ensure a visible control exists to reopen the left sidebar.
+
+    Hiding Streamlit's Deploy/Stop chrome can also swallow the native expand
+    control. Inject a parent-document button that clicks Streamlit's open
+    control when present, otherwise clears the collapsed localStorage flag.
+    """
+    import streamlit.components.v1 as components
+
+    components.html(
+        """
+<script>
+(function () {
+  const doc = window.parent.document;
+  const win = window.parent;
+  if (!doc || !doc.body) return;
+  if (doc.getElementById("rsa-sidebar-restore")) return;
+
+  const btn = doc.createElement("button");
+  btn.id = "rsa-sidebar-restore";
+  btn.type = "button";
+  btn.title = "Show Search Preferences";
+  btn.setAttribute("aria-label", "Show Search Preferences");
+  btn.textContent = "☰";
+  btn.style.cssText = [
+    "position:fixed",
+    "top:0.55rem",
+    "left:0.55rem",
+    "z-index:10080",
+    "width:2.15rem",
+    "height:2.15rem",
+    "border-radius:8px",
+    "border:1px solid rgba(128,128,128,0.45)",
+    "background:rgba(20,24,28,0.96)",
+    "color:#eee",
+    "cursor:pointer",
+    "font-size:1.05rem",
+    "line-height:1",
+    "display:none",
+    "align-items:center",
+    "justify-content:center",
+    "padding:0",
+    "box-shadow:0 4px 12px rgba(0,0,0,0.25)",
+  ].join(";");
+
+  function sidebarCollapsed() {
+    const sb = doc.querySelector('section[data-testid="stSidebar"]');
+    if (!sb) return true;
+    if (sb.getAttribute("aria-expanded") === "false") return true;
+    const style = win.getComputedStyle(sb);
+    if (style.display === "none" || style.visibility === "hidden") return true;
+    const rect = sb.getBoundingClientRect();
+    return rect.width < 48 || rect.right < 24;
+  }
+
+  function clearCollapsedFlag() {
+    try {
+      Object.keys(win.localStorage)
+        .filter((k) => k.indexOf("stSidebarCollapsed-") === 0)
+        .forEach((k) => win.localStorage.removeItem(k));
+    } catch (e) {}
+    try {
+      Object.keys(win.sessionStorage)
+        .filter((k) => k.indexOf("stSidebarCollapsed-") === 0)
+        .forEach((k) => win.sessionStorage.removeItem(k));
+    } catch (e) {}
+  }
+
+  function openSidebar() {
+    // Prefer Streamlit's dedicated open-sidebar control only — never click all
+    // header buttons (that also opens the Main Menu: Rerun / Settings / …).
+    const labeled = Array.from(
+      doc.querySelectorAll(
+        'header[data-testid="stHeader"] button, [data-testid="stSidebarCollapsedControl"] button'
+      )
+    );
+    let clicked = false;
+    for (const node of labeled) {
+      const label = (
+        (node.getAttribute("aria-label") || "") +
+        " " +
+        (node.getAttribute("title") || "") +
+        " " +
+        (node.textContent || "")
+      ).toLowerCase();
+      if (
+        label.indexOf("menu") >= 0 ||
+        label.indexOf("settings") >= 0 ||
+        label.indexOf("deploy") >= 0
+      ) {
+        continue;
+      }
+      if (
+        label.indexOf("sidebar") >= 0 ||
+        label.indexOf("navigation") >= 0 ||
+        label.indexOf("expand") >= 0 ||
+        label.indexOf("keyboard_double_arrow") >= 0
+      ) {
+        try {
+          node.click();
+          clicked = true;
+        } catch (e) {}
+        break;
+      }
+    }
+    const collapsedControl = doc.querySelector(
+      '[data-testid="stSidebarCollapsedControl"] button'
+    );
+    if (!clicked && collapsedControl) {
+      try {
+        collapsedControl.click();
+        clicked = true;
+      } catch (e) {}
+    }
+    // Reliable fallback: clear Streamlit's collapsed flag and reload.
+    if (!clicked) {
+      clearCollapsedFlag();
+      win.location.reload();
+      return;
+    }
+    setTimeout(function () {
+      if (!sidebarCollapsed()) return;
+      clearCollapsedFlag();
+      win.location.reload();
+    }, 150);
+  }
+
+  btn.addEventListener("click", function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openSidebar();
+  });
+  doc.body.appendChild(btn);
+
+  function sync() {
+    btn.style.display = sidebarCollapsed() ? "inline-flex" : "none";
+  }
+  sync();
+  setInterval(sync, 700);
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def _clear_analysis_selection(*, wipe_cache: bool = False) -> None:
@@ -300,7 +448,7 @@ def _inject_app_chrome_css() -> None:
             height: 3.5rem !important;
             z-index: 10050 !important;
             margin: 0 !important;
-            padding: 0 1.1rem 0 1.1rem !important;
+            padding: 0 1.1rem 0 2.85rem !important;
             border: none !important;
             border-bottom: 1px solid rgba(128, 128, 128, 0.28) !important;
             border-radius: 0 !important;
@@ -310,11 +458,22 @@ def _inject_app_chrome_css() -> None:
             overflow: visible !important;
             pointer-events: auto !important;
         }
-        /* Hide Streamlit's built-in top chrome (Deploy / Stop / ⋮) so it cannot
-           intercept clicks over our Sign out control. */
+        /* Keep Streamlit header shell for the native open-sidebar control, but
+           hide Deploy / Stop / ⋮. Do not blanket-disable pointer events on all
+           header children — that made the expand control unusable. */
         header[data-testid="stHeader"] {
-            display: none !important;
+            display: block !important;
+            background: transparent !important;
+            color: inherit !important;
+            height: 3.5rem !important;
+            z-index: 10060 !important;
         }
+        header[data-testid="stHeader"] [data-testid="stToolbar"],
+        header[data-testid="stHeader"] [data-testid="stDecoration"],
+        header[data-testid="stHeader"] [data-testid="stStatusWidget"],
+        header[data-testid="stHeader"] [data-testid="stToolbarActions"],
+        header[data-testid="stHeader"] .stAppDeployButton,
+        header[data-testid="stHeader"] .stDeployButton,
         [data-testid="stToolbar"],
         [data-testid="stDecoration"],
         [data-testid="stStatusWidget"],
@@ -325,8 +484,27 @@ def _inject_app_chrome_css() -> None:
             visibility: hidden !important;
             pointer-events: none !important;
         }
-        #MainMenu {
+        #MainMenu,
+        #MainMenu > button,
+        [data-testid="stMainMenu"] {
+            display: none !important;
             visibility: hidden !important;
+            pointer-events: none !important;
+        }
+        /* Native collapsed-sidebar open control only (not every header button). */
+        [data-testid="stSidebarCollapsedControl"] {
+            position: fixed !important;
+            top: 0.55rem !important;
+            left: 0.55rem !important;
+            display: flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            z-index: 10070 !important;
+        }
+        [data-testid="stSidebarCollapsedControl"] button {
+            visibility: visible !important;
+            pointer-events: auto !important;
         }
         [class*="st-key-rsa_app_header"] > div[data-testid="stVerticalBlock"],
         [class*="st-key-rsa_app_header"] [data-testid="stVerticalBlockBorderWrapper"]
@@ -449,16 +627,24 @@ def _inject_app_chrome_css() -> None:
             display: inline-flex;
             align-items: center;
         }
-        /* Push sidebar + main content below the fixed header. */
+        /* Push sidebar + main content below the fixed header with a tight gap. */
         section[data-testid="stSidebar"] {
             top: 3.5rem !important;
             height: calc(100vh - 3.5rem) !important;
         }
         section[data-testid="stSidebar"] > div:first-child {
             height: 100% !important;
+            padding-top: 0.45rem !important;
         }
+        section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding-top: 0.25rem !important;
+        }
+        /* Header is 3.5rem; keep only a small breathing gap below it. */
         .stAppViewContainer .main .block-container {
-            padding-top: 4.35rem !important;
+            padding-top: 3.85rem !important;
+        }
+        .stAppViewContainer .main {
+            padding-top: 0 !important;
         }
         .rsa-pref-help { font-size: 0.85rem; opacity: 0.82; margin-bottom: 0.35rem; }
         .rsa-chip-row {
@@ -483,7 +669,7 @@ def _inject_app_chrome_css() -> None:
             .rsa-account-name { max-width: 5rem; }
             .rsa-header-title { font-size: 0.95rem; }
             [class*="st-key-rsa_app_header"] {
-                padding: 0 0.75rem 0 0.75rem !important;
+                padding: 0 0.75rem 0 2.6rem !important;
             }
         }
         [data-theme="light"] [class*="st-key-rsa_app_header"],
@@ -494,6 +680,7 @@ def _inject_app_chrome_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
 
 
 def _render_pref_chips(labels: list[str], *, section: str) -> None:
@@ -1304,7 +1491,12 @@ def main() -> None:
     from rental_search_agent.logging_config import configure_logging
 
     configure_logging()
-    st.set_page_config(page_title="Property Search Assistant", page_icon="🏠", layout="wide")
+    st.set_page_config(
+        page_title="Property Search Assistant",
+        page_icon="🏠",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     _ensure_env_loaded()
     _init_session_state()
     try:

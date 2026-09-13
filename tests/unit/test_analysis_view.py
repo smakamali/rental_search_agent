@@ -351,4 +351,5 @@ class TestGaugeHtml:
         assert "rsa-crit-unmet" in html
         assert "Inferred" in html
         assert "AI Inferred" not in html
-        assert "✕" in html
+        assert "rsa-status-icon" in html or "✕" in html
+        assert 'aria-label="Unmet: Balcony.' in html
