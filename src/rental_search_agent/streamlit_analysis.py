@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import math
-from typing import Optional
+from typing import Callable, Optional
 
 import streamlit as st
 
@@ -14,16 +14,37 @@ from rental_search_agent.analysis_view import (
     COMPONENT_ORDER,
     GROUP_ORDER,
     GROUP_TITLES,
+    HIGHLIGHT_ICON,
     AnalysisView,
     CriteriaRow,
     build_analysis_view,
     format_weight_pct,
     listing_property_category,
     listing_property_type,
+    weighted_score_line,
 )
-from rental_search_agent.display_format import escape_markdown_link_text, get_score_color, safe_http_url, score_to_pct
+from rental_search_agent.display_format import (
+    escape_markdown_link_text,
+    format_currency,
+    get_score_color,
+    safe_http_url,
+    score_to_pct,
+)
 
 _GAUGE_SIZES = {"large": 176, "small": 108}
+
+_MLS_CATEGORY_HELP = (
+    "Broad category supplied by the listing source. Property type is the more "
+    "specific building format."
+)
+_CRITERIA_EVAL_HELP = (
+    "Criteria evaluated indicates whether each search criterion had enough evidence "
+    "to be assessed. It is separate from the overall Match score."
+)
+_WEIGHTED_SCORE_HELP = (
+    "The overall Match is a weighted average of available component scores. Missing "
+    "components are omitted and remaining weights are renormalized."
+)
 
 
 def inject_analysis_css() -> None:
@@ -54,30 +75,74 @@ def inject_analysis_css() -> None:
             gap: 0.5rem 0.35rem; width: 100%;
         }
         .rsa-gauge-row .rsa-gauge-wrap { flex: 1 1 5.5rem; min-width: 5.5rem; }
+        .rsa-weight-line {
+            font-size: 0.82rem; opacity: 0.82; margin: 0.55rem 0 0.25rem;
+            line-height: 1.35;
+        }
+        .rsa-eval-line {
+            font-size: 0.85rem; opacity: 0.85; margin-top: 0.35rem;
+        }
         .rsa-crit-row {
             display: grid;
             grid-template-columns: 1.4rem minmax(6rem, 1.2fr) minmax(8rem, 1.6fr) auto;
             gap: 0.35rem 0.6rem; align-items: baseline;
-            padding: 0.35rem 0; border-bottom: 1px solid var(--rsa-muted, rgba(128,128,128,0.25));
-            font-size: 0.92rem;
+            padding: 0.28rem 0; border-bottom: 1px solid var(--rsa-muted, rgba(128,128,128,0.25));
+            font-size: 0.9rem;
         }
         .rsa-crit-status { font-weight: 700; }
+        .rsa-crit-met .rsa-crit-status { color: #27ae60; }
+        .rsa-crit-partial .rsa-crit-status { color: #f39c12; }
+        .rsa-crit-unmet .rsa-crit-status { color: #e74c3c; }
+        .rsa-crit-unknown .rsa-crit-status { color: #b0b0b0; }
+        .rsa-crit-unknown .rsa-crit-values { opacity: 0.72; }
         .rsa-crit-name { font-weight: 600; }
         .rsa-crit-values { opacity: 0.92; }
         .rsa-badge {
-            font-size: 0.7rem; font-weight: 600; letter-spacing: 0.03em;
-            text-transform: uppercase; opacity: 0.7; white-space: nowrap;
+            display: inline-flex; align-items: center; gap: 0.2rem;
+            font-size: 0.68rem; font-weight: 650; letter-spacing: 0.03em;
+            text-transform: uppercase; opacity: 0.78; white-space: nowrap;
+            border: 1px solid rgba(128,128,128,0.35); border-radius: 4px;
+            padding: 0.1rem 0.35rem;
         }
-        .rsa-crit-unknown .rsa-crit-status,
-        .rsa-crit-unknown .rsa-crit-values { opacity: 0.72; }
-        .rsa-crit-unmet .rsa-crit-status { color: #e67e22; }
+        .rsa-info {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 0.95rem; height: 0.95rem; border-radius: 50%;
+            border: 1px solid currentColor; opacity: 0.65; font-size: 0.65rem;
+            font-weight: 700; cursor: help; vertical-align: middle;
+            margin-left: 0.2rem; text-decoration: none; color: inherit;
+        }
+        .rsa-info:focus { outline: 2px solid currentColor; outline-offset: 1px; opacity: 1; }
         .rsa-highlight {
-            padding: 0.55rem 0.15rem 0.35rem;
+            display: grid; grid-template-columns: 2rem 1fr; gap: 0.45rem;
+            align-items: start; padding: 0.5rem 0.15rem 0.35rem;
             border-bottom: 1px solid var(--rsa-muted, rgba(128,128,128,0.25));
         }
-        .rsa-highlight-title { font-weight: 650; margin-bottom: 0.15rem; }
-        .rsa-highlight-body { font-size: 0.9rem; opacity: 0.88; line-height: 1.35; }
-        .rsa-open-item { padding: 0.3rem 0; font-size: 0.92rem; opacity: 0.9; }
+        .rsa-highlight-icon {
+            width: 1.85rem; height: 1.85rem; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(39, 174, 96, 0.18); color: #27ae60;
+            font-size: 0.95rem; line-height: 1;
+        }
+        .rsa-highlight-title { font-weight: 650; margin-bottom: 0.1rem; }
+        .rsa-highlight-body { font-size: 0.88rem; opacity: 0.88; line-height: 1.35; }
+        .rsa-open-item {
+            display: grid; grid-template-columns: 1.4rem 1fr; gap: 0.35rem;
+            padding: 0.3rem 0; font-size: 0.9rem;
+        }
+        .rsa-open-mark { color: #f39c12; font-weight: 700; }
+        .rsa-open-empty {
+            display: flex; gap: 0.55rem; align-items: flex-start;
+            padding: 0.55rem 0.65rem; border-radius: 8px;
+            border: 1px solid rgba(39, 174, 96, 0.35);
+            background: rgba(39, 174, 96, 0.1);
+        }
+        .rsa-open-empty-mark { color: #27ae60; font-weight: 700; font-size: 1.05rem; }
+        .rsa-open-empty-title { font-weight: 650; }
+        .rsa-open-empty-body { font-size: 0.85rem; opacity: 0.88; }
+        .rsa-group-title {
+            font-size: 0.78rem; font-weight: 650; letter-spacing: 0.04em;
+            text-transform: uppercase; opacity: 0.7; margin: 0.55rem 0 0.15rem;
+        }
         @media (max-width: 700px) {
             .rsa-crit-row {
                 grid-template-columns: 1.4rem 1fr;
@@ -94,6 +159,14 @@ def inject_analysis_css() -> None:
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _info_icon_html(help_text: str, *, aria_label: str = "More information") -> str:
+    esc = html.escape(help_text)
+    return (
+        f'<a class="rsa-info" href="#" role="img" tabindex="0" '
+        f'title="{esc}" aria-label="{html.escape(aria_label)}">i</a>'
     )
 
 
@@ -129,7 +202,13 @@ def _gauge_svg_html(
     caption_html = (
         f'<div class="rsa-gauge-caption">{html.escape(caption)}</div>' if caption else ""
     )
-    outer_label = "" if large else f'<div class="rsa-gauge-caption">{html.escape(label)}</div>'
+    if large:
+        outer_label = ""
+    else:
+        help_html = _info_icon_html(help_text, aria_label=f"About {label}") if help_text else ""
+        outer_label = (
+            f'<div class="rsa-gauge-caption">{html.escape(label)}{help_html}</div>'
+        )
     title_attr = f' title="{html.escape(help_text)}"' if help_text else ""
     return (
         f'<div class="rsa-gauge-wrap {size_cls}" role="img" aria-label="{aria}"{title_attr}>'
@@ -181,51 +260,63 @@ def _render_photo(listing: dict, width: int = 280) -> None:
         st.caption("No photo available")
 
 
-def render_listing_header(view: AnalysisView, listing: dict) -> None:
+def render_listing_header(
+    view: AnalysisView,
+    listing: dict,
+    *,
+    on_close: Callable[[], None] | None = None,
+) -> None:
     listing_url = safe_http_url(listing.get("url"))
-    col_title, col_actions = st.columns([3.2, 1])
+    col_title, col_actions = st.columns([3.2, 1.2])
     with col_title:
         st.markdown(f"<h3>{html.escape(view.headline)}</h3>", unsafe_allow_html=True)
         if view.locality:
             st.caption(view.locality)
     with col_actions:
+        if on_close is not None:
+            if st.button("Close analysis", key="rsa_close_analysis", use_container_width=True):
+                on_close()
+                st.rerun()
         if listing_url:
-            st.link_button("View listing", listing_url, use_container_width=True)
+            st.link_button("View listing", listing_url, use_container_width=True, type="primary")
         video = safe_http_url(listing.get("video_url"))
         if video:
             st.link_button("Video / tour", video, use_container_width=True)
 
 
 def render_listing_metadata(listing: dict) -> None:
-    fields: list[tuple[str, str]] = []
+    fields: list[tuple[str, str, str | None]] = []
+    price = listing.get("price")
+    if price is not None and price != "":
+        fields.append(("Price", format_currency(price), None))
     mls = listing.get("id")
     listing_url = safe_http_url(listing.get("url"))
     if mls:
-        fields.append(("MLS", str(mls)))
+        fields.append(("MLS", str(mls), None))
     ptype = listing_property_type(listing)
     if ptype:
-        fields.append(("Property type", ptype))
+        fields.append(("Property type", ptype, None))
     pcat = listing_property_category(listing)
     if pcat:
-        fields.append(("Category", pcat))
+        fields.append(("MLS category", pcat, _MLS_CATEGORY_HELP))
     listed = listing.get("listing_age_display")
     if listed:
-        fields.append(("Listed", str(listed)))
+        fields.append(("Listed", str(listed), None))
     agent = listing.get("agent_name")
     if agent:
-        fields.append(("Listing agent", str(agent)))
+        fields.append(("Listing agent", str(agent), None))
     phone = listing.get("agent_phone")
     if phone:
-        fields.append(("Agent phone", str(phone)))
+        fields.append(("Agent phone", str(phone), None))
     brokerage = listing.get("brokerage_name")
     if brokerage:
-        fields.append(("Brokerage", str(brokerage)))
+        fields.append(("Brokerage", str(brokerage), None))
     if listing.get("lot_size"):
-        fields.append(("Lot size", str(listing["lot_size"])))
+        fields.append(("Lot size", str(listing["lot_size"]), None))
     if listing.get("open_house"):
-        fields.append(("Open house", str(listing["open_house"])))
+        fields.append(("Open house", str(listing["open_house"]), None))
     if listing.get("price_change_display"):
-        fields.append(("Price change", str(listing["price_change_display"])))
+        fields.append(("Price change", str(listing["price_change_display"]), None))
 
     photo_col, meta_col = st.columns([1.1, 1.9])
     with photo_col:
@@ -238,9 +329,12 @@ def render_listing_metadata(listing: dict) -> None:
         for i in range(0, len(fields), n):
             chunk = fields[i : i + n]
             cols = st.columns(n)
-            for col, (label, value) in zip(cols, chunk):
+            for col, (label, value, help_text) in zip(cols, chunk):
                 with col:
-                    st.caption(label)
+                    if help_text:
+                        st.caption(label, help=help_text)
+                    else:
+                        st.caption(label)
                     if label == "MLS" and listing_url:
                         st.markdown(
                             f"[{escape_markdown_link_text(value)}]({listing_url})"
@@ -257,23 +351,23 @@ def render_match_summary(view: AnalysisView) -> None:
             view.match_pct,
             "Match",
             size="large",
-            help_text="Overall match is a weighted average of the component scores that could be computed. Missing components are omitted, not treated as zero.",
+            help_text=(
+                "Overall match is a weighted average of the component scores that could "
+                "be computed. Missing components are omitted, not treated as zero."
+            ),
         )
         st.markdown(f"**{html.escape(view.strength_label)}**")
         st.caption(view.strength_blurb)
         if view.total_count:
-            st.caption(
-                f"**{view.evaluated_count} of {view.total_count}** search criteria evaluated"
-                + (
-                    f"  ·  **{view.unknown_count}** listing details not available"
-                    if view.unknown_count
-                    else ""
-                )
+            eval_bits = f"{view.evaluated_count} / {view.total_count} criteria evaluated"
+            if view.unknown_count:
+                eval_bits += f" · {view.unknown_count} unavailable"
+            st.markdown(
+                f'<div class="rsa-eval-line">{html.escape(eval_bits)}'
+                f"{_info_icon_html(_CRITERIA_EVAL_HELP, aria_label='About criteria evaluated')}"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-        st.caption(
-            "Criteria evaluated reflects whether each search criterion could be processed. "
-            "It is not part of the overall match score."
-        )
     with right:
         st.markdown("**Score breakdown**")
         gauges = []
@@ -298,12 +392,15 @@ def render_match_summary(view: AnalysisView) -> None:
             )
         else:
             st.caption("No component scores available.")
-        if view.show_semantic_note:
-            st.info(
-                "Semantic similarity can be lower when the listing provides limited "
-                "information about lifestyle or qualitative preferences. Explicit "
-                "requirements (price, beds, commute, listed amenities) are scored separately."
+        weight_line = weighted_score_line(view.weights_used)
+        if weight_line:
+            st.markdown(
+                f'<div class="rsa-weight-line">{html.escape(weight_line)}'
+                f"{_info_icon_html(_WEIGHTED_SCORE_HELP, aria_label='About weighted score')}"
+                f"</div>",
+                unsafe_allow_html=True,
             )
+        render_score_explanation(view)
 
 
 def _criteria_row_html(row: CriteriaRow) -> str:
@@ -314,13 +411,16 @@ def _criteria_row_html(row: CriteriaRow) -> str:
         "unknown": "rsa-crit-unknown",
     }.get(row.status, "rsa-crit-unknown")
     aria = f"{row.status_label}: {row.name}. {row.comparison_text}"
-    badge = html.escape(row.source) if row.source else "—"
+    badge_label = html.escape(row.source_label)
+    help_html = ""
+    if row.source_help:
+        help_html = _info_icon_html(row.source_help, aria_label=f"About {row.source_label}")
     return (
         f'<div class="rsa-crit-row {status_cls}" role="listitem" aria-label="{html.escape(aria)}">'
         f'<span class="rsa-crit-status" aria-hidden="true">{html.escape(row.marker)}</span>'
         f'<span class="rsa-crit-name">{html.escape(row.name)}</span>'
         f'<span class="rsa-crit-values">{html.escape(row.comparison_text)}</span>'
-        f'<span class="rsa-badge">{badge}</span>'
+        f'<span class="rsa-badge">{badge_label}{help_html}</span>'
         f"</div>"
     )
 
@@ -328,7 +428,10 @@ def _criteria_row_html(row: CriteriaRow) -> str:
 def render_criteria_group(title: str, rows: list[CriteriaRow]) -> None:
     if not rows:
         return
-    st.markdown(f"**{html.escape(title)}**")
+    st.markdown(
+        f'<div class="rsa-group-title">{html.escape(title)}</div>',
+        unsafe_allow_html=True,
+    )
     body = "".join(_criteria_row_html(r) for r in rows)
     st.markdown(f'<div role="list">{body}</div>', unsafe_allow_html=True)
 
@@ -353,37 +456,43 @@ def render_property_highlights(view: AnalysisView) -> None:
         return
     parts = []
     for h in view.highlights:
+        icon = HIGHLIGHT_ICON.get(h.icon_key, HIGHLIGHT_ICON["other"])
         parts.append(
             '<div class="rsa-highlight">'
+            f'<div class="rsa-highlight-icon" aria-hidden="true">{html.escape(icon)}</div>'
+            "<div>"
             f'<div class="rsa-highlight-title">{html.escape(h.title)}</div>'
             f'<div class="rsa-highlight-body">{html.escape(h.body)}</div>'
-            "</div>"
+            "</div></div>"
         )
     st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 def render_open_questions(view: AnalysisView) -> None:
     st.subheader("Open questions")
-    st.caption(
-        "These details were not found in the listing. They do not necessarily reduce "
-        "the match score, but may be worth confirming."
-    )
     if not view.open_questions:
-        st.caption("No missing listing details for your search criteria.")
+        st.markdown(
+            '<div class="rsa-open-empty" role="status">'
+            '<div class="rsa-open-empty-mark" aria-hidden="true">✓</div>'
+            "<div>"
+            '<div class="rsa-open-empty-title">No open questions</div>'
+            '<div class="rsa-open-empty-body">'
+            "All current criteria had enough listing evidence."
+            "</div></div></div>",
+            unsafe_allow_html=True,
+        )
         return
     parts = []
     for row in view.open_questions:
         parts.append(
             '<div class="rsa-open-item">'
-            f"? {html.escape(row.name)}"
+            f'<span class="rsa-open-mark" aria-hidden="true">?</span>'
+            "<div>"
+            f"<strong>{html.escape(row.name)}</strong>"
             f'<div class="rsa-highlight-body">{html.escape(row.comparison_text)}</div>'
-            "</div>"
+            "</div></div>"
         )
     st.markdown("".join(parts), unsafe_allow_html=True)
-    if view.unmet:
-        st.markdown("**Unmet criteria**")
-        for row in view.unmet:
-            st.write(f"✕ {row.name} — {row.comparison_text}")
 
 
 def render_score_explanation(view: AnalysisView) -> None:
@@ -406,22 +515,31 @@ def render_score_explanation(view: AnalysisView) -> None:
                 f"{k.capitalize()} ({format_weight_pct(w)})"
                 for k, w in view.weights_used.items()
             ]
-            st.caption("Weights used for this listing (after dropping missing components): " + ", ".join(used) + ".")
+            st.caption(
+                "Weights used for this listing (after dropping missing components): "
+                + ", ".join(used)
+                + "."
+            )
         st.markdown("**What each component measures**")
         for key in COMPONENT_ORDER:
             st.markdown(f"- **{key.capitalize()}:** {COMPONENT_HELP[key]}")
         st.caption(
-            "Criteria evaluated (formerly shown as coverage) is a separate checklist "
-            "summary and is not included in the overall match."
+            "Criteria evaluated is a separate checklist summary and is not included "
+            "in the overall match."
         )
 
 
-def render_listing_analysis(listing: dict, result: dict) -> None:
+def render_listing_analysis(
+    listing: dict,
+    result: dict,
+    *,
+    on_close: Callable[[], None] | None = None,
+) -> None:
     """Full Analyze panel for one listing."""
     inject_analysis_css()
     view = build_analysis_view(listing, result)
     with st.container():
-        render_listing_header(view, listing)
+        render_listing_header(view, listing, on_close=on_close)
         render_listing_metadata(listing)
         st.divider()
         render_match_summary(view)
@@ -432,4 +550,3 @@ def render_listing_analysis(listing: dict, result: dict) -> None:
         with right:
             render_property_highlights(view)
             render_open_questions(view)
-            render_score_explanation(view)
