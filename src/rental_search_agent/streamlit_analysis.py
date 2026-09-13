@@ -14,7 +14,6 @@ from rental_search_agent.analysis_view import (
     COMPONENT_ORDER,
     GROUP_ORDER,
     GROUP_TITLES,
-    HIGHLIGHT_ICON,
     AnalysisView,
     CriteriaRow,
     build_analysis_view,
@@ -30,6 +29,7 @@ from rental_search_agent.display_format import (
     safe_http_url,
     score_to_pct,
 )
+from rental_search_agent.ui_assets import highlight_icon_img_html, status_icon_img_html
 
 _GAUGE_SIZES = {"large": 176, "small": 108}
 
@@ -84,16 +84,20 @@ def inject_analysis_css() -> None:
         }
         .rsa-crit-row {
             display: grid;
-            grid-template-columns: 1.4rem minmax(6rem, 1.2fr) minmax(8rem, 1.6fr) auto;
-            gap: 0.35rem 0.6rem; align-items: baseline;
+            grid-template-columns: 1.5rem minmax(6rem, 1.2fr) minmax(8rem, 1.6fr) auto;
+            gap: 0.35rem 0.6rem; align-items: center;
             padding: 0.28rem 0; border-bottom: 1px solid var(--rsa-muted, rgba(128,128,128,0.25));
             font-size: 0.9rem;
         }
-        .rsa-crit-status { font-weight: 700; }
-        .rsa-crit-met .rsa-crit-status { color: #27ae60; }
-        .rsa-crit-partial .rsa-crit-status { color: #f39c12; }
-        .rsa-crit-unmet .rsa-crit-status { color: #e74c3c; }
-        .rsa-crit-unknown .rsa-crit-status { color: #b0b0b0; }
+        .rsa-crit-status {
+            display: inline-flex; align-items: center; justify-content: center;
+            line-height: 0;
+        }
+        .rsa-status-icon {
+            width: 20px; height: 20px; object-fit: contain;
+            display: block; vertical-align: middle;
+        }
+        .rsa-status-fallback { font-weight: 700; font-size: 0.95rem; line-height: 1; }
         .rsa-crit-unknown .rsa-crit-values { opacity: 0.72; }
         .rsa-crit-name { font-weight: 600; }
         .rsa-crit-values { opacity: 0.92; }
@@ -113,30 +117,41 @@ def inject_analysis_css() -> None:
         }
         .rsa-info:focus { outline: 2px solid currentColor; outline-offset: 1px; opacity: 1; }
         .rsa-highlight {
-            display: grid; grid-template-columns: 2rem 1fr; gap: 0.45rem;
+            display: grid; grid-template-columns: 2.6rem 1fr; gap: 0.55rem;
             align-items: start; padding: 0.5rem 0.15rem 0.35rem;
             border-bottom: 1px solid var(--rsa-muted, rgba(128,128,128,0.25));
         }
         .rsa-highlight-icon {
-            width: 1.85rem; height: 1.85rem; border-radius: 50%;
+            width: 2.5rem; height: 2.5rem;
             display: flex; align-items: center; justify-content: center;
-            background: rgba(39, 174, 96, 0.18); color: #27ae60;
-            font-size: 0.95rem; line-height: 1;
+            line-height: 0;
+            /* Artwork already includes circular colored background — no extra circle. */
+            background: transparent;
+        }
+        .rsa-highlight-icon-img {
+            width: 40px; height: 40px; object-fit: contain;
+            display: block;
         }
         .rsa-highlight-title { font-weight: 650; margin-bottom: 0.1rem; }
         .rsa-highlight-body { font-size: 0.88rem; opacity: 0.88; line-height: 1.35; }
         .rsa-open-item {
-            display: grid; grid-template-columns: 1.4rem 1fr; gap: 0.35rem;
-            padding: 0.3rem 0; font-size: 0.9rem;
+            display: grid; grid-template-columns: 1.5rem 1fr; gap: 0.4rem;
+            align-items: start; padding: 0.3rem 0; font-size: 0.9rem;
         }
-        .rsa-open-mark { color: #f39c12; font-weight: 700; }
+        .rsa-open-mark {
+            display: inline-flex; align-items: center; justify-content: center;
+            line-height: 0; padding-top: 0.1rem;
+        }
         .rsa-open-empty {
             display: flex; gap: 0.55rem; align-items: flex-start;
             padding: 0.55rem 0.65rem; border-radius: 8px;
             border: 1px solid rgba(39, 174, 96, 0.35);
             background: rgba(39, 174, 96, 0.1);
         }
-        .rsa-open-empty-mark { color: #27ae60; font-weight: 700; font-size: 1.05rem; }
+        .rsa-open-empty-mark {
+            display: inline-flex; align-items: center; justify-content: center;
+            line-height: 0; flex-shrink: 0; padding-top: 0.1rem;
+        }
         .rsa-open-empty-title { font-weight: 650; }
         .rsa-open-empty-body { font-size: 0.85rem; opacity: 0.88; }
         .rsa-group-title {
@@ -145,7 +160,7 @@ def inject_analysis_css() -> None:
         }
         @media (max-width: 700px) {
             .rsa-crit-row {
-                grid-template-columns: 1.4rem 1fr;
+                grid-template-columns: 1.5rem 1fr;
                 grid-template-areas:
                     "status name"
                     ". values"
@@ -415,9 +430,10 @@ def _criteria_row_html(row: CriteriaRow) -> str:
     help_html = ""
     if row.source_help:
         help_html = _info_icon_html(row.source_help, aria_label=f"About {row.source_label}")
+    icon_html = status_icon_img_html(row.status, size_px=20)
     return (
         f'<div class="rsa-crit-row {status_cls}" role="listitem" aria-label="{html.escape(aria)}">'
-        f'<span class="rsa-crit-status" aria-hidden="true">{html.escape(row.marker)}</span>'
+        f'<span class="rsa-crit-status">{icon_html}</span>'
         f'<span class="rsa-crit-name">{html.escape(row.name)}</span>'
         f'<span class="rsa-crit-values">{html.escape(row.comparison_text)}</span>'
         f'<span class="rsa-badge">{badge_label}{help_html}</span>'
@@ -456,10 +472,10 @@ def render_property_highlights(view: AnalysisView) -> None:
         return
     parts = []
     for h in view.highlights:
-        icon = HIGHLIGHT_ICON.get(h.icon_key, HIGHLIGHT_ICON["other"])
+        icon_html = highlight_icon_img_html(h.icon_key, size_px=40)
         parts.append(
             '<div class="rsa-highlight">'
-            f'<div class="rsa-highlight-icon" aria-hidden="true">{html.escape(icon)}</div>'
+            f'<div class="rsa-highlight-icon">{icon_html}</div>'
             "<div>"
             f'<div class="rsa-highlight-title">{html.escape(h.title)}</div>'
             f'<div class="rsa-highlight-body">{html.escape(h.body)}</div>'
@@ -472,8 +488,9 @@ def render_open_questions(view: AnalysisView) -> None:
     st.subheader("Open questions")
     if not view.open_questions:
         st.markdown(
-            '<div class="rsa-open-empty" role="status">'
-            '<div class="rsa-open-empty-mark" aria-hidden="true">✓</div>'
+            '<div class="rsa-open-empty" role="status" '
+            'aria-label="No open questions. All current criteria had enough listing evidence.">'
+            f'<div class="rsa-open-empty-mark">{status_icon_img_html("met", size_px=20)}</div>'
             "<div>"
             '<div class="rsa-open-empty-title">No open questions</div>'
             '<div class="rsa-open-empty-body">'
@@ -484,9 +501,10 @@ def render_open_questions(view: AnalysisView) -> None:
         return
     parts = []
     for row in view.open_questions:
+        aria = f"Open question: {row.name}. {row.comparison_text}"
         parts.append(
-            '<div class="rsa-open-item">'
-            f'<span class="rsa-open-mark" aria-hidden="true">?</span>'
+            f'<div class="rsa-open-item" role="listitem" aria-label="{html.escape(aria)}">'
+            f'<span class="rsa-open-mark">{status_icon_img_html("unknown", size_px=20)}</span>'
             "<div>"
             f"<strong>{html.escape(row.name)}</strong>"
             f'<div class="rsa-highlight-body">{html.escape(row.comparison_text)}</div>'

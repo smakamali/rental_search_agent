@@ -36,3 +36,6 @@ rental-search-ui = "rental_search_agent.streamlit_app:run_ui"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+rental_search_agent = ["assets/**/*.png"]
