@@ -583,6 +583,20 @@ def inject_results_css() -> None:
         .rsa-results-header { margin-bottom: 0.35rem; min-width: 0; }
         .rsa-results-title { font-size: 1.35rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
         .rsa-results-meta { opacity: 0.72; font-size: 0.9rem; margin-top: 0.15rem; overflow-wrap: anywhere; }
+        /* Flush-right Grid/Table/Map and Price/Match/Rank toggles.
+           Target the control itself — the st-key wrapper is already full-width. */
+        [class*="st-key-results_view"] [data-testid="stSegmentedControl"],
+        [class*="st-key-map_label_mode"] [data-testid="stSegmentedControl"] {
+            display: flex !important;
+            justify-content: flex-end !important;
+            width: 100% !important;
+        }
+        [class*="st-key-results_view"] [data-testid="stSegmentedControl"] > div,
+        [class*="st-key-map_label_mode"] [data-testid="stSegmentedControl"] > div {
+            margin-left: auto !important;
+            width: fit-content !important;
+            max-width: 100% !important;
+        }
         .rsa-card-photo {
             position: relative;
             width: 100%;
@@ -1005,7 +1019,7 @@ def _render_results_header(listings: list[dict]) -> None:
     count = results_count_label(len(listings))
     sort_caption = ordered_by_caption(st.session_state.get("last_sort_by"))
     meta = count if not sort_caption else f"{count} · {sort_caption}"
-    left, right = st.columns([1.4, 1.2])
+    left, right = st.columns([5, 1.35], vertical_alignment="top")
     with left:
         st.markdown(
             f'<div class="rsa-results-header">'
@@ -1263,12 +1277,15 @@ def _render_map_summaries(listings: list[dict]) -> None:
 def _render_map_panel(listings: list[dict]) -> None:
     """Map as the active results view: labels, coverage, Folium/PyDeck, summaries."""
     prepare_map_label_widget_state(st.session_state)
-    st.segmented_control(
-        "Map labels",
-        options=list(WIDGET_MAP_LABEL_MODES),
-        format_func=lambda x: _MAP_LABEL_LABELS.get(x, x.title()),
-        key="map_label_mode",
-    )
+    _spacer, label_col = st.columns([5, 1.35])
+    with label_col:
+        st.segmented_control(
+            "Map labels",
+            options=list(WIDGET_MAP_LABEL_MODES),
+            format_func=lambda x: _MAP_LABEL_LABELS.get(x, x.title()),
+            key="map_label_mode",
+            label_visibility="collapsed",
+        )
     label_mode = current_map_label_mode(st.session_state)
     map_points, center_lat, center_lon = _build_map_data(listings, label_mode=label_mode)
     st.markdown(
