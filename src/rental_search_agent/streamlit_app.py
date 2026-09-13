@@ -668,7 +668,7 @@ def _inject_app_chrome_css() -> None:
             padding-top: 0 !important;
         }
         [class*="st-key-rsa_sidebar_title_row"] {
-            margin-top: -2.35rem !important;
+            margin-top: -1.8rem !important;
             margin-bottom: 0 !important;
             padding-left: 2.15rem !important;
             height: 2.35rem !important;
