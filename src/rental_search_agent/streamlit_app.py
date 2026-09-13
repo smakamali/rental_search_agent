@@ -1264,6 +1264,8 @@ def _render_preferences_sidebar() -> None:
                     options=["Rent", "Buy"],
                     default="Buy" if saved_listing_type == "for_sale" else "Rent",
                     key="pref_listing_mode",
+                    label_visibility="collapsed",
+                    width="stretch",
                 )
 
             with st.container(border=True):
