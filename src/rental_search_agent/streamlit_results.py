@@ -20,6 +20,7 @@ except ImportError:
     pdk = None
 
 from rental_search_agent.display_format import (
+    escape_css_style_url,
     format_count,
     format_currency,
     format_duration,
@@ -1281,9 +1282,8 @@ def _render_map_summary_photo(listing: dict, index: int) -> None:
     safe_photo = safe_http_url(listing.get("photo_url") or "") or ""
     if safe_photo:
         # Per-card background so the button itself is the image (no separate Analyze control).
-        css_url = (
-            safe_photo.replace("\\", "\\\\").replace('"', "%22").replace("'", "%27")
-        )
+        # Hex-escape so a photo URL cannot close the <style> block.
+        css_url = escape_css_style_url(safe_photo)
         st.markdown(
             f"<style>"
             f'[class*="st-key-{key}"] button {{'

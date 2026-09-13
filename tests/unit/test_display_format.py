@@ -3,6 +3,7 @@
 from rental_search_agent.display_format import (
     criterion_source_help,
     criterion_source_label,
+    escape_css_style_url,
     format_budget_input,
     format_count,
     format_criterion_comparison,
@@ -147,3 +148,17 @@ class TestPreferenceChips:
     def test_listing_preference_chips(self):
         assert listing_preference_chips("balcony, parking") == ["balcony", "parking"]
         assert listing_preference_chips("") == []
+
+
+class TestEscapeCssStyleUrl:
+    def test_plain_https_unchanged(self):
+        url = "https://cdn.realtor.ca/listing/123.jpg"
+        assert escape_css_style_url(url) == url
+
+    def test_style_breakout_is_escaped(self):
+        raw = "https://cdn.example/x.jpg?</style><script>alert(1)</script>"
+        out = escape_css_style_url(raw)
+        assert "</style>" not in out
+        assert "<script>" not in out
+        assert "\\3c " in out
+        assert "\\3e " in out
