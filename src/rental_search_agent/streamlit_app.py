@@ -446,7 +446,8 @@ def _inject_app_chrome_css() -> None:
             width: 100vw !important;
             max-width: 100vw !important;
             height: 3.5rem !important;
-            z-index: 10050 !important;
+            /* Below collapsed-sidebar control; above Streamlit shell after PE none. */
+            z-index: 10065 !important;
             margin: 0 !important;
             padding: 0 1.1rem 0 2.85rem !important;
             border: none !important;
@@ -459,14 +460,15 @@ def _inject_app_chrome_css() -> None:
             pointer-events: auto !important;
         }
         /* Keep Streamlit header shell for the native open-sidebar control, but
-           hide Deploy / Stop / ⋮. Do not blanket-disable pointer events on all
-           header children — that made the expand control unusable. */
+           hide Deploy / Stop / ⋮. Pass clicks through the transparent shell so
+           Sign out remains clickable; re-enable only the expand control. */
         header[data-testid="stHeader"] {
             display: block !important;
             background: transparent !important;
             color: inherit !important;
             height: 3.5rem !important;
             z-index: 10060 !important;
+            pointer-events: none !important;
         }
         header[data-testid="stHeader"] [data-testid="stToolbar"],
         header[data-testid="stHeader"] [data-testid="stDecoration"],
