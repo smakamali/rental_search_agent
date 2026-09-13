@@ -1340,7 +1340,7 @@ def _render_preferences_sidebar() -> None:
 
             btn_cols = st.columns([1.15, 1])
             with btn_cols[0]:
-                saved = st.form_submit_button("Save preferences", use_container_width=True)
+                saved = st.form_submit_button("Save", use_container_width=True)
             with btn_cols[1]:
                 searched = st.form_submit_button(
                     "Search", type="primary", use_container_width=True
