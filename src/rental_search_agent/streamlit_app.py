@@ -284,7 +284,9 @@ def _inject_sidebar_restore_control() -> None:
     """
     import streamlit.components.v1 as components
 
-    components.html(
+    # Keep the iframe out of both the main column and the preference form.
+    with st.container(key="rsa_sidebar_restore"):
+        components.html(
         """
 <script>
 (function () {
@@ -434,7 +436,8 @@ def _inject_app_chrome_css() -> None:
     """Full-width fixed header + preference sidebar chips."""
     # Header sits under Streamlit's thin toolbar strip (~0) at the top of the app
     # canvas. Leave right padding so Deploy/menu remain clickable.
-    st.markdown(
+    with st.container(key="rsa_hidden_css_chrome"):
+        st.markdown(
         """
         <style>
         /* Full-width app header spanning sidebar + main + chat. */
@@ -464,6 +467,11 @@ def _inject_app_chrome_css() -> None:
            Sign out remains clickable; re-enable only the expand control. */
         header[data-testid="stHeader"] {
             display: block !important;
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            width: 100% !important;
             background: transparent !important;
             color: inherit !important;
             height: 3.5rem !important;
@@ -629,24 +637,119 @@ def _inject_app_chrome_css() -> None:
             display: inline-flex;
             align-items: center;
         }
-        /* Push sidebar + main content below the fixed header with a tight gap. */
+        /* Push sidebar flush under the fixed header (no gap between panels). */
         section[data-testid="stSidebar"] {
             top: 3.5rem !important;
             height: calc(100vh - 3.5rem) !important;
         }
         section[data-testid="stSidebar"] > div:first-child {
             height: 100% !important;
-            padding-top: 0.45rem !important;
+            padding-top: 0 !important;
         }
         section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-            padding-top: 0.25rem !important;
+            padding-top: 0 !important;
         }
-        /* Header is 3.5rem; keep only a small breathing gap below it. */
-        .stAppViewContainer .main .block-container {
+        /* Collapse-arrow + title on one line, with internal top padding so
+           the text is not flush against the app header. */
+        [data-testid="stSidebarHeader"] {
+            height: 3.05rem !important;
+            min-height: 3.05rem !important;
+            margin-bottom: 0 !important;
+            padding: 0.7rem 0 0 0 !important;
+            box-sizing: border-box !important;
+            justify-content: flex-start !important;
+            align-items: center !important;
+        }
+        [data-testid="stSidebarCollapseButton"] {
+            margin-left: 0 !important;
+            z-index: 3 !important;
+        }
+        [data-testid="stSidebarUserContent"] {
+            padding-top: 0 !important;
+        }
+        [class*="st-key-rsa_sidebar_title_row"] {
+            margin-top: -2.35rem !important;
+            margin-bottom: 0 !important;
+            padding-left: 2.15rem !important;
+            height: 2.35rem !important;
+            min-height: 2.35rem !important;
+            display: flex !important;
+            align-items: center !important;
+        }
+        [class*="st-key-rsa_sidebar_title_row"] [data-testid="stMarkdownContainer"],
+        [class*="st-key-rsa_sidebar_title_row"] [data-testid="stMarkdownContainer"] p,
+        [class*="st-key-rsa_sidebar_title_row"] .stMarkdown {
+            margin: 0 !important;
+            padding: 0 !important;
+            line-height: 1 !important;
+        }
+        .rsa-sidebar-title {
+            font-size: 1.15rem;
+            font-weight: 650;
+            line-height: 1;
+            letter-spacing: 0.01em;
+        }
+        /* Streamlit 1.54 uses .stMain / stMainBlockContainer (not .main).
+           Default padding-top is 6rem, which opens a blank strip under the
+           3.5rem fixed header. Override every current container class. */
+        [data-testid="stMainBlockContainer"],
+        .stMainBlockContainer,
+        .block-container {
             padding-top: 3.85rem !important;
         }
+        [data-testid="stMain"],
+        .stAppViewContainer .stMain,
         .stAppViewContainer .main {
             padding-top: 0 !important;
+        }
+        /* Fixed header leaves an empty in-flow box in the main column. Collapse
+           wrappers 1-3 levels out — not the whole main vertical block. */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> [class*="st-key-rsa_app_header"]),
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [class*="st-key-rsa_app_header"]),
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > div > [class*="st-key-rsa_app_header"]),
+        [data-testid="stElementContainer"]:has(> [class*="st-key-rsa_app_header"]),
+        [data-testid="stElementContainer"]:has(> div > [class*="st-key-rsa_app_header"]),
+        [data-testid="element-container"]:has(> [class*="st-key-rsa_app_header"]),
+        [data-testid="element-container"]:has(> div > [class*="st-key-rsa_app_header"]) {
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            overflow: visible !important;
+        }
+        /* Style-only markdown and the sidebar-restore iframe must not reserve
+           a main-column strip. */
+        [class*="st-key-rsa_hidden_"] {
+            position: absolute !important;
+            display: none !important;
+            width: 0 !important;
+            height: 0 !important;
+            overflow: hidden !important;
+            border: none !important;
+        }
+        [class*="st-key-rsa_sidebar_restore"] {
+            position: absolute !important;
+            width: 0 !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            border: none !important;
+            pointer-events: none !important;
+        }
+        [data-testid="stMain"] [data-testid="stElementContainer"]:has(
+            [data-testid="stMarkdownContainer"] > style:only-child
+        ) {
+            position: absolute !important;
+            width: 0 !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            border: none !important;
         }
         .rsa-pref-help { font-size: 0.85rem; opacity: 0.82; margin-bottom: 0.35rem; }
         .rsa-chip-row {
@@ -887,7 +990,8 @@ def _inject_chat_blob_css() -> None:
     chat_open = st.session_state.get("chat_open", True)
     # Keep results clear of the fixed ~420px panel while chat is open.
     pad_right = "min(440px, calc(100vw - 1.5rem))" if chat_open else "1rem"
-    st.markdown(
+    with st.container(key="rsa_hidden_css_chat"):
+        st.markdown(
         f"""
         <style>
         [class*="st-key-chat_blob"] {{
@@ -1222,7 +1326,11 @@ def _render_preferences_sidebar() -> None:
         "or when there are no results yet; otherwise the existing result corpus may be re-ranked."
     )
     with st.sidebar:
-        st.subheader("Search Preferences")
+        with st.container(key="rsa_sidebar_title_row"):
+            st.markdown(
+                '<div class="rsa-sidebar-title">Search Preferences</div>',
+                unsafe_allow_html=True,
+            )
         st.caption(
             "Saved as defaults. Chat criteria override these for the current search.",
             help=pref_help,
@@ -1340,7 +1448,7 @@ def _render_preferences_sidebar() -> None:
 
             btn_cols = st.columns([1.15, 1])
             with btn_cols[0]:
-                saved = st.form_submit_button("Save preferences", use_container_width=True)
+                saved = st.form_submit_button("Save", use_container_width=True)
             with btn_cols[1]:
                 searched = st.form_submit_button(
                     "Search", type="primary", use_container_width=True

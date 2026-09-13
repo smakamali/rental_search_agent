@@ -702,6 +702,42 @@ def inject_results_css() -> None:
         .rsa-map-summary-street { font-size: 0.82rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
         .rsa-map-summary-facts { font-size: 0.75rem; opacity: 0.75; overflow-wrap: anywhere; }
         .rsa-map-summary-price { overflow-wrap: anywhere; }
+        /* Clickable map-summary thumbs (Streamlit button styled as photo). */
+        [class*="st-key-map_summary_photo_"] {
+            width: 240px !important;
+            max-width: 100% !important;
+        }
+        [class*="st-key-map_summary_photo_"] button {
+            display: block !important;
+            width: 240px !important;
+            max-width: 100% !important;
+            aspect-ratio: 16 / 10 !important;
+            min-height: 0 !important;
+            height: auto !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            border-radius: 0.35rem !important;
+            border: none !important;
+            background-color: rgba(128, 128, 128, 0.12) !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
+            color: transparent !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+            overflow: hidden !important;
+            box-shadow: none !important;
+            cursor: pointer !important;
+        }
+        [class*="st-key-map_summary_photo_"] button:hover {
+            opacity: 0.92;
+            border: none !important;
+        }
+        [class*="st-key-map_summary_photo_"] button p {
+            color: transparent !important;
+            font-size: 0 !important;
+            margin: 0 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1239,6 +1275,27 @@ def _render_results_map(
     st.caption("Map unavailable: install folium (recommended) or pydeck to show results on a map.")
 
 
+def _render_map_summary_photo(listing: dict, index: int) -> None:
+    """Clickable map-summary thumbnail that opens analysis (not realtor.ca)."""
+    key = f"map_summary_photo_{index}"
+    safe_photo = safe_http_url(listing.get("photo_url") or "") or ""
+    if safe_photo:
+        # Per-card background so the button itself is the image (no separate Analyze control).
+        css_url = (
+            safe_photo.replace("\\", "\\\\").replace('"', "%22").replace("'", "%27")
+        )
+        st.markdown(
+            f"<style>"
+            f'[class*="st-key-{key}"] button {{'
+            f'background-image: url("{css_url}") !important;'
+            f"}}"
+            f"</style>",
+            unsafe_allow_html=True,
+        )
+    if st.button("Open analysis", key=key, help="Open analysis"):
+        request_listing_analysis(listing)
+
+
 def _render_map_summaries(listings: list[dict]) -> None:
     """Compact identity strip under the map. Not a second Grid."""
     if not listings:
@@ -1256,7 +1313,7 @@ def _render_map_summaries(listings: list[dict]) -> None:
                     f'<div class="rsa-map-summary-rank">#{html.escape(str(rank))}</div>',
                     unsafe_allow_html=True,
                 )
-                _render_table_photo(listing.get("photo_url") or "", listing.get("url") or "")
+                _render_map_summary_photo(listing, i)
                 st.markdown(
                     f'<div class="rsa-map-summary-price">'
                     f"{html.escape(_format_listing_price(listing))}</div>",
