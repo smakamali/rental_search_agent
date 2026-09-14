@@ -530,11 +530,20 @@ def ai_listing_summary_html(view: AnalysisView) -> str:
         chips = f'<div class="rsa-feature-chip-row">{chip_html}</div>'
     notice = ""
     if view.ai_listing_summary or view.summary_features:
+        if view.summary_is_ai_generated:
+            notice_text = (
+                "AI-generated from listing data. Verify important details with the "
+                "listing agent."
+            )
+        else:
+            notice_text = (
+                "Summary derived from listing data. Verify important details with the "
+                "listing agent."
+            )
         notice = (
             '<div class="rsa-verify-notice" role="note">'
             '<span class="rsa-verify-notice-icon" aria-hidden="true">i</span>'
-            "<span>AI-generated from listing data. Verify important details with the "
-            "listing agent.</span></div>"
+            f"<span>{html.escape(notice_text)}</span></div>"
         )
     return (
         f'<section class="rsa-listing-summary" aria-label="AI listing summary">'

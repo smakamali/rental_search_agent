@@ -327,6 +327,29 @@ def _semantic_note(components: dict[str, Optional[float]], included: Sequence[st
     return float(sem) < 0.75 and max(float(x) for x in others) >= 0.9
 
 
+_MAX_SUMMARY_CHARS = 900
+
+
+def normalize_ai_listing_summary(raw: Any) -> Optional[str]:
+    """Sanitize listing summary text; return None when empty or unusable.
+
+    Applied on LLM write and again on view resolve so cached/API payloads stay bounded.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    # Drop accidental markdown headings the model may still emit.
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if len(text) > _MAX_SUMMARY_CHARS:
+        text = text[:_MAX_SUMMARY_CHARS].rstrip() + "…"
+    return text
+
+
 def listing_original_description(listing: dict | None) -> Optional[str]:
     """Canonical original listing remarks/description from the listing model.
 
@@ -532,11 +555,9 @@ def resolve_ai_listing_summary(
     summary from structured listing data. Never raises.
     """
     result = result or {}
-    raw = result.get("ai_listing_summary")
-    if raw is not None:
-        text = str(raw).strip()
-        if text:
-            return text, True
+    text = normalize_ai_listing_summary(result.get("ai_listing_summary"))
+    if text:
+        return text, True
     fallback = deterministic_listing_summary(listing, features)
     return fallback, False
 

@@ -400,6 +400,7 @@ class TestListingSummaryAndDescription:
         assert "AI listing summary" in html
         assert "AI-generated" in html
         assert "rsa-feature-chip" in html
+        assert "AI-generated from listing data" in html
         assert "Verify important details" in html
         desc_html = original_listing_description_html(view.original_listing_description)
         assert "<details" in desc_html
@@ -433,7 +434,36 @@ class TestListingSummaryAndDescription:
         assert view.original_listing_description == "Full remarks here."
         html = ai_listing_summary_html(view)
         assert "AI-generated</span>" not in html  # badge only for LLM text
+        assert "AI-generated from listing data" not in html
+        assert "Summary derived from listing data" in html
         assert "AI summary unavailable" not in html
+
+    def test_ai_summary_html_escapes_xss(self):
+        listing = _listing()
+        view = build_analysis_view(
+            listing,
+            {
+                "match_score_pct": 70,
+                "ai_listing_summary": '<img src=x onerror=alert(1)>Evil',
+            },
+        )
+        html = ai_listing_summary_html(view)
+        assert "<img" not in html
+        assert "&lt;img" in html
+        assert "onerror" in html  # escaped text still contains the word
+        assert "AI-generated from listing data" in html
+
+    def test_resolve_renormalizes_cached_summary(self):
+        listing = _listing()
+        text, is_ai = resolve_ai_listing_summary(
+            listing,
+            {"ai_listing_summary": "# Heading\n\nSafe body text."},
+        )
+        assert is_ai is True
+        assert text is not None
+        assert "# Heading" not in text
+        assert "Safe body text." in text
+        assert text.startswith("Safe") or "Safe body text." in text
 
     def test_both_fields_missing(self):
         listing = {
