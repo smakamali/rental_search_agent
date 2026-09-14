@@ -1821,7 +1821,6 @@ def _main_body() -> None:
             prefs,
             on_search=_landing_search_from_saved_prefs,
             on_ask_in_chat=_open_chat_panel,
-            on_example=_queue_chat_prompt,
         )
 
     _render_chat_panel(client, model)

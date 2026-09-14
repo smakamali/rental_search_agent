@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import html
 import re
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 import streamlit as st
 
@@ -18,42 +17,71 @@ from rental_search_agent.display_format import (
 from rental_search_agent.preference_apply import first_search_required_warnings
 
 # ---------------------------------------------------------------------------
-# Shared example-prompt definitions (landing vs Chat are intentionally distinct)
+# Landing copy and Chat starter prompts
 # ---------------------------------------------------------------------------
 
+LANDING_HERO_LEAD = (
+    "Set your preferences or search naturally in chat, then compare and analyze "
+    "your best matches."
+)
 
-@dataclass(frozen=True)
-class LandingExample:
-    """Central 'Try an example' card."""
+HOW_IT_WORKS_HEADING = "How it works"
+HOW_IT_WORKS_SUBTITLE = (
+    "A simpler way to find, compare, and understand properties."
+)
 
-    key: str
-    label: str
-    prompt: str
-    kind: str
+SAVED_PREFS_HEADING_READY = "Ready to search with your saved preferences"
+SAVED_PREFS_HEADING_MISSING_LOCATION = (
+    "Add a location to search with your saved preferences"
+)
+SAVED_PREFS_HEADING_MISSING_BEDS = (
+    "Add a minimum bedroom count to search with your saved preferences"
+)
+SAVED_PREFS_HEADING_MISSING_BOTH = (
+    "Add a location and minimum bedrooms to get started"
+)
+
+
+class HowItWorksStep(NamedTuple):
+    """One stage in the landing How-it-works workflow."""
+
+    number: str
     icon: str
+    title: str
+    copy: str
+    chips: tuple[str, ...]
 
 
-LANDING_EXAMPLES: tuple[LandingExample, ...] = (
-    LandingExample(
-        key="rsa_landing_ex_structural",
-        label="2-bedroom condo in\nVancouver under $1M",
-        prompt="2-bedroom condo in Vancouver under $1M",
-        kind="structural",
-        icon=":material/search:",
+HOW_IT_WORKS_STEPS: tuple[HowItWorksStep, ...] = (
+    HowItWorksStep(
+        number="1",
+        icon="prefs",
+        title="Set preferences",
+        copy=(
+            "Define the requirements that matter to you or use your saved "
+            "preferences."
+        ),
+        chips=("Location", "Budget", "Bedrooms", "Amenities", "Proximity"),
     ),
-    LandingExample(
-        key="rsa_landing_ex_amenities",
-        label="Parking, balcony,\n2 baths",
-        prompt="Parking, balcony, 2 baths",
-        kind="amenities",
-        icon=":material/auto_awesome:",
+    HowItWorksStep(
+        number="2",
+        icon="compare",
+        title="Compare matches",
+        copy=(
+            "See matched properties in Grid, Table, or Map view and compare "
+            "key details at a glance."
+        ),
+        chips=("Grid", "Table", "Map", "Match score"),
     ),
-    LandingExample(
-        key="rsa_landing_ex_proximity",
-        label="Within 30 minutes\nof downtown, near transit",
-        prompt="Within 30 minutes of downtown, near transit",
-        kind="proximity",
-        icon=":material/location_on:",
+    HowItWorksStep(
+        number="3",
+        icon="analyze",
+        title="Analyze a property",
+        copy=(
+            "Open Analyze to understand why a property matches, where the "
+            "evidence comes from, and what may still be missing."
+        ),
+        chips=("Checklist", "Score breakdown", "Highlights", "Open questions"),
     ),
 )
 
@@ -227,6 +255,31 @@ def saved_preferences_ready_for_search(prefs: Mapping[str, Any] | None) -> bool:
     return not first_search_required_warnings(prefs)
 
 
+def missing_required_search_fields(
+    prefs: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Required first-search fields that are empty: ``location`` and/or ``min_bedrooms``."""
+    missing: list[str] = []
+    prefs = prefs or {}
+    if not str(prefs.get("location") or "").strip():
+        missing.append("location")
+    if not str(prefs.get("min_bedrooms") or "").strip():
+        missing.append("min_bedrooms")
+    return tuple(missing)
+
+
+def landing_saved_prefs_heading(prefs: Mapping[str, Any] | None) -> str:
+    """Section title for the saved-preferences summary, based on missing required fields."""
+    missing = missing_required_search_fields(prefs)
+    if missing == ("location", "min_bedrooms"):
+        return SAVED_PREFS_HEADING_MISSING_BOTH
+    if missing == ("location",):
+        return SAVED_PREFS_HEADING_MISSING_LOCATION
+    if missing == ("min_bedrooms",):
+        return SAVED_PREFS_HEADING_MISSING_BEDS
+    return SAVED_PREFS_HEADING_READY
+
+
 def search_has_run(
     *,
     display_source: Any = None,
@@ -326,7 +379,7 @@ def inject_landing_css() -> None:
             }
             .rsa-landing-lead {
                 font-size: 0.98rem; opacity: 0.72; line-height: 1.45;
-                max-width: 34rem; margin: 0 auto 0.35rem;
+                max-width: 42rem; margin: 0 auto 0.35rem;
             }
             [class*="st-key-rsa_landing_hero_actions"] {
                 max-width: 34rem; margin: 0.55rem auto 0.35rem !important;
@@ -340,9 +393,6 @@ def inject_landing_css() -> None:
             .rsa-landing-section-title {
                 font-size: 1.02rem; font-weight: 650; margin: 1.15rem 0 0.25rem;
             }
-            .rsa-landing-section-help {
-                font-size: 0.88rem; opacity: 0.65; line-height: 1.4; margin: 0 0 0.55rem;
-            }
             .rsa-landing-chip-row {
                 display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.35rem 0 0.2rem;
             }
@@ -353,22 +403,6 @@ def inject_landing_css() -> None:
                 padding: 0.22rem 0.7rem; opacity: 0.92; max-width: 100%;
             }
             .rsa-landing-chip .rsa-landing-svg { flex-shrink: 0; opacity: 0.75; }
-            [class*="st-key-rsa_landing_examples"] {
-                margin: 0.15rem 0 0.35rem !important;
-            }
-            [class*="st-key-rsa_landing_ex_"] button {
-                border-radius: 12px !important;
-                height: auto !important;
-                min-height: 5.4rem !important;
-                white-space: pre-wrap !important;
-                text-align: left !important;
-                justify-content: flex-start !important;
-                align-items: flex-start !important;
-                padding: 0.95rem 1.85rem 0.95rem 0.95rem !important;
-                line-height: 1.35 !important;
-                position: relative;
-            }
-            [class*="st-key-rsa_landing_ex_"] button::after,
             [class*="st-key-rsa_chat_starter_"] button::after {
                 content: "›";
                 position: absolute;
@@ -379,26 +413,63 @@ def inject_landing_css() -> None:
                 opacity: 0.45;
                 pointer-events: none;
             }
+            .rsa-landing-how-heading {
+                font-size: 1.2rem; font-weight: 700; margin: 1.45rem 0 0.25rem;
+            }
+            .rsa-landing-how-sub {
+                font-size: 0.9rem; opacity: 0.65; line-height: 1.4; margin: 0 0 0.75rem;
+            }
             .rsa-landing-how {
                 display: grid;
                 grid-template-columns: repeat(3, minmax(0, 1fr));
-                gap: 1rem 1.25rem;
-                margin: 0.35rem 0 0.6rem;
+                gap: 0.9rem;
+                margin: 0.15rem 0 0.35rem;
+                align-items: stretch;
             }
-            .rsa-landing-how-step { min-width: 0; }
-            .rsa-landing-how-head {
-                display: flex; align-items: center; gap: 0.45rem;
-                font-weight: 650; font-size: 0.95rem; margin-bottom: 0.3rem;
+            .rsa-landing-how-card {
+                display: flex; flex-direction: column; min-width: 0;
+                box-sizing: border-box;
+                border: 1px solid rgba(128,128,128,0.28);
+                border-radius: 14px;
+                padding: 1.15rem 1.1rem 1rem;
+                background: rgba(128,128,128,0.045);
+            }
+            .rsa-landing-how-top {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 0.85rem;
+            }
+            .rsa-landing-how-top .rsa-landing-svg {
+                width: 20px; height: 20px; opacity: 0.7; flex-shrink: 0;
             }
             .rsa-landing-how-num {
                 display: inline-flex; align-items: center; justify-content: center;
-                width: 1.35rem; height: 1.35rem; border-radius: 50%;
-                border: 1px solid rgba(128,128,128,0.4);
-                font-size: 0.72rem; font-weight: 700; flex-shrink: 0;
+                width: 1.7rem; height: 1.7rem; border-radius: 50%;
+                background: var(--primary-color, #ff4b4b);
+                color: #fff;
+                font-size: 0.78rem; font-weight: 700; flex-shrink: 0;
+                line-height: 1;
+            }
+            .rsa-landing-how-title {
+                font-weight: 650; font-size: 1.05rem; line-height: 1.25;
+                margin: 0 0 0.45rem;
             }
             .rsa-landing-how-copy {
-                font-size: 0.86rem; opacity: 0.68; line-height: 1.4;
-                margin: 0; padding-left: 1.8rem;
+                font-size: 0.88rem; opacity: 0.68; line-height: 1.45;
+                margin: 0 0 0.95rem;
+            }
+            .rsa-landing-feature-chips {
+                display: flex; flex-wrap: wrap; gap: 0.35rem;
+                margin-top: auto;
+            }
+            .rsa-landing-feature-chip {
+                display: inline-flex; align-items: center;
+                font-size: 0.75rem; font-weight: 500;
+                border: 1px solid rgba(128,128,128,0.32);
+                border-radius: 999px;
+                padding: 0.18rem 0.6rem;
+                opacity: 0.82;
+                pointer-events: none;
+                max-width: 100%;
             }
             .rsa-landing-footer {
                 text-align: center; font-size: 0.8rem; opacity: 0.45;
@@ -449,14 +520,10 @@ def inject_landing_css() -> None:
                     padding: 1.15rem 0.9rem 0.85rem !important;
                 }
                 [class*="st-key-rsa_landing_hero_actions"]
-                    div[data-testid="stHorizontalBlock"],
-                [class*="st-key-rsa_landing_examples"]
                     div[data-testid="stHorizontalBlock"] {
                     flex-direction: column !important;
                 }
                 [class*="st-key-rsa_landing_hero_actions"]
-                    div[data-testid="stColumn"],
-                [class*="st-key-rsa_landing_examples"]
                     div[data-testid="stColumn"] {
                     width: 100% !important;
                     flex: 1 1 auto !important;
@@ -490,19 +557,18 @@ def render_landing_page(
     *,
     on_search: Callable[[], None],
     on_ask_in_chat: Callable[[], None],
-    on_example: Callable[[str], None],
 ) -> None:
     """Central pre-search welcome panel."""
     ready = saved_preferences_ready_for_search(prefs)
     chips = landing_preference_chips(prefs)
+    saved_prefs_heading = landing_saved_prefs_heading(prefs)
 
     with st.container(key="rsa_landing_panel"):
         st.markdown(
             '<div class="rsa-landing-hero">'
             '<div class="rsa-landing-eyebrow">Welcome to</div>'
             '<div class="rsa-landing-title">Find your next property</div>'
-            '<p class="rsa-landing-lead">Set your preferences, search naturally in chat, '
-            "or start with an example.</p>"
+            f'<p class="rsa-landing-lead">{html.escape(LANDING_HERO_LEAD)}</p>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -527,11 +593,8 @@ def render_landing_page(
                     use_container_width=True,
                 ):
                     on_ask_in_chat()
-        if not ready:
-            st.caption("Complete Location and Beds in Search Preferences to search.")
-
         st.markdown(
-            '<div class="rsa-landing-section-title">Ready to search with your saved preferences</div>',
+            f'<div class="rsa-landing-section-title">{html.escape(saved_prefs_heading)}</div>',
             unsafe_allow_html=True,
         )
         if chips:
@@ -544,25 +607,8 @@ def render_landing_page(
             )
 
         st.markdown(
-            '<div class="rsa-landing-section-title">Try an example</div>'
-            '<p class="rsa-landing-section-help">Click an example below to try it in chat. '
-            "You can always modify it.</p>",
-            unsafe_allow_html=True,
-        )
-        with st.container(key="rsa_landing_examples"):
-            cols = st.columns(3)
-            for col, example in zip(cols, LANDING_EXAMPLES):
-                with col:
-                    if st.button(
-                        example.label,
-                        key=example.key,
-                        icon=example.icon,
-                        use_container_width=True,
-                    ):
-                        on_example(example.prompt)
-
-        st.markdown(
-            '<div class="rsa-landing-section-title">How it works</div>',
+            f'<div class="rsa-landing-how-heading">{html.escape(HOW_IT_WORKS_HEADING)}</div>'
+            f'<p class="rsa-landing-how-sub">{html.escape(HOW_IT_WORKS_SUBTITLE)}</p>',
             unsafe_allow_html=True,
         )
         st.markdown(_how_it_works_html(), unsafe_allow_html=True)
@@ -601,37 +647,23 @@ def _preference_chip_html(kind: str, label: str) -> str:
     )
 
 
+def _feature_chip_html(label: str) -> str:
+    return f'<span class="rsa-landing-feature-chip">{html.escape(label)}</span>'
+
+
 def _how_it_works_html() -> str:
-    steps = (
-        (
-            "1",
-            "prefs",
-            "Set preferences",
-            "Tell us what you're looking for or use your saved preferences.",
-        ),
-        (
-            "2",
-            "compare",
-            "Compare matches",
-            "Get matching properties with key details at a glance.",
-        ),
-        (
-            "3",
-            "analyze",
-            "Analyze a property",
-            "Ask questions, get insights, and make confident decisions.",
-        ),
-    )
     parts = ['<div class="rsa-landing-how">']
-    for num, icon_key, title, copy in steps:
+    for step in HOW_IT_WORKS_STEPS:
+        chips = "".join(_feature_chip_html(label) for label in step.chips)
         parts.append(
-            '<div class="rsa-landing-how-step">'
-            f'<div class="rsa-landing-how-head">'
-            f'<span class="rsa-landing-how-num">{html.escape(num)}</span>'
-            f"{_SVG_ICONS[icon_key]}"
-            f"<span>{html.escape(title)}</span>"
+            '<div class="rsa-landing-how-card">'
+            f'<div class="rsa-landing-how-top">'
+            f'<span class="rsa-landing-how-num">{html.escape(step.number)}</span>'
+            f"{_SVG_ICONS[step.icon]}"
             "</div>"
-            f'<p class="rsa-landing-how-copy">{html.escape(copy)}</p>'
+            f'<div class="rsa-landing-how-title">{html.escape(step.title)}</div>'
+            f'<p class="rsa-landing-how-copy">{html.escape(step.copy)}</p>'
+            f'<div class="rsa-landing-feature-chips">{chips}</div>'
             "</div>"
         )
     parts.append("</div>")

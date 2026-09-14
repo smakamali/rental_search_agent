@@ -1,10 +1,18 @@
 """Unit tests for landing-page helpers, example prompts, and empty-state detection."""
 
+import inspect
+
 from rental_search_agent.streamlit_landing import (
     CHAT_STARTER_PROMPTS,
-    LANDING_EXAMPLES,
+    HOW_IT_WORKS_HEADING,
+    HOW_IT_WORKS_STEPS,
+    HOW_IT_WORKS_SUBTITLE,
+    LANDING_HERO_LEAD,
     _SVG_ICONS,
+    _feature_chip_html,
+    _how_it_works_html,
     _preference_chip_html,
+    inject_landing_css,
     center_panel_kind,
     chat_starter_has_required_criteria,
     format_landing_baths_chip,
@@ -13,6 +21,9 @@ from rental_search_agent.streamlit_landing import (
     format_landing_sqft_chip,
     has_visible_chat_history,
     landing_preference_chips,
+    landing_saved_prefs_heading,
+    missing_required_search_fields,
+    render_landing_page,
     saved_preferences_ready_for_search,
     search_has_run,
     should_render_chat_empty_state,
@@ -148,36 +159,104 @@ class TestChatStarterPrompts:
             assert "skytrain" not in prompt.lower()
 
 
-class TestLandingExamples:
-    def test_first_prompt_is_exact_structural_text(self):
-        assert LANDING_EXAMPLES[0].kind == "structural"
-        assert LANDING_EXAMPLES[0].prompt == "2-bedroom condo in Vancouver under $1M"
+class TestLandingHeroCopy:
+    def test_hero_lead_is_the_approved_sentence(self):
+        assert LANDING_HERO_LEAD == (
+            "Set your preferences or search naturally in chat, then compare "
+            "and analyze your best matches."
+        )
+        assert "example" not in LANDING_HERO_LEAD.lower()
 
-    def test_distinct_from_chat_starters(self):
-        landing_prompts = {ex.prompt for ex in LANDING_EXAMPLES}
-        assert landing_prompts.isdisjoint(set(CHAT_STARTER_PROMPTS))
 
-    def test_second_is_amenities(self):
-        assert LANDING_EXAMPLES[1].kind == "amenities"
-        assert "parking" in LANDING_EXAMPLES[1].prompt.lower()
-        assert "balcony" in LANDING_EXAMPLES[1].prompt.lower()
-        assert "auto_awesome" in LANDING_EXAMPLES[1].icon
+class TestHowItWorks:
+    def test_exactly_three_steps(self):
+        assert len(HOW_IT_WORKS_STEPS) == 3
 
-    def test_third_is_proximity(self):
-        assert LANDING_EXAMPLES[2].kind == "proximity"
-        assert "30 minutes" in LANDING_EXAMPLES[2].prompt
-        assert "transit" in LANDING_EXAMPLES[2].prompt.lower()
-        assert "location_on" in LANDING_EXAMPLES[2].icon
+    def test_titles(self):
+        assert [step.title for step in HOW_IT_WORKS_STEPS] == [
+            "Set preferences",
+            "Compare matches",
+            "Analyze a property",
+        ]
 
-    def test_no_skytrain(self):
-        for example in LANDING_EXAMPLES:
-            blob = f"{example.label} {example.prompt} {example.kind}"
-            assert "skytrain" not in blob.lower()
+    def test_heading_and_subtitle(self):
+        assert HOW_IT_WORKS_HEADING == "How it works"
+        assert HOW_IT_WORKS_SUBTITLE == (
+            "A simpler way to find, compare, and understand properties."
+        )
 
-    def test_amenities_icon_is_not_transit(self):
-        icon = LANDING_EXAMPLES[1].icon.lower()
-        for banned in ("train", "transit", "route", "location", "directions"):
-            assert banned not in icon
+    def test_step1_chips(self):
+        assert HOW_IT_WORKS_STEPS[0].chips == (
+            "Location",
+            "Budget",
+            "Bedrooms",
+            "Amenities",
+            "Proximity",
+        )
+
+    def test_step2_chips(self):
+        assert HOW_IT_WORKS_STEPS[1].chips == (
+            "Grid",
+            "Table",
+            "Map",
+            "Match score",
+        )
+
+    def test_step3_chips(self):
+        assert HOW_IT_WORKS_STEPS[2].chips == (
+            "Checklist",
+            "Score breakdown",
+            "Highlights",
+            "Open questions",
+        )
+
+    def test_step_copy_matches_approved_text(self):
+        assert HOW_IT_WORKS_STEPS[0].copy == (
+            "Define the requirements that matter to you or use your saved "
+            "preferences."
+        )
+        assert HOW_IT_WORKS_STEPS[1].copy == (
+            "See matched properties in Grid, Table, or Map view and compare "
+            "key details at a glance."
+        )
+        assert HOW_IT_WORKS_STEPS[2].copy == (
+            "Open Analyze to understand why a property matches, where the "
+            "evidence comes from, and what may still be missing."
+        )
+
+    def test_html_includes_cards_icons_and_chips(self):
+        out = _how_it_works_html()
+        assert 'class="rsa-landing-how"' in out
+        assert out.count("rsa-landing-how-card") == 3
+        assert _SVG_ICONS["prefs"] in out
+        assert _SVG_ICONS["compare"] in out
+        assert _SVG_ICONS["analyze"] in out
+        for step in HOW_IT_WORKS_STEPS:
+            assert step.title in out
+            assert step.copy in out
+            for chip in step.chips:
+                assert chip in out
+        assert "rsa-landing-feature-chip" in out
+        assert "Try an example" not in out
+
+    def test_feature_chip_html_escapes_text(self):
+        out = _feature_chip_html('<script>alert(1)</script>')
+        assert "<script>" not in out
+        assert "&lt;script&gt;" in out
+
+    def test_render_landing_page_no_longer_takes_on_example(self):
+        params = inspect.signature(render_landing_page).parameters
+        assert "on_example" not in params
+        assert "on_search" in params
+        assert "on_ask_in_chat" in params
+
+    def test_landing_css_drops_central_examples_and_keeps_chat_chevrons(self):
+        source = inspect.getsource(inject_landing_css)
+        assert "rsa_landing_examples" not in source
+        assert "rsa_landing_ex_" not in source
+        assert "rsa_chat_starter_" in source
+        assert "rsa-landing-feature-chip" in source
+        assert "rsa-landing-how-card" in source
 
 
 class TestPreSearchDetection:
@@ -301,4 +380,45 @@ class TestSavedPrefsReady:
                 {"location": "Vancouver", "min_bedrooms": "2"}
             )
             is True
+        )
+
+    def test_missing_fields_match_readiness_rules(self):
+        assert missing_required_search_fields(None) == ("location", "min_bedrooms")
+        assert missing_required_search_fields({}) == ("location", "min_bedrooms")
+        assert missing_required_search_fields({"location": "  "}) == (
+            "location",
+            "min_bedrooms",
+        )
+        assert missing_required_search_fields({"location": "Vancouver"}) == (
+            "min_bedrooms",
+        )
+        assert missing_required_search_fields({"min_bedrooms": "2"}) == ("location",)
+        assert (
+            missing_required_search_fields(
+                {"location": "Vancouver", "min_bedrooms": "2"}
+            )
+            == ()
+        )
+
+    def test_heading_when_ready(self):
+        assert landing_saved_prefs_heading(
+            {"location": "Yaletown", "min_bedrooms": 2}
+        ) == "Ready to search with your saved preferences"
+
+    def test_heading_when_location_missing(self):
+        assert landing_saved_prefs_heading({"min_bedrooms": 2}) == (
+            "Add a location to search with your saved preferences"
+        )
+
+    def test_heading_when_beds_missing(self):
+        assert landing_saved_prefs_heading({"location": "Yaletown"}) == (
+            "Add a minimum bedroom count to search with your saved preferences"
+        )
+
+    def test_heading_when_both_required_fields_missing(self):
+        assert landing_saved_prefs_heading({}) == (
+            "Add a location and minimum bedrooms to get started"
+        )
+        assert landing_saved_prefs_heading(None) == (
+            "Add a location and minimum bedrooms to get started"
         )
