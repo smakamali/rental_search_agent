@@ -13,10 +13,13 @@ from typing import Any, Optional, Sequence
 from rental_search_agent.display_format import (
     criterion_source_help,
     criterion_source_label,
+    format_count,
     format_criterion_comparison,
+    format_duration,
     score_to_pct,
     split_listing_address,
 )
+from rental_search_agent.preference_criteria import AMENITY_FEATURES, match_amenity_feature
 from rental_search_agent.scoring_config import DEFAULT_WEIGHTS, get_score_weights
 
 COMPONENT_ORDER = ("structural", "proximity", "amenity", "semantic")
@@ -64,6 +67,32 @@ STATUS_LABEL = {
 # "generic" is the fallback; "other" is accepted as an alias.
 HIGHLIGHT_ICON_KEYS = ("commute", "space", "budget", "parking", "generic")
 
+# Feature-chip icon keys used by the AI listing summary row.
+SUMMARY_FEATURE_ICON_KEYS = ("beds", "baths", "transit", "parking", "amenity")
+
+MAX_SUMMARY_FEATURES = 5
+
+# Amenity chip priority: only confirmed (met) amenities become chips.
+_SUMMARY_AMENITY_CHIP_LABELS: tuple[tuple[str, str], ...] = (
+    ("balcony", "Balcony"),
+    ("laundry", "In-suite laundry"),
+    ("parking", "Parking"),
+    ("ensuite_bathroom", "Ensuite bathroom"),
+    ("dishwasher", "Dishwasher"),
+    ("gym", "Gym"),
+    ("storage", "Storage"),
+    ("ac", "Air conditioning"),
+    ("pets", "Pet-friendly"),
+    ("elevator", "Elevator"),
+    ("walk_in_closet", "Walk-in closet"),
+    ("furnished", "Furnished"),
+    ("pool", "Pool"),
+    ("patio", "Patio"),
+    ("deck", "Deck"),
+)
+
+_TRANSIT_LOCATION_HINTS = ("nearest transit", "transit station", "skytrain", "train station")
+
 
 @dataclass
 class CriteriaRow:
@@ -89,6 +118,14 @@ class Highlight:
     icon_key: str = "generic"
 
 
+@dataclass(frozen=True)
+class SummaryFeature:
+    """Compact fact chip for the AI listing summary row."""
+
+    label: str
+    icon_key: str = "amenity"
+
+
 @dataclass
 class AnalysisView:
     headline: str
@@ -109,6 +146,10 @@ class AnalysisView:
     open_questions: list[CriteriaRow] = field(default_factory=list)
     unmet: list[CriteriaRow] = field(default_factory=list)
     show_semantic_note: bool = False
+    ai_listing_summary: Optional[str] = None
+    original_listing_description: Optional[str] = None
+    summary_features: list[SummaryFeature] = field(default_factory=list)
+    summary_is_ai_generated: bool = False
 
 
 def match_strength(pct: Optional[int]) -> tuple[str, str]:
@@ -286,6 +327,241 @@ def _semantic_note(components: dict[str, Optional[float]], included: Sequence[st
     return float(sem) < 0.75 and max(float(x) for x in others) >= 0.9
 
 
+_MAX_SUMMARY_CHARS = 900
+
+
+def normalize_ai_listing_summary(raw: Any) -> Optional[str]:
+    """Sanitize listing summary text; return None when empty or unusable.
+
+    Applied on LLM write and again on view resolve so cached/API payloads stay bounded.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    # Drop accidental markdown headings the model may still emit.
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if len(text) > _MAX_SUMMARY_CHARS:
+        text = text[:_MAX_SUMMARY_CHARS].rstrip() + "…"
+    return text
+
+
+def listing_original_description(listing: dict | None) -> Optional[str]:
+    """Canonical original listing remarks/description from the listing model.
+
+    Maps ``Listing.description`` (PublicRemarks / Description). Empty strings become None.
+    """
+    if not listing:
+        return None
+    raw = listing.get("description")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _format_beds_chip_label(listing: dict) -> Optional[str]:
+    display = str(listing.get("bedrooms_display") or "").strip()
+    if display:
+        return f"{display} beds"
+    beds = listing.get("bedrooms")
+    if beds is None or beds == "":
+        return None
+    label = format_count(beds, unavailable="")
+    if not label:
+        return None
+    try:
+        n = float(beds)
+        unit = "bed" if n == 1 else "beds"
+    except (TypeError, ValueError):
+        unit = "beds"
+    return f"{label} {unit}"
+
+
+def _format_baths_chip_label(listing: dict) -> Optional[str]:
+    baths = listing.get("bathrooms")
+    if baths is None or baths == "":
+        return None
+    label = format_count(baths, unavailable="")
+    if not label:
+        return None
+    try:
+        n = float(baths)
+        unit = "bath" if n == 1 else "baths"
+    except (TypeError, ValueError):
+        unit = "baths"
+    return f"{label} {unit}"
+
+
+def _is_transit_location(location: str) -> bool:
+    loc = (location or "").strip().lower()
+    return any(hint in loc for hint in _TRANSIT_LOCATION_HINTS)
+
+
+def _transit_chip_label(listing: dict) -> Optional[str]:
+    prox = listing.get("proximity")
+    if not isinstance(prox, dict) or not prox:
+        return None
+    best_min: Optional[float] = None
+    for rule_key, val in prox.items():
+        location = str(rule_key).split("|", 1)[0].strip()
+        if not _is_transit_location(location):
+            continue
+        if not isinstance(val, dict):
+            continue
+        duration = val.get("duration_min")
+        if duration is None or duration == "":
+            continue
+        try:
+            mins = float(duration)
+        except (TypeError, ValueError):
+            continue
+        if best_min is None or mins < best_min:
+            best_min = mins
+    if best_min is None:
+        return None
+    dur = format_duration(best_min, unavailable="")
+    if not dur:
+        return None
+    return f"{dur} to transit"
+
+
+def _amenity_by_id() -> dict[str, Any]:
+    return {feat.id: feat for feat in AMENITY_FEATURES}
+
+
+def build_summary_features(listing: dict | None) -> list[SummaryFeature]:
+    """Derive up to five compact feature chips from structured listing evidence only.
+
+    Unknown or unsupported features are omitted — never invent chips.
+    """
+    listing = listing or {}
+    features: list[SummaryFeature] = []
+
+    beds = _format_beds_chip_label(listing)
+    if beds:
+        features.append(SummaryFeature(label=beds, icon_key="beds"))
+    baths = _format_baths_chip_label(listing)
+    if baths:
+        features.append(SummaryFeature(label=baths, icon_key="baths"))
+    transit = _transit_chip_label(listing)
+    if transit:
+        features.append(SummaryFeature(label=transit, icon_key="transit"))
+
+    amenity_lookup = _amenity_by_id()
+    for feat_id, chip_label in _SUMMARY_AMENITY_CHIP_LABELS:
+        if len(features) >= MAX_SUMMARY_FEATURES:
+            break
+        feat = amenity_lookup.get(feat_id)
+        if feat is None:
+            continue
+        result = match_amenity_feature(listing, feat)
+        if result.status != "met":
+            continue
+        # Avoid duplicating a beds-style den chip when bedrooms_display already covers it.
+        if feat_id == "den" and listing.get("bedrooms_display"):
+            continue
+        icon = "parking" if feat_id == "parking" else "amenity"
+        features.append(SummaryFeature(label=chip_label, icon_key=icon))
+
+    return features[:MAX_SUMMARY_FEATURES]
+
+
+def deterministic_listing_summary(
+    listing: dict | None,
+    features: Sequence[SummaryFeature] | None = None,
+) -> Optional[str]:
+    """Conservative fallback summary from structured fields when LLM text is unavailable."""
+    listing = listing or {}
+    features = list(features) if features is not None else build_summary_features(listing)
+
+    ptype = (listing.get("house_category") or "").strip() or "property"
+    ptype_l = ptype.lower()
+
+    bed_disp = str(listing.get("bedrooms_display") or "").strip()
+    beds_n = format_count(listing.get("bedrooms"), unavailable="")
+    baths_n = format_count(listing.get("bathrooms"), unavailable="")
+
+    space_bits: list[str] = []
+    if bed_disp:
+        space_bits.append(f"{bed_disp} bedroom")
+    elif beds_n:
+        space_bits.append(f"{beds_n}-bedroom")
+    if baths_n:
+        space_bits.append(f"{baths_n}-bathroom")
+
+    if space_bits:
+        lead = f"{', '.join(space_bits)} {ptype_l}"
+    else:
+        lead = ptype_l
+    sentences = [lead[0].upper() + lead[1:] + "."]
+
+    amenity_labels = [
+        f.label for f in features if f.icon_key in ("amenity", "parking") and f.label
+    ]
+    transit_labels = [f.label for f in features if f.icon_key == "transit"]
+
+    if transit_labels and amenity_labels:
+        am_text = (
+            amenity_labels[0].lower()
+            if len(amenity_labels) == 1
+            else (
+                ", ".join(a.lower() for a in amenity_labels[:-1])
+                + f", and {amenity_labels[-1].lower()}"
+            )
+        )
+        sentences.append(
+            f"Transit access appears strong ({transit_labels[0]}) and the listing includes {am_text}."
+        )
+    elif transit_labels:
+        sentences.append(f"Transit access appears strong ({transit_labels[0]}).")
+    elif amenity_labels:
+        am_text = (
+            amenity_labels[0].lower()
+            if len(amenity_labels) == 1
+            else (
+                ", ".join(a.lower() for a in amenity_labels[:-1])
+                + f", and {amenity_labels[-1].lower()}"
+            )
+        )
+        sentences.append(f"The listing includes {am_text}.")
+
+    if not listing_original_description(listing):
+        sentences.append(
+            "Some listing details are not specified in the available data; "
+            "verify with the listing agent."
+        )
+    elif not amenity_labels and not transit_labels and (beds_n or baths_n or ptype):
+        sentences.append(
+            "Important amenities are not clearly indicated from structured listing fields."
+        )
+
+    text = " ".join(s.strip() for s in sentences if s.strip())
+    return text or None
+
+
+def resolve_ai_listing_summary(
+    listing: dict | None,
+    result: dict | None,
+    features: Sequence[SummaryFeature] | None = None,
+) -> tuple[Optional[str], bool]:
+    """Return (summary_text, is_ai_generated).
+
+    Prefers the LLM field from the analysis result; falls back to a deterministic
+    summary from structured listing data. Never raises.
+    """
+    result = result or {}
+    text = normalize_ai_listing_summary(result.get("ai_listing_summary"))
+    if text:
+        return text, True
+    fallback = deterministic_listing_summary(listing, features)
+    return fallback, False
+
+
 def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
     """Assemble the Analyze UI view-model from a listing + analysis result."""
     listing = listing or {}
@@ -331,6 +607,11 @@ def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
     unmet = [r for r in rows if r.status == "unmet"]
     evaluated = [r for r in rows if r.status != "unknown"]
 
+    summary_features = build_summary_features(listing)
+    ai_summary, summary_is_ai = resolve_ai_listing_summary(
+        listing, result, summary_features
+    )
+
     return AnalysisView(
         headline=headline,
         locality=locality,
@@ -350,6 +631,10 @@ def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
         open_questions=unknown,
         unmet=unmet,
         show_semantic_note=_semantic_note(components, included),
+        ai_listing_summary=ai_summary,
+        original_listing_description=listing_original_description(listing),
+        summary_features=summary_features,
+        summary_is_ai_generated=summary_is_ai,
     )
 
 

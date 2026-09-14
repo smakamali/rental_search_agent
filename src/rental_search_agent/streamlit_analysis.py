@@ -16,6 +16,7 @@ from rental_search_agent.analysis_view import (
     GROUP_TITLES,
     AnalysisView,
     CriteriaRow,
+    SummaryFeature,
     build_analysis_view,
     format_weight_pct,
     listing_property_category,
@@ -158,6 +159,107 @@ def inject_analysis_css() -> None:
             font-size: 0.78rem; font-weight: 650; letter-spacing: 0.04em;
             text-transform: uppercase; opacity: 0.7; margin: 0.55rem 0 0.15rem;
         }
+        /* AI listing summary + original description (scoped) */
+        .rsa-listing-summary {
+            margin: 0.15rem 0 0.35rem;
+        }
+        .rsa-listing-summary-head {
+            display: flex; flex-wrap: wrap; align-items: center;
+            gap: 0.45rem 0.65rem; margin: 0 0 0.55rem;
+        }
+        .rsa-listing-summary-title {
+            font-size: 1.15rem; font-weight: 650; margin: 0; line-height: 1.3;
+        }
+        .rsa-ai-badge {
+            display: inline-flex; align-items: center;
+            font-size: 0.65rem; font-weight: 650; letter-spacing: 0.04em;
+            text-transform: uppercase; opacity: 0.78; white-space: nowrap;
+            border: 1px solid rgba(160,160,160,0.45); border-radius: 999px;
+            padding: 0.12rem 0.5rem; color: inherit;
+        }
+        .rsa-listing-summary-body {
+            font-size: 0.95rem; line-height: 1.45; margin: 0 0 0.7rem;
+            white-space: pre-wrap; overflow-wrap: anywhere;
+        }
+        .rsa-listing-summary-unavailable {
+            font-size: 0.9rem; opacity: 0.72; margin: 0 0 0.7rem; font-style: italic;
+        }
+        .rsa-feature-chip-row {
+            display: flex; flex-wrap: wrap; gap: 0.45rem 0.5rem;
+            margin: 0 0 0.75rem;
+        }
+        .rsa-feature-chip {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            border: 1px solid rgba(32, 178, 160, 0.45);
+            background: rgba(32, 178, 160, 0.08);
+            color: #2dd4bf;
+            border-radius: 8px; padding: 0.28rem 0.55rem;
+            font-size: 0.82rem; font-weight: 600; line-height: 1.2;
+            white-space: nowrap; max-width: 100%;
+        }
+        .rsa-feature-chip-icon {
+            width: 0.95rem; height: 0.95rem; flex-shrink: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .rsa-feature-chip-icon svg {
+            width: 0.95rem; height: 0.95rem; display: block;
+            stroke: currentColor; fill: none; stroke-width: 1.75;
+            stroke-linecap: round; stroke-linejoin: round;
+        }
+        .rsa-feature-chip-label {
+            overflow-wrap: anywhere; white-space: normal;
+        }
+        .rsa-verify-notice {
+            display: flex; align-items: flex-start; gap: 0.45rem;
+            border: 1px solid rgba(212, 168, 75, 0.45);
+            background: rgba(212, 168, 75, 0.08);
+            color: #e0c07a;
+            border-radius: 8px; padding: 0.45rem 0.65rem;
+            font-size: 0.82rem; line-height: 1.35; margin: 0 0 0.85rem;
+        }
+        .rsa-verify-notice-icon {
+            flex-shrink: 0; width: 1rem; height: 1rem; margin-top: 0.1rem;
+            border: 1px solid currentColor; border-radius: 50%;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 0.65rem; font-weight: 700; line-height: 1;
+        }
+        .rsa-orig-desc {
+            border: 1px solid rgba(160,160,160,0.35);
+            border-radius: 8px; padding: 0; margin: 0 0 0.25rem;
+            background: transparent;
+        }
+        .rsa-orig-desc > summary {
+            list-style: none; cursor: pointer;
+            display: flex; flex-wrap: wrap; align-items: center;
+            justify-content: space-between; gap: 0.35rem 0.75rem;
+            padding: 0.65rem 0.8rem; font-weight: 600; font-size: 0.95rem;
+        }
+        .rsa-orig-desc > summary::-webkit-details-marker { display: none; }
+        .rsa-orig-desc > summary::before {
+            content: "▸"; display: inline-block; margin-right: 0.45rem;
+            opacity: 0.75; transition: transform 0.12s ease;
+        }
+        .rsa-orig-desc[open] > summary::before { transform: rotate(90deg); }
+        .rsa-orig-desc > summary:focus-visible {
+            outline: 2px solid currentColor; outline-offset: 2px;
+        }
+        .rsa-orig-desc-hint {
+            font-weight: 500; font-size: 0.8rem; opacity: 0.65;
+        }
+        .rsa-orig-desc-body {
+            padding: 0 0.85rem 0.85rem; font-size: 0.9rem; line-height: 1.45;
+            white-space: pre-wrap; overflow-wrap: anywhere;
+            opacity: 0.92; max-height: none;
+        }
+        .rsa-orig-desc-empty {
+            border: 1px solid rgba(160,160,160,0.28);
+            border-radius: 8px; padding: 0.65rem 0.8rem;
+            opacity: 0.72; margin: 0 0 0.25rem;
+        }
+        .rsa-orig-desc-empty-title {
+            font-weight: 600; font-size: 0.95rem; margin-bottom: 0.25rem;
+        }
+        .rsa-orig-desc-empty-body { font-size: 0.85rem; opacity: 0.85; }
         @media (max-width: 700px) {
             .rsa-crit-row {
                 grid-template-columns: 1.5rem 1fr;
@@ -170,6 +272,7 @@ def inject_analysis_css() -> None:
             .rsa-crit-name { grid-area: name; }
             .rsa-crit-values { grid-area: values; }
             .rsa-badge { grid-area: badge; }
+            .rsa-feature-chip { white-space: normal; }
         }
         </style>
         """,
@@ -356,6 +459,129 @@ def render_listing_metadata(listing: dict) -> None:
                         )
                     else:
                         st.write(value)
+
+
+_FEATURE_CHIP_SVGS = {
+    "beds": (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<path d="M3 12h18v5H3z"/><path d="M5 12V8a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v4"/>'
+        '<path d="M3 17v2M21 17v2"/></svg>'
+    ),
+    "baths": (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<path d="M4 12h16v3a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4v-3z"/>'
+        '<path d="M6 12V7a2 2 0 0 1 2-2h1"/><path d="M8 17v2M16 17v2"/></svg>'
+    ),
+    "transit": (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<rect x="5" y="3" width="14" height="14" rx="2"/>'
+        '<path d="M5 10h14M9 17l-1.5 3M15 17l1.5 3M9 13h.01M15 13h.01"/></svg>'
+    ),
+    "parking": (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<rect x="4" y="3" width="16" height="18" rx="2"/>'
+        '<path d="M9 17V7h4a3 3 0 0 1 0 6H9"/></svg>'
+    ),
+    "amenity": (
+        '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        '<path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.9L12 14.8 7.7 16.5l.8-4.9L5 8.2l4.8-.7L12 3z"/>'
+        '</svg>'
+    ),
+}
+
+
+def _feature_chip_icon_html(icon_key: str) -> str:
+    svg = _FEATURE_CHIP_SVGS.get(icon_key) or _FEATURE_CHIP_SVGS["amenity"]
+    return f'<span class="rsa-feature-chip-icon">{svg}</span>'
+
+
+def _feature_chip_html(feature: SummaryFeature) -> str:
+    label = html.escape(feature.label)
+    return (
+        f'<span class="rsa-feature-chip">'
+        f'{_feature_chip_icon_html(feature.icon_key)}'
+        f'<span class="rsa-feature-chip-label">{label}</span></span>'
+    )
+
+
+def ai_listing_summary_html(view: AnalysisView) -> str:
+    """HTML for the AI listing summary block (testable without Streamlit)."""
+    badge = ""
+    if view.summary_is_ai_generated and view.ai_listing_summary:
+        badge = '<span class="rsa-ai-badge">AI-generated</span>'
+    head = (
+        '<div class="rsa-listing-summary-head">'
+        '<h3 class="rsa-listing-summary-title">AI listing summary</h3>'
+        f"{badge}</div>"
+    )
+    if view.ai_listing_summary:
+        body = (
+            f'<p class="rsa-listing-summary-body">'
+            f"{html.escape(view.ai_listing_summary)}</p>"
+        )
+    else:
+        body = (
+            '<p class="rsa-listing-summary-unavailable" role="status">'
+            "AI summary unavailable</p>"
+        )
+    chips = ""
+    if view.summary_features:
+        chip_html = "".join(_feature_chip_html(f) for f in view.summary_features)
+        chips = f'<div class="rsa-feature-chip-row">{chip_html}</div>'
+    notice = ""
+    if view.ai_listing_summary or view.summary_features:
+        if view.summary_is_ai_generated:
+            notice_text = (
+                "AI-generated from listing data. Verify important details with the "
+                "listing agent."
+            )
+        else:
+            notice_text = (
+                "Summary derived from listing data. Verify important details with the "
+                "listing agent."
+            )
+        notice = (
+            '<div class="rsa-verify-notice" role="note">'
+            '<span class="rsa-verify-notice-icon" aria-hidden="true">i</span>'
+            f"<span>{html.escape(notice_text)}</span></div>"
+        )
+    return (
+        f'<section class="rsa-listing-summary" aria-label="AI listing summary">'
+        f"{head}{body}{chips}{notice}</section>"
+    )
+
+
+def original_listing_description_html(description: Optional[str]) -> str:
+    """HTML for the original listing description expander (testable without Streamlit)."""
+    if not description:
+        return (
+            '<div class="rsa-orig-desc-empty" role="status" '
+            'aria-label="Original listing description not provided.">'
+            '<div class="rsa-orig-desc-empty-title">Original listing description</div>'
+            '<div class="rsa-orig-desc-empty-body">'
+            "Original listing description not provided.</div></div>"
+        )
+    body = html.escape(description)
+    return (
+        '<details class="rsa-orig-desc">'
+        "<summary>"
+        "<span>Original listing description</span>"
+        '<span class="rsa-orig-desc-hint">View source text</span>'
+        "</summary>"
+        f'<div class="rsa-orig-desc-body">{body}</div>'
+        "</details>"
+    )
+
+
+def render_ai_listing_summary(view: AnalysisView) -> None:
+    st.markdown(ai_listing_summary_html(view), unsafe_allow_html=True)
+
+
+def render_original_listing_description(view: AnalysisView) -> None:
+    st.markdown(
+        original_listing_description_html(view.original_listing_description),
+        unsafe_allow_html=True,
+    )
 
 
 def render_match_summary(view: AnalysisView) -> None:
@@ -559,6 +785,9 @@ def render_listing_analysis(
     with st.container():
         render_listing_header(view, listing, on_close=on_close)
         render_listing_metadata(listing)
+        st.divider()
+        render_ai_listing_summary(view)
+        render_original_listing_description(view)
         st.divider()
         render_match_summary(view)
         st.divider()
