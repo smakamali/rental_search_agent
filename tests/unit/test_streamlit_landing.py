@@ -321,6 +321,16 @@ class TestPreSearchDetection:
             == "zero_results"
         )
 
+    def test_in_progress_is_progress_even_with_listings(self):
+        assert (
+            center_panel_kind(
+                listings=[{"id": "a"}],
+                display_source="score",
+                in_progress=True,
+            )
+            == "progress"
+        )
+
 
 class TestVisibleChatHistory:
     def test_system_only_is_empty(self):

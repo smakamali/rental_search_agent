@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 from rental_search_agent.filtering import filter_listings
 from rental_search_agent.geocoding import geocode_proximity_references
@@ -25,6 +25,17 @@ from rental_search_agent.preference_resolution import (
 )
 from rental_search_agent.proximity import enrich_listings_with_proximity
 from rental_search_agent.proximity_parser import parse_proximity_preferences
+from rental_search_agent.search_progress import (
+    PHASE_END,
+    PHASE_SKIP,
+    PHASE_START,
+    STAGE_APPLY_PROX,
+    STAGE_CALC_PROX,
+    STAGE_SCORE,
+    STAGE_SEARCH,
+    ProgressCallback,
+    invoke_progress,
+)
 from rental_search_agent.search_regions import resolve_search_location_input
 
 logger = logging.getLogger(__name__)
@@ -43,7 +54,7 @@ STRUCTURAL_SCRAPE_KEYS = (
 # Sidebar fields that, if changed, cannot be applied in-memory (need a new scrape).
 SCRAPE_PREF_KEYS = STRUCTURAL_SCRAPE_KEYS + ("location", "listing_type")
 
-ProgressCallback = Callable[[str, str, bool], None]
+# Re-exported for callers that imported ProgressCallback from this module.
 
 
 @dataclass
@@ -358,13 +369,14 @@ def _to_dicts(listings: Sequence[Any]) -> list[dict]:
     return out
 
 
-def _emit(progress: ProgressCallback | None, name: str, phase: str, ok: bool = True) -> None:
-    if progress is None:
-        return
-    try:
-        progress(name, phase, ok)
-    except Exception:
-        logger.debug("preference_apply progress callback failed", exc_info=True)
+def _emit(
+    progress: ProgressCallback | None,
+    name: str,
+    phase: str,
+    ok: bool = True,
+    listing_count: int | None = None,
+) -> None:
+    invoke_progress(progress, name, phase, ok=ok, listing_count=listing_count)
 
 
 def apply_search_preferences(
@@ -373,11 +385,17 @@ def apply_search_preferences(
     *,
     structural_prefs: Optional[EffectiveSearchPreferences] = None,
     progress: ProgressCallback | None = None,
+    search_stage: Literal["close", "skip", "omit"] = "omit",
 ) -> ApplyPreferencesResult:
     """Filter, optionally enrich with proximity, and score listings.
 
     ``structural_prefs`` defaults to ``prefs``. Path A Apply uses last-search
     structural criteria here while scoring with the just-saved form prefs.
+
+    ``search_stage`` controls how the UI search stage is closed: ``close`` emits
+    ``search_and_validate`` end after structural validation (fresh scrape),
+    ``skip`` marks that stage not needed (re-rank), and ``omit`` leaves it to
+    the caller (unit tests / callers that already closed the stage).
     """
     current = _to_dicts(listings)
     n_in = len(current)
@@ -396,7 +414,6 @@ def apply_search_preferences(
         struct_src = structural_prefs if structural_prefs is not None else prefs
         criteria_dict = structural_filter_criteria(struct_src)
         if criteria_dict:
-            _emit(progress, "filter_listings", "start")
             struct_ok = False
             try:
                 resp = filter_listings(current, criteria_dict)
@@ -410,20 +427,37 @@ def apply_search_preferences(
                 )
                 warnings.append(f"Could not apply structural filters: {e}")
                 skipped.append("structural")
-            _emit(progress, "filter_listings", "end", struct_ok)
         else:
             skipped.append("structural")
+            struct_ok = True
         n_after_structural = len(current)
+        if search_stage == "close":
+            _emit(
+                progress,
+                STAGE_SEARCH,
+                PHASE_END,
+                struct_ok,
+                listing_count=n_after_structural,
+            )
+        elif search_stage == "skip":
+            _emit(progress, STAGE_SEARCH, PHASE_SKIP)
 
         proximity_text = (prefs.proximity_preferences or "").strip()
         if proximity_text:
-            _emit(progress, "enrich_listings_with_proximity", "start")
-            prox_ok = False
+            _emit(
+                progress,
+                STAGE_CALC_PROX,
+                PHASE_START,
+                listing_count=n_after_structural,
+            )
+            apply_prox = False
             try:
                 proximity_rules = list(parse_proximity_preferences(proximity_text) or [])
                 if not proximity_rules:
                     warnings.append("No proximity rules could be parsed from preferences.")
                     skipped.append("proximity")
+                    _emit(progress, STAGE_CALC_PROX, PHASE_SKIP)
+                    _emit(progress, STAGE_APPLY_PROX, PHASE_SKIP)
                 else:
                     from rental_search_agent.session_runtime import get_capability_policy
 
@@ -431,9 +465,20 @@ def apply_search_preferences(
                     if not policy.can_proximity_rules(len(proximity_rules)):
                         warnings.append(policy.proximity_denied_message())
                         skipped.append("proximity")
+                        _emit(progress, STAGE_CALC_PROX, PHASE_SKIP)
+                        _emit(progress, STAGE_APPLY_PROX, PHASE_SKIP)
                     else:
                         refs = geocode_proximity_references(proximity_rules)
                         current = enrich_listings_with_proximity(current, proximity_rules, refs)
+                        apply_prox = True
+                        _emit(
+                            progress,
+                            STAGE_CALC_PROX,
+                            PHASE_END,
+                            True,
+                            listing_count=len(current),
+                        )
+                        _emit(progress, STAGE_APPLY_PROX, PHASE_START)
                         resp = filter_listings(
                             current,
                             ListingFilterCriteria(),
@@ -446,18 +491,35 @@ def apply_search_preferences(
                         last_sort_by = "proximity"
                         display_source = "enrich"
                         applied = True
-                        prox_ok = True
+                        _emit(
+                            progress,
+                            STAGE_APPLY_PROX,
+                            PHASE_END,
+                            True,
+                            listing_count=len(current),
+                        )
             except ValueError as e:
                 logger.warning("Proximity step skipped: %s", e, exc_info=True)
                 warnings.append(str(e))
                 skipped.append("proximity")
+                if apply_prox:
+                    _emit(progress, STAGE_APPLY_PROX, PHASE_END, False)
+                else:
+                    _emit(progress, STAGE_CALC_PROX, PHASE_END, False)
+                    _emit(progress, STAGE_APPLY_PROX, PHASE_SKIP)
             except Exception as e:
                 logger.warning("Proximity step failed: %s", e, exc_info=True)
                 warnings.append(f"Could not compute proximity: {e}")
                 skipped.append("proximity")
-            _emit(progress, "enrich_listings_with_proximity", "end", prox_ok)
+                if apply_prox:
+                    _emit(progress, STAGE_APPLY_PROX, PHASE_END, False)
+                else:
+                    _emit(progress, STAGE_CALC_PROX, PHASE_END, False)
+                    _emit(progress, STAGE_APPLY_PROX, PHASE_SKIP)
         else:
             skipped.append("proximity")
+            _emit(progress, STAGE_CALC_PROX, PHASE_SKIP)
+            _emit(progress, STAGE_APPLY_PROX, PHASE_SKIP)
         n_after_proximity = len(current)
 
         if prefs.has_score_relevant_prefs() or proximity_rule_dicts:
@@ -469,8 +531,14 @@ def apply_search_preferences(
                     "Preference scoring skipped for guests until a search has been run."
                 )
                 skipped.append("score")
+                _emit(progress, STAGE_SCORE, PHASE_SKIP)
             else:
-                _emit(progress, "score_listings_by_preferences", "start")
+                _emit(
+                    progress,
+                    STAGE_SCORE,
+                    PHASE_START,
+                    listing_count=n_after_proximity,
+                )
                 score_ok = False
                 try:
                     current = score_listings_by_preferences(
@@ -487,9 +555,10 @@ def apply_search_preferences(
                     logger.warning("Scoring step failed: %s", e, exc_info=True)
                     warnings.append(f"Could not score listings: {e}")
                     skipped.append("score")
-                _emit(progress, "score_listings_by_preferences", "end", score_ok)
+                _emit(progress, STAGE_SCORE, PHASE_END, score_ok, listing_count=len(current))
         else:
             skipped.append("score")
+            _emit(progress, STAGE_SCORE, PHASE_SKIP)
         n_after_score = len(current)
 
         current = with_display_rank(current)
