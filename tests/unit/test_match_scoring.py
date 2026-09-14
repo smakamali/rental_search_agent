@@ -8,8 +8,10 @@ from rental_search_agent.match_scoring import (
 )
 from rental_search_agent.models import Listing
 from rental_search_agent.preference_criteria import (
+    AMENITY_FEATURES,
     build_structural_checklist,
     extract_amenity_features,
+    match_amenity_feature,
     score_amenity,
     score_proximity,
     score_structural,
@@ -215,8 +217,6 @@ class TestAmenityExtract:
         assert "gym" in ids
 
     def test_extracts_swimming_pool(self):
-        from rental_search_agent.preference_criteria import match_amenity_feature
-
         feats = extract_amenity_features("balcony, parking, storage, swimming pool")
         ids = {f.id for f in feats}
         assert ids >= {"balcony", "parking", "storage", "pool"}
@@ -230,6 +230,138 @@ class TestAmenityExtract:
             _listing(description="Renovated kitchen with whirlpool tub.", ammenities=""),
             pool,
         ).status == "unmet"
+
+    def test_extracts_new_amenity_vocabulary(self):
+        text = (
+            "washer/dryer in unit, washer/dryer in building, hot tub, sauna, spa, "
+            "fire pit, BBQ, fireplace, luxury, solarium, roof deck, garden, patio, deck, porch, "
+            "walk-in closet, ensuite bathroom, 3-piece bathroom, 4-piece bathroom"
+        )
+        ids = {f.id for f in extract_amenity_features(text)}
+        assert ids >= {
+            "laundry",
+            "laundry_building",
+            "hot_tub",
+            "sauna",
+            "spa",
+            "fire_pit",
+            "bbq",
+            "fireplace",
+            "luxury",
+            "solarium",
+            "roof_deck",
+            "garden",
+            "patio",
+            "deck",
+            "porch",
+            "walk_in_closet",
+            "ensuite_bathroom",
+            "bath_3_piece",
+            "bath_4_piece",
+        }
+
+    def test_closet_and_bathroom_amenity_synonyms(self):
+        assert {f.id for f in extract_amenity_features("walk in closet")} == {"walk_in_closet"}
+        assert {f.id for f in extract_amenity_features("WIC")} == {"walk_in_closet"}
+        assert {f.id for f in extract_amenity_features("master ensuite")} == {"ensuite_bathroom"}
+        assert {f.id for f in extract_amenity_features("ensuite")} == {"ensuite_bathroom"}
+        assert {f.id for f in extract_amenity_features("ensuite laundry")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("3pc bath")} == {"bath_3_piece"}
+        assert {f.id for f in extract_amenity_features("four-piece bathroom")} == {"bath_4_piece"}
+        assert "bath_4_piece" not in {f.id for f in extract_amenity_features("full bathroom")}
+        both = {f.id for f in extract_amenity_features("4-piece ensuite")}
+        assert both == {"ensuite_bathroom", "bath_4_piece"}
+        assert "bath_3_piece" not in {f.id for f in extract_amenity_features("4-piece bathroom")}
+        assert "bath_4_piece" not in {f.id for f in extract_amenity_features("3-piece bathroom")}
+
+        closet = next(f for f in AMENITY_FEATURES if f.id == "walk_in_closet")
+        ensuite = next(f for f in AMENITY_FEATURES if f.id == "ensuite_bathroom")
+        three = next(f for f in AMENITY_FEATURES if f.id == "bath_3_piece")
+        four = next(f for f in AMENITY_FEATURES if f.id == "bath_4_piece")
+        listing = _listing(
+            description="Primary bedroom with walk-in closet and a 4 piece ensuite.",
+            ammenities="",
+        )
+        laundry_only = _listing(description="Bright suite with ensuite laundry.", ammenities="")
+        assert match_amenity_feature(listing, closet).status == "met"
+        assert match_amenity_feature(listing, ensuite).status == "met"
+        assert match_amenity_feature(listing, four).status == "met"
+        assert match_amenity_feature(listing, three).status == "unmet"
+        assert match_amenity_feature(laundry_only, ensuite).status == "unmet"
+
+    def test_laundry_in_unit_vs_building_extract(self):
+        assert {f.id for f in extract_amenity_features("washer/dryer in unit")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("in-suite laundry")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("washer/dryer in building")} == {
+            "laundry_building"
+        }
+        assert {f.id for f in extract_amenity_features("washer/dryer in the building")} == {
+            "laundry_building"
+        }
+        assert {f.id for f in extract_amenity_features("washer and dryer in the building")} == {
+            "laundry_building"
+        }
+        assert {f.id for f in extract_amenity_features("shared laundry")} == {"laundry_building"}
+        both = {f.id for f in extract_amenity_features("in-suite laundry and laundry in building")}
+        assert both == {"laundry", "laundry_building"}
+
+    def test_laundry_in_unit_vs_building_listing_match(self):
+        in_unit = next(f for f in AMENITY_FEATURES if f.id == "laundry")
+        in_building = next(f for f in AMENITY_FEATURES if f.id == "laundry_building")
+        suite = _listing(description="Bright home with in-suite laundry.", ammenities="")
+        shared = _listing(description="Coin laundry in the building.", ammenities="Shared Laundry")
+        the_building = _listing(
+            description="Unit has washer/dryer in the building.",
+            ammenities="",
+        )
+        and_the_building = _listing(
+            description="Washer and dryer in the building available.",
+            ammenities="",
+        )
+        generic = _listing(description="Includes washer and dryer.", ammenities="")
+        assert match_amenity_feature(suite, in_unit).status == "met"
+        assert match_amenity_feature(suite, in_building).status == "unmet"
+        assert match_amenity_feature(shared, in_unit).status == "unmet"
+        assert match_amenity_feature(shared, in_building).status == "met"
+        assert match_amenity_feature(the_building, in_unit).status == "unmet"
+        assert match_amenity_feature(the_building, in_building).status == "met"
+        assert match_amenity_feature(and_the_building, in_unit).status == "unmet"
+        assert match_amenity_feature(and_the_building, in_building).status == "met"
+        assert match_amenity_feature(generic, in_unit).status == "met"
+        assert match_amenity_feature(generic, in_building).status == "unmet"
+
+    def test_patio_deck_porch_are_not_balcony(self):
+        assert {f.id for f in extract_amenity_features("patio")} == {"patio"}
+        assert {f.id for f in extract_amenity_features("private deck")} == {"deck"}
+        assert {f.id for f in extract_amenity_features("covered porch")} == {"porch"}
+        assert {f.id for f in extract_amenity_features("balcony")} == {"balcony"}
+
+    def test_roof_deck_does_not_also_extract_generic_deck_or_patio(self):
+        assert {f.id for f in extract_amenity_features("roof deck")} == {"roof_deck"}
+        assert {f.id for f in extract_amenity_features("rooftop patio")} == {"roof_deck"}
+        deck = next(f for f in AMENITY_FEATURES if f.id == "deck")
+        patio = next(f for f in AMENITY_FEATURES if f.id == "patio")
+        roof = _listing(description="Huge roof deck with city views.", ammenities="")
+        assert match_amenity_feature(roof, deck).status == "met"
+        assert match_amenity_feature(roof, patio).status == "unmet"
+
+    def test_synonyms_and_false_positives(self):
+        assert {f.id for f in extract_amenity_features("jacuzzi and steam room")} >= {"hot_tub", "sauna"}
+        assert {f.id for f in extract_amenity_features("sunroom and verandah")} >= {"solarium", "porch"}
+        assert {f.id for f in extract_amenity_features("community garden")} == {"garden"}
+        assert "spa" not in {f.id for f in extract_amenity_features("lots of space")}
+        assert "fireplace" not in {f.id for f in extract_amenity_features("fire pit")}
+        assert "fire_pit" not in {f.id for f in extract_amenity_features("gas fireplace")}
+        luxury = next(f for f in AMENITY_FEATURES if f.id == "luxury")
+        vinyl = _listing(description="New luxury vinyl plank flooring throughout.", ammenities="")
+        upscale = _listing(description="Upscale finishes in a luxury building.", ammenities="")
+        vinyl_and_amenities = _listing(
+            description="luxury vinyl flooring and luxury amenities throughout.",
+            ammenities="",
+        )
+        assert match_amenity_feature(vinyl, luxury).status == "unmet"
+        assert match_amenity_feature(upscale, luxury).status == "met"
+        assert match_amenity_feature(vinyl_and_amenities, luxury).status == "met"
 
 
 class TestScoreListings:

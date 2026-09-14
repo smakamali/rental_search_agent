@@ -96,6 +96,10 @@ UX
 
 [] In the analyze section, add highlights generated from the listing description that are relevant to the user's preferences.
 
+[] Add export to CSV/Excel button to the results panel.
+
+[] Add progress status to the results panel when work is in progress in any of the steps.
+
 ================================================================================
 BUGS (PROXIMITY / RANKING)
 ================================================================================
@@ -119,6 +123,40 @@ BUGS (PROXIMITY / RANKING)
     Transient run failure/timeout: retry with exponential backoff (APIFY_MAX_RETRIES / APIFY_RETRY_BASE_SECONDS).
     Partial fetchDetails (SUCCEEDED but missing descriptions): WARNING only, no re-scrape.
 
+[x] Add support for more amenities.
+    Supported (preference_criteria.AMENITY_FEATURES):
+        - Parking
+        - Balcony
+        - Gym
+        - Swimming pool
+        - Pet-friendly
+        - Washer/dryer in unit
+        - Washer/dryer in building
+        - Dishwasher
+        - Air conditioning
+        - Storage
+        - EV charger
+        - Elevator
+        - Furnished
+        - Den
+        - Walk-in closet
+        - Ensuite bathroom
+        - 3-piece bathroom
+        - 4-piece bathroom
+        - Hot tub
+        - Sauna
+        - Spa
+        - Fire pit
+        - BBQ
+        - Fireplace
+        - Luxury
+        - Solarium
+        - Roof deck
+        - Garden
+        - Patio
+        - Deck
+        - Porch
+
 ================================================================================
 SESSION AND AUTH
 ================================================================================
@@ -128,6 +166,9 @@ SESSION AND AUTH
     search credits, SQLite prefs for signed-in users, FileStore for local/CLI/dev.
     Optional AUTH_ALLOWLIST_ENABLED / AUTH_ALLOWLIST. CapabilityPolicy gates
     scrapes, multi-city, and proximity rule count for guests.
+
+[] Add the ability to save search queries and results to a database.
+
 
 ================================================================================
 TESTING AND MCP
