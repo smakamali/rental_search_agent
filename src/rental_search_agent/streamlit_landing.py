@@ -543,10 +543,15 @@ def inject_landing_css() -> None:
 
 def render_zero_results() -> None:
     """Post-search empty state. Must not look like the first-use welcome page."""
+    # Shared results toolbar (Export disabled) so the control stays discoverable.
+    from rental_search_agent.streamlit_results import render_results_toolbar
+
+    render_results_toolbar([], export_enabled=False)
     st.markdown(
         '<div class="rsa-landing-zero">'
         "<p><strong>No matching properties found.</strong></p>"
         "<p>Adjust Search Preferences or try another search in chat.</p>"
+        "<p>Export is unavailable until there are search results.</p>"
         "</div>",
         unsafe_allow_html=True,
     )

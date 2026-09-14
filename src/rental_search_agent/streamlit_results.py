@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 try:
     import folium
@@ -584,7 +587,7 @@ def inject_results_css() -> None:
         .rsa-results-header { margin-bottom: 0.35rem; min-width: 0; }
         .rsa-results-title { font-size: 1.35rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
         .rsa-results-meta { opacity: 0.72; font-size: 0.9rem; margin-top: 0.15rem; overflow-wrap: anywhere; }
-        /* Flush-right Grid/Table/Map and Price/Match/Rank toggles.
+        /* Flush-right Grid/Table/Map, Export, and Price/Match/Rank toggles.
            Target the control itself — the st-key wrapper is already full-width. */
         [class*="st-key-results_view"] [data-testid="stSegmentedControl"],
         [class*="st-key-map_label_mode"] [data-testid="stSegmentedControl"] {
@@ -597,6 +600,10 @@ def inject_results_css() -> None:
             margin-left: auto !important;
             width: fit-content !important;
             max-width: 100% !important;
+        }
+        [class*="st-key-export_disabled"] button,
+        [class*="st-key-"] [data-testid="stPopover"] > button {
+            width: 100% !important;
         }
         .rsa-card-photo {
             position: relative;
@@ -1051,12 +1058,149 @@ def _render_results_grid(listings: list[dict]) -> None:
                 _render_grid_card(listing, row_start + offset)
 
 
-def _render_results_header(listings: list[dict]) -> None:
-    """Shared Search results header with count and Grid/Table/Map selector."""
+def _invalidate_prepared_export_if_stale(cache_key: str) -> None:
+    prepared = st.session_state.get("export_prepared")
+    if not isinstance(prepared, dict):
+        return
+    if prepared.get("cache_key") != cache_key:
+        st.session_state.pop("export_prepared", None)
+        st.session_state.pop("export_error", None)
+
+
+def render_export_control(listings: list[dict], *, enabled: bool = True) -> None:
+    """Page-level Export popover shared by Grid, Table, and Map."""
+    from rental_search_agent.export_results import (
+        available_export_scopes,
+        export_cache_key,
+        format_active_filters,
+        prepare_export,
+        resolve_export_listings,
+        successful_analysis_by_id,
+    )
+
+    prefs = st.session_state.get("user_preferences") or {}
+    filters_text = format_active_filters(prefs)
+    sort_by = st.session_state.get("last_sort_by")
+    sort_label = format_sort_by_label(sort_by) or ordered_by_caption(sort_by)
+    analysis_by_id = successful_analysis_by_id(st.session_state.get("analysis_result") or {})
+
+    scopes = available_export_scopes(
+        filtered_count=len(listings),
+        selected_count=0,
+        page_count=None,
+        pagination_enabled=False,
+        selection_enabled=False,
+    )
+    default_scope = scopes[0].scope if scopes else "filtered"
+    if "export_scope" not in st.session_state:
+        st.session_state["export_scope"] = default_scope
+    if "export_format" not in st.session_state:
+        st.session_state["export_format"] = "xlsx"
+
+    help_text = (
+        "Export is unavailable because there are no search results."
+        if not enabled or not listings
+        else "Download the current filtered results as Excel or CSV."
+    )
+    popover_label = "⬇ Export"
+    # Streamlit popover has no native disabled state; gate the trigger button.
+    if not enabled or not listings:
+        st.button(
+            popover_label,
+            key="export_disabled",
+            disabled=True,
+            help=help_text,
+            use_container_width=True,
+        )
+        return
+
+    with st.popover(popover_label, help=help_text, use_container_width=True):
+        st.caption("Results to export")
+        scope_labels = {opt.scope: opt.label for opt in scopes}
+        scope_keys = [opt.scope for opt in scopes]
+        scope = st.radio(
+            "Results to export",
+            options=scope_keys,
+            format_func=lambda s: scope_labels.get(s, s),
+            key="export_scope",
+            label_visibility="collapsed",
+        )
+        st.caption("Format")
+        fmt = st.radio(
+            "Format",
+            options=["xlsx", "csv"],
+            format_func=lambda v: "Excel (.xlsx)" if v == "xlsx" else "CSV (.csv)",
+            key="export_format",
+            label_visibility="collapsed",
+        )
+        export_listings = resolve_export_listings(
+            scope=scope,
+            filtered_listings=listings,
+        )
+        cache_key = export_cache_key(
+            listings=export_listings,
+            scope=scope,
+            format=fmt,
+            sort_by=sort_by,
+            filters_text=filters_text,
+            analysis_ids=analysis_by_id.keys(),
+        )
+        _invalidate_prepared_export_if_stale(cache_key)
+
+        if st.button("Prepare export", type="primary", key="export_prepare"):
+            st.session_state.pop("export_error", None)
+            try:
+                with st.spinner("Preparing export…"):
+                    prepared = prepare_export(
+                        export_listings,
+                        scope=scope,
+                        format=fmt,
+                        sort_by=sort_by,
+                        sort_label=sort_label,
+                        filters_text=filters_text,
+                        analysis_by_id=analysis_by_id,
+                    )
+                st.session_state["export_prepared"] = {
+                    "cache_key": prepared.cache_key,
+                    "filename": prepared.filename,
+                    "mime_type": prepared.mime_type,
+                    "data": prepared.data,
+                    "row_count": prepared.row_count,
+                    "size_label": prepared.size_label,
+                }
+            except Exception as exc:
+                logger.exception("Export preparation failed: %s", exc)
+                st.session_state.pop("export_prepared", None)
+                st.session_state["export_error"] = (
+                    "We couldn’t prepare the export. Please try again."
+                )
+
+        err = st.session_state.get("export_error")
+        if err:
+            st.error(err)
+
+        prepared = st.session_state.get("export_prepared")
+        if isinstance(prepared, dict) and prepared.get("cache_key") == cache_key:
+            st.caption(
+                f"{prepared.get('filename')} · {prepared.get('size_label')} · "
+                f"{prepared.get('row_count')} properties"
+            )
+            st.download_button(
+                label="Download",
+                data=prepared["data"],
+                file_name=prepared["filename"],
+                mime=prepared["mime_type"],
+                key="export_download",
+                use_container_width=True,
+            )
+
+
+def _render_results_header(listings: list[dict], *, export_enabled: bool = True) -> None:
+    """Shared Search results header with count, Grid/Table/Map, and Export."""
     count = results_count_label(len(listings))
     sort_caption = ordered_by_caption(st.session_state.get("last_sort_by"))
     meta = count if not sort_caption else f"{count} · {sort_caption}"
-    left, right = st.columns([5, 1.35], vertical_alignment="top")
+    left, view_col, export_col = st.columns([4.2, 1.55, 1.05], vertical_alignment="top")
     with left:
         st.markdown(
             f'<div class="rsa-results-header">'
@@ -1065,7 +1209,7 @@ def _render_results_header(listings: list[dict]) -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
-    with right:
+    with view_col:
         st.segmented_control(
             "Results view",
             options=list(WIDGET_RESULTS_VIEWS),
@@ -1073,6 +1217,8 @@ def _render_results_header(listings: list[dict]) -> None:
             key="results_view",
             label_visibility="collapsed",
         )
+    with export_col:
+        render_export_control(listings, enabled=export_enabled and bool(listings))
 
 
 def _listings_cache_key(listings: list[dict]) -> str:
@@ -1364,13 +1510,18 @@ def _render_map_panel(listings: list[dict]) -> None:
     _render_map_summaries(listings)
 
 
+def render_results_toolbar(listings: list[dict], *, export_enabled: bool = True) -> None:
+    """Public results toolbar: title, count, view switcher, Export."""
+    inject_results_css()
+    prepare_results_widget_state(st.session_state)
+    _render_results_header(listings, export_enabled=export_enabled)
+
+
 def render_search_results(listings: list[dict]) -> None:
     """Render the shared header and exactly one of Grid, Table, or Map."""
     if not listings:
         return
-    inject_results_css()
-    prepare_results_widget_state(st.session_state)
-    _render_results_header(listings)
+    render_results_toolbar(listings, export_enabled=True)
     view = current_results_view(st.session_state)
     if view == "table":
         _render_results_table(listings)
