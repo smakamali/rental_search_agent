@@ -74,7 +74,13 @@ _LAUNDRY_BUILDING_PHRASES = (
     "washer/dryer in building",
     "washer / dryer in building",
     "washer and dryer in building",
+    "washer/dryer in the building",
+    "washer / dryer in the building",
+    "washer and dryer in the building",
     "w/d in building",
+    "w/d in the building",
+    "shared washer",
+    "shared dryer",
 )
 
 _ROOF_OUTDOOR_PHRASES = (
@@ -153,12 +159,7 @@ AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature(
         "laundry_building",
         "Washer/dryer in building",
-        _LAUNDRY_BUILDING_PHRASES
-        + (
-            "washer/dryer in the building",
-            "shared washer",
-            "shared dryer",
-        ),
+        _LAUNDRY_BUILDING_PHRASES,
     ),
     AmenityFeature("dishwasher", "Dishwasher", ("dishwasher",)),
     AmenityFeature("ac", "Air conditioning", ("air conditioning", "a/c", " aircon", "central air", "air conditioner", "Air Conditioner", "A/C")),
@@ -319,12 +320,15 @@ def _amenity_text_matches(
         return True
     if not feature.generic_patterns:
         return False
-    skip_generic = any(ex in text for ex in feature.exclude_patterns)
+    # Strip excluded phrases so they don't suppress a separate valid generic hit
+    # elsewhere in the same text (e.g. "luxury vinyl" + "luxury amenities").
+    exclusions = feature.exclude_patterns
     if for_extract:
-        skip_generic = skip_generic or any(ex in text for ex in feature.extract_exclude_patterns)
-    if skip_generic:
-        return False
-    return any(pat in text for pat in feature.generic_patterns)
+        exclusions = exclusions + feature.extract_exclude_patterns
+    scrubbed = text
+    for exclusion in exclusions:
+        scrubbed = scrubbed.replace(exclusion, " ")
+    return any(pat in scrubbed for pat in feature.generic_patterns)
 
 
 def extract_amenity_features(qualitative_text: str) -> List[AmenityFeature]:

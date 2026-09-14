@@ -261,6 +261,12 @@ class TestAmenityExtract:
         assert {f.id for f in extract_amenity_features("washer/dryer in building")} == {
             "laundry_building"
         }
+        assert {f.id for f in extract_amenity_features("washer/dryer in the building")} == {
+            "laundry_building"
+        }
+        assert {f.id for f in extract_amenity_features("washer and dryer in the building")} == {
+            "laundry_building"
+        }
         assert {f.id for f in extract_amenity_features("shared laundry")} == {"laundry_building"}
         both = {f.id for f in extract_amenity_features("in-suite laundry and laundry in building")}
         assert both == {"laundry", "laundry_building"}
@@ -270,11 +276,23 @@ class TestAmenityExtract:
         in_building = next(f for f in AMENITY_FEATURES if f.id == "laundry_building")
         suite = _listing(description="Bright home with in-suite laundry.", ammenities="")
         shared = _listing(description="Coin laundry in the building.", ammenities="Shared Laundry")
+        the_building = _listing(
+            description="Unit has washer/dryer in the building.",
+            ammenities="",
+        )
+        and_the_building = _listing(
+            description="Washer and dryer in the building available.",
+            ammenities="",
+        )
         generic = _listing(description="Includes washer and dryer.", ammenities="")
         assert match_amenity_feature(suite, in_unit).status == "met"
         assert match_amenity_feature(suite, in_building).status == "unmet"
         assert match_amenity_feature(shared, in_unit).status == "unmet"
         assert match_amenity_feature(shared, in_building).status == "met"
+        assert match_amenity_feature(the_building, in_unit).status == "unmet"
+        assert match_amenity_feature(the_building, in_building).status == "met"
+        assert match_amenity_feature(and_the_building, in_unit).status == "unmet"
+        assert match_amenity_feature(and_the_building, in_building).status == "met"
         assert match_amenity_feature(generic, in_unit).status == "met"
         assert match_amenity_feature(generic, in_building).status == "unmet"
 
@@ -303,8 +321,13 @@ class TestAmenityExtract:
         luxury = next(f for f in AMENITY_FEATURES if f.id == "luxury")
         vinyl = _listing(description="New luxury vinyl plank flooring throughout.", ammenities="")
         upscale = _listing(description="Upscale finishes in a luxury building.", ammenities="")
+        vinyl_and_amenities = _listing(
+            description="luxury vinyl flooring and luxury amenities throughout.",
+            ammenities="",
+        )
         assert match_amenity_feature(vinyl, luxury).status == "unmet"
         assert match_amenity_feature(upscale, luxury).status == "met"
+        assert match_amenity_feature(vinyl_and_amenities, luxury).status == "met"
 
 
 class TestScoreListings:
