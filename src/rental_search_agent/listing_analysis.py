@@ -1,4 +1,8 @@
-"""LLM-based analysis of a single listing against user preferences: match score and key matches/gaps."""
+"""LLM-based analysis of a single listing against user preferences.
+
+Returns multi-metric match score plus narrative fields: key_matches, key_gaps,
+and ai_listing_summary (neutral listing summary, not a preference comparison).
+"""
 
 import json
 import logging
@@ -20,18 +24,46 @@ logger = logging.getLogger(__name__)
 
 _MAX_MATCHES = 7
 _MAX_GAPS = 7
+_MAX_SUMMARY_CHARS = 900
 
 _ANALYSIS_SYSTEM_PROMPT = (
     "You are an assistant that compares a rental listing to the user's stated preferences. "
-    "Return a JSON object with exactly two keys: "
+    "Return a JSON object with exactly three keys: "
     "'key_matches' (array of short strings: aspects of the listing that satisfy the user's preferences), "
-    "and 'key_gaps' (array of short strings: aspects the user wants but the listing lacks or does not mention). "
-    "Be concise and factual; only include points clearly supported by the listing text or clearly missing. "
+    "'key_gaps' (array of short strings: aspects the user wants but the listing lacks or does not mention), "
+    "and 'ai_listing_summary' (a single plain-language string: a concise, neutral, decision-oriented "
+    "summary of the listing itself — not a preference comparison). "
+    "For ai_listing_summary: write approximately 2–4 sentences covering property type, bedrooms and "
+    "bathrooms, location or transit strengths, important amenities, notable missing features, and "
+    "relevant trade-offs or uncertainties. Do not use promotional language. Distinguish facts from "
+    "inference with cautious wording such as 'appears', 'is not specified', or 'verify' when evidence "
+    "is incomplete. Never invent facts. Do not repeat price or address unless contextually useful. "
+    "Do not compare the listing against the user's criteria in ai_listing_summary. Do not include "
+    "markdown headings. Acknowledge important unknowns explicitly. "
+    "For key_matches and key_gaps: be concise and factual; only include points clearly supported by "
+    "the listing text or clearly missing. "
     "If the listing text mentions an open house date, compare it to today's date (given above the listing): "
     "only list it as a key match if the date is today or in the future; if it has already passed, do not mention "
     "it as a match, and do not treat a missing/past open house as a gap unless the user specifically asked for one. "
     "Return only the JSON object with no explanation."
 )
+
+
+def _normalize_ai_listing_summary(raw: Any) -> Optional[str]:
+    """Sanitize the LLM listing summary; return None when empty or unusable."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    # Drop accidental markdown headings the model may still emit.
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if len(text) > _MAX_SUMMARY_CHARS:
+        text = text[:_MAX_SUMMARY_CHARS].rstrip() + "…"
+    return text
 
 
 def analyze_listing_against_preferences(
@@ -53,7 +85,8 @@ def analyze_listing_against_preferences(
     numeric score (structured effective prefs drive scoring).
 
     Returns:
-        Dict with: match_score_pct, score_breakdown, key_matches, key_gaps.
+        Dict with: match_score_pct, score_breakdown, key_matches, key_gaps,
+        ai_listing_summary (optional plain-language listing summary).
     """
     _ = score_query_text  # legacy callers may still pass this; multi-metric path supersedes it
     preferences_text = (preferences_text or "").strip()
@@ -101,6 +134,12 @@ def analyze_listing_against_preferences(
     if not narrative_prefs.strip():
         narrative_prefs = "User search preferences (structured)."
 
+    key_matches: list[str] = []
+    key_gaps: list[str] = []
+    ai_listing_summary: Optional[str] = None
+
+    # Narrative LLM is optional: scores alone are enough to render Analysis.
+    # Failures are logged; the UI falls back to a deterministic summary.
     client, model = get_llm_client_and_model()
     user_content = (
         f"{current_date_context().strip()}\n\nListing:\n{blob}\n\nUser preferences:\n{narrative_prefs}"
@@ -118,29 +157,30 @@ def analyze_listing_against_preferences(
             response_format={"type": "json_object"},
             temperature=0,
         )
+        content = (response.choices[0].message.content or "{}").strip()
+        try:
+            raw = json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.warning("Listing analysis invalid JSON: %r (%s)", content, e)
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        matches_raw = raw.get("key_matches")
+        gaps_raw = raw.get("key_gaps")
+        if not isinstance(matches_raw, list):
+            matches_raw = []
+        if not isinstance(gaps_raw, list):
+            gaps_raw = []
+        key_matches = [str(x).strip() for x in matches_raw if str(x).strip()][:_MAX_MATCHES]
+        key_gaps = [str(x).strip() for x in gaps_raw if str(x).strip()][:_MAX_GAPS]
+        ai_listing_summary = _normalize_ai_listing_summary(raw.get("ai_listing_summary"))
     except Exception as e:
         logger.warning("Listing analysis LLM call failed: %s", e, exc_info=True)
-        raise ValueError(f"Failed to analyze listing: {e}") from e
-
-    content = (response.choices[0].message.content or "{}").strip()
-    try:
-        raw = json.loads(content)
-    except json.JSONDecodeError as e:
-        logger.warning("Listing analysis invalid JSON: %r", content)
-        raise ValueError(f"Analysis returned invalid JSON: {e}") from e
-
-    key_matches = raw.get("key_matches")
-    key_gaps = raw.get("key_gaps")
-    if not isinstance(key_matches, list):
-        key_matches = []
-    if not isinstance(key_gaps, list):
-        key_gaps = []
-    key_matches = [str(x).strip() for x in key_matches if str(x).strip()][:_MAX_MATCHES]
-    key_gaps = [str(x).strip() for x in key_gaps if str(x).strip()][:_MAX_GAPS]
 
     return {
         "match_score_pct": match_score_pct,
         "score_breakdown": score_breakdown,
         "key_matches": key_matches,
         "key_gaps": key_gaps,
+        "ai_listing_summary": ai_listing_summary,
     }

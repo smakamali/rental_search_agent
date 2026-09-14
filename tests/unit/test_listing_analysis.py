@@ -9,8 +9,15 @@ from rental_search_agent.listing_analysis import analyze_listing_against_prefere
 from rental_search_agent.preference_resolution import EffectiveSearchPreferences
 
 
-def _make_llm_response(key_matches: list, key_gaps: list) -> MagicMock:
-    content = json.dumps({"key_matches": key_matches, "key_gaps": key_gaps})
+def _make_llm_response(
+    key_matches: list,
+    key_gaps: list,
+    ai_listing_summary: str | None = None,
+) -> MagicMock:
+    payload = {"key_matches": key_matches, "key_gaps": key_gaps}
+    if ai_listing_summary is not None:
+        payload["ai_listing_summary"] = ai_listing_summary
+    content = json.dumps(payload)
     mock_message = MagicMock()
     mock_message.content = content
     mock_choice = MagicMock()
@@ -20,10 +27,12 @@ def _make_llm_response(key_matches: list, key_gaps: list) -> MagicMock:
     return mock_resp
 
 
-def _patch_llm(key_matches=None, key_gaps=None):
+def _patch_llm(key_matches=None, key_gaps=None, ai_listing_summary=None):
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _make_llm_response(
-        key_matches or [], key_gaps or []
+        key_matches or [],
+        key_gaps or [],
+        ai_listing_summary=ai_listing_summary,
     )
     return patch(
         "rental_search_agent.listing_analysis.get_llm_client_and_model",
@@ -113,3 +122,79 @@ class TestAnalyzeMultiMetricScore:
             )
         assert result["key_matches"] == ["Has balcony"]
         assert result["key_gaps"] == ["No gym"]
+
+    def test_returns_ai_listing_summary_from_llm(self):
+        listing = _sample_listing()
+        prefs = EffectiveSearchPreferences(budget_max=3000)
+        summary = (
+            "Well-located 2-bedroom apartment with a balcony. "
+            "No gym is indicated."
+        )
+        with patch("rental_search_agent.match_scoring.embed_texts"), _patch_llm(
+            ai_listing_summary=summary
+        ):
+            result = analyze_listing_against_preferences(
+                listing, "balcony", effective_prefs=prefs
+            )
+        assert result["ai_listing_summary"] == summary
+
+    def test_llm_failure_still_returns_scores_without_summary(self):
+        listing = _sample_listing()
+        prefs = EffectiveSearchPreferences(budget_max=3000, min_bedrooms=2)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("boom")
+        with patch("rental_search_agent.match_scoring.embed_texts"), patch(
+            "rental_search_agent.listing_analysis.get_llm_client_and_model",
+            return_value=(mock_client, "gpt-4o-mini"),
+        ):
+            result = analyze_listing_against_preferences(
+                listing,
+                "Match my search preferences",
+                effective_prefs=prefs,
+            )
+        assert 0 <= result["match_score_pct"] <= 100
+        assert result["score_breakdown"] is not None
+        assert result["key_matches"] == []
+        assert result["key_gaps"] == []
+        assert result["ai_listing_summary"] is None
+        mock_client.chat.completions.create.assert_called_once()
+
+    def test_invalid_json_still_returns_scores(self):
+        listing = _sample_listing()
+        prefs = EffectiveSearchPreferences(budget_max=3000)
+        mock_client = MagicMock()
+        mock_message = MagicMock()
+        mock_message.content = "not-json"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_resp
+        with patch("rental_search_agent.match_scoring.embed_texts"), patch(
+            "rental_search_agent.listing_analysis.get_llm_client_and_model",
+            return_value=(mock_client, "gpt-4o-mini"),
+        ):
+            result = analyze_listing_against_preferences(
+                listing, "balcony", effective_prefs=prefs
+            )
+        assert result["ai_listing_summary"] is None
+        assert result["key_matches"] == []
+        assert "match_score_pct" in result
+
+    def test_analyze_does_not_call_llm_twice_when_result_reused(self):
+        """Caching is session-level; a stored result must not require a second LLM call."""
+        listing = _sample_listing()
+        prefs = EffectiveSearchPreferences(budget_max=3000)
+        with patch("rental_search_agent.match_scoring.embed_texts"), _patch_llm(
+            ai_listing_summary="A balcony apartment."
+        ) as llm_patch:
+            first = analyze_listing_against_preferences(
+                listing, "balcony", effective_prefs=prefs
+            )
+            # Simulate Streamlit cache reuse: second render uses stored dict, no LLM.
+            cached = dict(first)
+        assert cached["ai_listing_summary"] == "A balcony apartment."
+        llm_patch.assert_called()
+        # Client create was invoked only during the first analyze call.
+        client = llm_patch.return_value[0]
+        assert client.chat.completions.create.call_count == 1

@@ -3,7 +3,11 @@
 from rental_search_agent.analysis_view import (
     _build_highlights,
     build_analysis_view,
+    build_summary_features,
     checklist_item_to_row,
+    deterministic_listing_summary,
+    listing_original_description,
+    resolve_ai_listing_summary,
 )
 from rental_search_agent.display_format import criterion_source_label
 from rental_search_agent.preference_criteria import (
@@ -16,7 +20,12 @@ from rental_search_agent.preference_resolution import (
     merge_chat_over_stored,
     resolve_active_requirement,
 )
-from rental_search_agent.streamlit_analysis import _gauge_svg_html, _criteria_row_html
+from rental_search_agent.streamlit_analysis import (
+    _criteria_row_html,
+    _gauge_svg_html,
+    ai_listing_summary_html,
+    original_listing_description_html,
+)
 
 
 def _listing(**kwargs):
@@ -353,3 +362,178 @@ class TestGaugeHtml:
         assert "AI Inferred" not in html
         assert "rsa-status-icon" in html or "✕" in html
         assert 'aria-label="Unmet: Balcony.' in html
+
+
+class TestListingSummaryAndDescription:
+    def test_summary_and_description_both_available(self):
+        listing = _listing(
+            description="Bright corner unit with balcony and in-suite laundry.",
+            ammenities="Balcony, In-suite laundry",
+            proximity={
+                "nearest transit station|walk": {"duration_min": 1, "distance_km": 0.1},
+            },
+        )
+        result = {
+            "match_score_pct": 81,
+            "ai_listing_summary": (
+                "Well-located 2-bedroom, 2-bathroom apartment offering strong "
+                "transit access and practical everyday features."
+            ),
+            "score_breakdown": {
+                "components": {"structural": 1.0, "proximity": 1.0, "amenity": 0.6},
+                "included": ["structural", "proximity", "amenity"],
+                "weights_used": {"structural": 0.4, "proximity": 0.3, "amenity": 0.3},
+                "checklist": [],
+            },
+        }
+        view = build_analysis_view(listing, result)
+        assert view.ai_listing_summary.startswith("Well-located")
+        assert view.summary_is_ai_generated is True
+        assert view.original_listing_description.startswith("Bright corner")
+        assert view.match_pct == 81
+        labels = [f.label for f in view.summary_features]
+        assert "2 beds" in labels
+        assert "2 baths" in labels
+        assert "1 min to transit" in labels
+        assert "Balcony" in labels
+        html = ai_listing_summary_html(view)
+        assert "AI listing summary" in html
+        assert "AI-generated" in html
+        assert "rsa-feature-chip" in html
+        assert "Verify important details" in html
+        desc_html = original_listing_description_html(view.original_listing_description)
+        assert "<details" in desc_html
+        assert "Bright corner unit" in desc_html
+        assert "View source text" in desc_html
+
+    def test_summary_available_description_missing(self):
+        listing = _listing(description=None)
+        view = build_analysis_view(
+            listing,
+            {"match_score_pct": 70, "ai_listing_summary": "A compact apartment."},
+        )
+        assert view.ai_listing_summary == "A compact apartment."
+        assert view.original_listing_description is None
+        html = original_listing_description_html(view.original_listing_description)
+        assert "not provided" in html
+        assert "<details" not in html
+
+    def test_description_available_ai_generation_fails_uses_deterministic(self):
+        listing = _listing(
+            description="Full remarks here.",
+            ammenities="Balcony",
+        )
+        view = build_analysis_view(
+            listing,
+            {"match_score_pct": 75, "ai_listing_summary": None, "score_breakdown": {}},
+        )
+        assert view.summary_is_ai_generated is False
+        assert view.ai_listing_summary
+        assert "2-bedroom" in view.ai_listing_summary.lower() or "bedroom" in view.ai_listing_summary.lower()
+        assert view.original_listing_description == "Full remarks here."
+        html = ai_listing_summary_html(view)
+        assert "AI-generated</span>" not in html  # badge only for LLM text
+        assert "AI summary unavailable" not in html
+
+    def test_both_fields_missing(self):
+        listing = {
+            "id": "X",
+            "address": "1 Test St",
+        }
+        view = build_analysis_view(listing, {"match_score_pct": None})
+        # Deterministic may still produce a minimal line from house_category absence.
+        assert view.original_listing_description is None
+        assert listing_original_description(listing) is None
+        desc_html = original_listing_description_html(None)
+        assert "not provided" in desc_html
+
+    def test_very_long_original_description_preserved(self):
+        long_text = ("Paragraph one about the home.\n\n" + ("More detail. " * 400)).strip()
+        listing = _listing(description=long_text)
+        view = build_analysis_view(listing, {"match_score_pct": 50})
+        assert view.original_listing_description == long_text
+        html = original_listing_description_html(view.original_listing_description)
+        assert "Paragraph one about the home." in html
+        assert "&lt;" not in html or "<script>" not in long_text
+        # Escapes HTML rather than executing it
+        unsafe = original_listing_description_html('<img src=x onerror=alert(1)>')
+        assert "<img" not in unsafe
+        assert "&lt;img" in unsafe
+
+    def test_feature_chips_omit_unknown_values(self):
+        listing = _listing(
+            bedrooms=None,
+            bathrooms=None,
+            description="",
+            ammenities="",
+            parking_spaces=None,
+            proximity={},
+        )
+        features = build_summary_features(listing)
+        assert features == []
+        # Gym unknown must not become a chip
+        labels = [f.label.lower() for f in features]
+        assert "gym" not in labels
+
+    def test_feature_chips_cap_and_wrap_friendly_markup(self):
+        listing = _listing(
+            description="Balcony, in-suite laundry, dishwasher, gym, storage, parking",
+            ammenities="Balcony, In-suite laundry, Dishwasher, Gym, Storage",
+            parking_spaces=1,
+            proximity={
+                "nearest transit station|walk": {"duration_min": 1, "distance_km": 0.1},
+            },
+        )
+        features = build_summary_features(listing)
+        assert len(features) <= 5
+        html = ai_listing_summary_html(
+            build_analysis_view(listing, {"ai_listing_summary": "Summary.", "match_score_pct": 80})
+        )
+        assert "rsa-feature-chip-row" in html
+        assert html.count('class="rsa-feature-chip"') == len(features)
+
+    def test_resolve_prefers_llm_over_deterministic(self):
+        listing = _listing()
+        text, is_ai = resolve_ai_listing_summary(
+            listing, {"ai_listing_summary": "  LLM summary.  "}
+        )
+        assert text == "LLM summary."
+        assert is_ai is True
+        text2, is_ai2 = resolve_ai_listing_summary(listing, {"ai_listing_summary": ""})
+        assert is_ai2 is False
+        assert text2  # deterministic fallback
+
+    def test_deterministic_summary_is_conservative(self):
+        listing = _listing(description=None, ammenities="Balcony", parking_spaces=1)
+        summary = deterministic_listing_summary(listing)
+        assert summary
+        assert "verify" in summary.lower() or "not specified" in summary.lower()
+        assert "$" not in summary  # avoid repeating price
+
+    def test_overall_match_unchanged_by_summary_fields(self):
+        listing = _listing()
+        result = {
+            "match_score_pct": 81,
+            "ai_listing_summary": "Anything",
+            "score_breakdown": {
+                "components": {
+                    "structural": 1.0, "proximity": 1.0, "amenity": 0.6, "semantic": 0.46,
+                },
+                "included": ["structural", "proximity", "amenity", "semantic"],
+                "weights_used": {
+                    "structural": 0.35, "proximity": 0.25, "amenity": 0.2, "semantic": 0.2,
+                },
+                "checklist": [
+                    {
+                        "id": "budget", "group": "structural", "name": "Price",
+                        "status": "met", "observed": "$879,000",
+                        "required": "$1,000,000", "comparator": "≤", "source": "MLS",
+                    },
+                ],
+            },
+        }
+        view = build_analysis_view(listing, result)
+        assert view.match_pct == 81
+        assert view.components["semantic"] == 0.46
+        assert view.criteria_by_group["structural"][0].name == "Price"
+        assert view.strength_label == "Good match"
