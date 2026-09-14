@@ -234,7 +234,8 @@ class TestAmenityExtract:
     def test_extracts_new_amenity_vocabulary(self):
         text = (
             "washer/dryer in unit, washer/dryer in building, hot tub, sauna, spa, "
-            "fire pit, BBQ, fireplace, luxury, solarium, roof deck, garden, patio, deck, porch"
+            "fire pit, BBQ, fireplace, luxury, solarium, roof deck, garden, patio, deck, porch, "
+            "walk-in closet, ensuite bathroom, 3-piece bathroom, 4-piece bathroom"
         )
         ids = {f.id for f in extract_amenity_features(text)}
         assert ids >= {
@@ -253,7 +254,40 @@ class TestAmenityExtract:
             "patio",
             "deck",
             "porch",
+            "walk_in_closet",
+            "ensuite_bathroom",
+            "bath_3_piece",
+            "bath_4_piece",
         }
+
+    def test_closet_and_bathroom_amenity_synonyms(self):
+        assert {f.id for f in extract_amenity_features("walk in closet")} == {"walk_in_closet"}
+        assert {f.id for f in extract_amenity_features("WIC")} == {"walk_in_closet"}
+        assert {f.id for f in extract_amenity_features("master ensuite")} == {"ensuite_bathroom"}
+        assert {f.id for f in extract_amenity_features("ensuite")} == {"ensuite_bathroom"}
+        assert {f.id for f in extract_amenity_features("ensuite laundry")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("3pc bath")} == {"bath_3_piece"}
+        assert {f.id for f in extract_amenity_features("four-piece bathroom")} == {"bath_4_piece"}
+        assert "bath_4_piece" not in {f.id for f in extract_amenity_features("full bathroom")}
+        both = {f.id for f in extract_amenity_features("4-piece ensuite")}
+        assert both == {"ensuite_bathroom", "bath_4_piece"}
+        assert "bath_3_piece" not in {f.id for f in extract_amenity_features("4-piece bathroom")}
+        assert "bath_4_piece" not in {f.id for f in extract_amenity_features("3-piece bathroom")}
+
+        closet = next(f for f in AMENITY_FEATURES if f.id == "walk_in_closet")
+        ensuite = next(f for f in AMENITY_FEATURES if f.id == "ensuite_bathroom")
+        three = next(f for f in AMENITY_FEATURES if f.id == "bath_3_piece")
+        four = next(f for f in AMENITY_FEATURES if f.id == "bath_4_piece")
+        listing = _listing(
+            description="Primary bedroom with walk-in closet and a 4 piece ensuite.",
+            ammenities="",
+        )
+        laundry_only = _listing(description="Bright suite with ensuite laundry.", ammenities="")
+        assert match_amenity_feature(listing, closet).status == "met"
+        assert match_amenity_feature(listing, ensuite).status == "met"
+        assert match_amenity_feature(listing, four).status == "met"
+        assert match_amenity_feature(listing, three).status == "unmet"
+        assert match_amenity_feature(laundry_only, ensuite).status == "unmet"
 
     def test_laundry_in_unit_vs_building_extract(self):
         assert {f.id for f in extract_amenity_features("washer/dryer in unit")} == {"laundry"}
