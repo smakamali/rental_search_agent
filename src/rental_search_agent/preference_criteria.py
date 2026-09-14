@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, List, Literal, Optional, Sequence, Union
 
 from rental_search_agent.display_format import (
@@ -41,6 +42,55 @@ class AmenityFeature:
     id: str
     label: str
     patterns: tuple[str, ...]
+    # Whole-word matches so "spa" does not hit "space" and "pool" does not hit "whirlpool".
+    word_patterns: tuple[str, ...] = field(default_factory=tuple)
+    # Match only when exclude_patterns (and, on extract, extract_exclude_patterns) are absent.
+    generic_patterns: tuple[str, ...] = field(default_factory=tuple)
+    exclude_patterns: tuple[str, ...] = field(default_factory=tuple)
+    extract_exclude_patterns: tuple[str, ...] = field(default_factory=tuple)
+
+
+_LAUNDRY_BUILDING_PHRASES = (
+    "laundry in building",
+    "laundry in the building",
+    "in-building laundry",
+    "in building laundry",
+    "shared laundry",
+    "common laundry",
+    "communal laundry",
+    "common-area laundry",
+    "common area laundry",
+    "laundry room",
+    "coin laundry",
+    "coin-op laundry",
+    "coin operated laundry",
+    "coin-operated laundry",
+    "on-site laundry",
+    "onsite laundry",
+    "laundry on site",
+    "laundry on-site",
+    "laundry facilities",
+    "building laundry",
+    "washer/dryer in building",
+    "washer / dryer in building",
+    "washer and dryer in building",
+    "w/d in building",
+)
+
+_ROOF_OUTDOOR_PHRASES = (
+    "roof deck",
+    "roofdeck",
+    "roof-deck",
+    "rooftop deck",
+    "roof top deck",
+    "rooftop patio",
+    "roof patio",
+    "roof terrace",
+    "rooftop terrace",
+    "rooftop lounge",
+    "rooftop garden",
+    "roof garden",
+)
 
 
 # Lightweight vocabulary: qualitative prefs are scanned for these asks; listings matched via
@@ -48,32 +98,233 @@ class AmenityFeature:
 # A hit in remarks is met; a miss is unmet when description is present, unknown when it is not.
 AMENITY_FEATURES: tuple[AmenityFeature, ...] = (
     AmenityFeature("parking", "Parking", ("parking", "garage", "underground parking", "carport")),
-    AmenityFeature("balcony", "Balcony", ("balcony", "patio", "terrace", "deck")),
-    AmenityFeature("gym", "Gym", ("gym", "fitness", "exercise room")),
+    AmenityFeature(
+        "balcony",
+        "Balcony",
+        ("balcony", "balconies", "juliet balcony", "french balcony", "terrace", "terraces"),
+    ),
+    AmenityFeature("gym", "Gym", ("gym", "fitness", "exercise room", "fitness centre", "fitness center")),
     AmenityFeature(
         "pool",
         "Swimming pool",
-        ("swimming pool", "indoor pool", "outdoor pool", "shared pool", "heated pool", "lap pool"),
+        (
+            "swimming pool",
+            "indoor pool",
+            "outdoor pool",
+            "shared pool",
+            "heated pool",
+            "lap pool",
+            "infinity pool",
+            "saltwater pool",
+            "salt water pool",
+        ),
+        word_patterns=("pool", "pools"),
     ),
     AmenityFeature("pets", "Pet-friendly", ("pet friendly", "pet-friendly", "pets allowed", "cats ok", "dogs ok", "pets ok")),
-    AmenityFeature("laundry", "In-suite laundry", ("in-suite laundry", "in suite laundry", "washer", "dryer", "laundry")),
+    AmenityFeature(
+        "laundry",
+        "Washer/dryer in unit",
+        (
+            "in-suite laundry",
+            "in suite laundry",
+            "in-unit laundry",
+            "in unit laundry",
+            "ensuite laundry",
+            "en-suite laundry",
+            "laundry in suite",
+            "laundry in unit",
+            "laundry in the unit",
+            "washer/dryer in unit",
+            "washer / dryer in unit",
+            "washer and dryer in unit",
+            "washer/dryer in suite",
+            "washer and dryer in suite",
+            "in-suite washer",
+            "in-unit washer",
+            "stacked washer",
+            "stacked w/d",
+            "private laundry",
+            "w/d in suite",
+            "w/d in unit",
+        ),
+        generic_patterns=("washer", "dryer", "laundry", "washer/dryer", "washer-dryer", "w/d"),
+        exclude_patterns=_LAUNDRY_BUILDING_PHRASES,
+    ),
+    AmenityFeature(
+        "laundry_building",
+        "Washer/dryer in building",
+        _LAUNDRY_BUILDING_PHRASES
+        + (
+            "washer/dryer in the building",
+            "shared washer",
+            "shared dryer",
+        ),
+    ),
     AmenityFeature("dishwasher", "Dishwasher", ("dishwasher",)),
     AmenityFeature("ac", "Air conditioning", ("air conditioning", "a/c", " aircon", "central air", "air conditioner", "Air Conditioner", "A/C")),
     AmenityFeature("storage", "Storage", ("storage", "locker")),
     AmenityFeature("ev", "EV charger", ("ev charger", "ev charging", "electric vehicle")),
     AmenityFeature("elevator", "Elevator", ("elevator", "lift")),
     AmenityFeature("furnished", "Furnished", ("furnished",)),
-    AmenityFeature("den", "Den", ("den", "flex room", "flex space")),
+    AmenityFeature("den", "Den", ("flex room", "flex space", "+ den", "plus den"), word_patterns=("den",)),
+    AmenityFeature(
+        "hot_tub",
+        "Hot tub",
+        ("hot tub", "hot-tub", "hottub", "hot tubs", "jacuzzi", "jacuzzis", "swim spa"),
+    ),
+    AmenityFeature(
+        "sauna",
+        "Sauna",
+        ("sauna", "saunas", "steam room", "steamroom", "steam-room", "steam bath"),
+    ),
+    AmenityFeature(
+        "spa",
+        "Spa",
+        ("on-site spa", "onsite spa", "spa services", "spa facility", "spa facilities", "wellness spa", "day spa"),
+        word_patterns=("spa", "spas"),
+    ),
+    AmenityFeature(
+        "fire_pit",
+        "Fire pit",
+        ("fire pit", "firepit", "fire-pit", "fire pits", "firepits", "outdoor fire pit"),
+    ),
+    AmenityFeature(
+        "bbq",
+        "BBQ",
+        (
+            "bbq",
+            "barbecue",
+            "barbeque",
+            "bar-b-q",
+            "bar-b-que",
+            "gas grill",
+            "outdoor grill",
+            "grilling station",
+            "bbq area",
+            "bbq permitted",
+            "barbecue area",
+            "barbeque area",
+        ),
+    ),
+    AmenityFeature(
+        "fireplace",
+        "Fireplace",
+        (
+            "fireplace",
+            "fireplaces",
+            "wood-burning fireplace",
+            "wood burning fireplace",
+            "gas fireplace",
+            "electric fireplace",
+        ),
+    ),
+    AmenityFeature(
+        "luxury",
+        "Luxury",
+        (
+            "high-end",
+            "high end",
+            "upscale",
+            "deluxe",
+            "luxury building",
+            "luxury condo",
+            "luxury condominium",
+            "luxury apartment",
+            "luxury rental",
+            "luxury living",
+            "luxury residence",
+            "luxury home",
+            "luxury suite",
+            "premium finish",
+            "premium building",
+        ),
+        word_patterns=("luxurious",),
+        generic_patterns=("luxury",),
+        exclude_patterns=("luxury vinyl",),
+    ),
+    AmenityFeature(
+        "solarium",
+        "Solarium",
+        ("solarium", "sunroom", "sun room", "sun-room", "sun lounge", "conservatory", "florida room"),
+    ),
+    AmenityFeature(
+        "roof_deck",
+        "Roof deck",
+        _ROOF_OUTDOOR_PHRASES,
+    ),
+    AmenityFeature(
+        "garden",
+        "Garden",
+        (
+            "community garden",
+            "private garden",
+            "landscaped garden",
+            "landscaped yard",
+            "backyard",
+            "back yard",
+            "fenced yard",
+            "private yard",
+            "courtyard",
+            "court yard",
+        ),
+        word_patterns=("garden", "gardens"),
+    ),
+    AmenityFeature(
+        "patio",
+        "Patio",
+        ("private patio", "covered patio", "stone patio"),
+        generic_patterns=("patio", "patios"),
+        extract_exclude_patterns=("rooftop patio", "roof patio"),
+    ),
+    AmenityFeature(
+        "deck",
+        "Deck",
+        ("sundeck", "sun deck", "sun-deck", "wooden deck", "private deck"),
+        generic_patterns=("deck", "decks"),
+        extract_exclude_patterns=_ROOF_OUTDOOR_PHRASES,
+    ),
+    AmenityFeature(
+        "porch",
+        "Porch",
+        (
+            "porch",
+            "porches",
+            "verandah",
+            "veranda",
+            "covered porch",
+            "front porch",
+            "wrap-around porch",
+            "wraparound porch",
+        ),
+    ),
 )
 
-_POOL_WORD = re.compile(r"\bpool\b")
+
+@lru_cache(maxsize=64)
+def _word_boundary_re(words: tuple[str, ...]) -> re.Pattern[str]:
+    escaped = "|".join(re.escape(word) for word in words)
+    return re.compile(rf"\b(?:{escaped})\b")
 
 
-def _amenity_text_matches(text: str, feature: AmenityFeature) -> bool:
-    """Substring patterns, plus a word-boundary check so 'pool' does not match 'whirlpool'."""
+def _amenity_text_matches(
+    text: str,
+    feature: AmenityFeature,
+    *,
+    for_extract: bool = False,
+) -> bool:
+    """Substring / word-boundary match with optional generic-vs-specific exclusions."""
     if any(pat in text for pat in feature.patterns):
         return True
-    return feature.id == "pool" and bool(_POOL_WORD.search(text))
+    if feature.word_patterns and _word_boundary_re(feature.word_patterns).search(text):
+        return True
+    if not feature.generic_patterns:
+        return False
+    skip_generic = any(ex in text for ex in feature.exclude_patterns)
+    if for_extract:
+        skip_generic = skip_generic or any(ex in text for ex in feature.extract_exclude_patterns)
+    if skip_generic:
+        return False
+    return any(pat in text for pat in feature.generic_patterns)
 
 
 def extract_amenity_features(qualitative_text: str) -> List[AmenityFeature]:
@@ -81,10 +332,17 @@ def extract_amenity_features(qualitative_text: str) -> List[AmenityFeature]:
     text = (qualitative_text or "").strip().lower()
     if not text:
         return []
+    # Scan comma-separated asks on their own so "roof deck, deck" extracts both.
+    chunks = [text]
+    chunks.extend(chunk.strip() for chunk in re.split(r"[,;\n]+", text) if chunk.strip())
     found: List[AmenityFeature] = []
+    seen: set[str] = set()
     for feat in AMENITY_FEATURES:
-        if _amenity_text_matches(text, feat):
+        if feat.id in seen:
+            continue
+        if any(_amenity_text_matches(chunk, feat, for_extract=True) for chunk in chunks):
             found.append(feat)
+            seen.add(feat.id)
     return found
 
 
@@ -210,7 +468,7 @@ def match_amenity_feature(listing: Union[dict, Any], feature: AmenityFeature) ->
             return _crit(feature.id, feature.label, "unmet", 0.0, group="amenity", observed="No", source="MLS")
         text = _listing_text_blob_for_amenities(listing)
         bed_disp = str(_listing_attr(listing, "bedrooms_display") or "").lower()
-        if "+ den" in bed_disp or "den" in text:
+        if "+ den" in bed_disp or _amenity_text_matches(text, feature):
             source = "MLS" if "+ den" in bed_disp else "Inferred"
             return _crit(feature.id, feature.label, "met", 1.0, group="amenity", observed="Yes", source=source)
         return _amenity_not_found(feature, listing)
@@ -423,7 +681,7 @@ def build_structural_checklist(
                 ))
 
     if prefs.require_den:
-        den = match_amenity_feature(listing, AmenityFeature("den", "Den", ("den",)))
+        den = match_amenity_feature(listing, next(f for f in AMENITY_FEATURES if f.id == "den"))
         den.group = "structural"
         results.append(den)
 
@@ -544,7 +802,7 @@ def score_structural(
             parts.append(_floor_score(float(sqft), float(prefs.min_sqft), soft_ratio=0.7))
 
     if prefs.require_den:
-        den = match_amenity_feature(listing, AmenityFeature("den", "Den", ("den",)))
+        den = match_amenity_feature(listing, next(f for f in AMENITY_FEATURES if f.id == "den"))
         if den.score is not None:
             parts.append(float(den.score))
 

@@ -8,8 +8,10 @@ from rental_search_agent.match_scoring import (
 )
 from rental_search_agent.models import Listing
 from rental_search_agent.preference_criteria import (
+    AMENITY_FEATURES,
     build_structural_checklist,
     extract_amenity_features,
+    match_amenity_feature,
     score_amenity,
     score_proximity,
     score_structural,
@@ -215,8 +217,6 @@ class TestAmenityExtract:
         assert "gym" in ids
 
     def test_extracts_swimming_pool(self):
-        from rental_search_agent.preference_criteria import match_amenity_feature
-
         feats = extract_amenity_features("balcony, parking, storage, swimming pool")
         ids = {f.id for f in feats}
         assert ids >= {"balcony", "parking", "storage", "pool"}
@@ -230,6 +230,81 @@ class TestAmenityExtract:
             _listing(description="Renovated kitchen with whirlpool tub.", ammenities=""),
             pool,
         ).status == "unmet"
+
+    def test_extracts_new_amenity_vocabulary(self):
+        text = (
+            "washer/dryer in unit, washer/dryer in building, hot tub, sauna, spa, "
+            "fire pit, BBQ, fireplace, luxury, solarium, roof deck, garden, patio, deck, porch"
+        )
+        ids = {f.id for f in extract_amenity_features(text)}
+        assert ids >= {
+            "laundry",
+            "laundry_building",
+            "hot_tub",
+            "sauna",
+            "spa",
+            "fire_pit",
+            "bbq",
+            "fireplace",
+            "luxury",
+            "solarium",
+            "roof_deck",
+            "garden",
+            "patio",
+            "deck",
+            "porch",
+        }
+
+    def test_laundry_in_unit_vs_building_extract(self):
+        assert {f.id for f in extract_amenity_features("washer/dryer in unit")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("in-suite laundry")} == {"laundry"}
+        assert {f.id for f in extract_amenity_features("washer/dryer in building")} == {
+            "laundry_building"
+        }
+        assert {f.id for f in extract_amenity_features("shared laundry")} == {"laundry_building"}
+        both = {f.id for f in extract_amenity_features("in-suite laundry and laundry in building")}
+        assert both == {"laundry", "laundry_building"}
+
+    def test_laundry_in_unit_vs_building_listing_match(self):
+        in_unit = next(f for f in AMENITY_FEATURES if f.id == "laundry")
+        in_building = next(f for f in AMENITY_FEATURES if f.id == "laundry_building")
+        suite = _listing(description="Bright home with in-suite laundry.", ammenities="")
+        shared = _listing(description="Coin laundry in the building.", ammenities="Shared Laundry")
+        generic = _listing(description="Includes washer and dryer.", ammenities="")
+        assert match_amenity_feature(suite, in_unit).status == "met"
+        assert match_amenity_feature(suite, in_building).status == "unmet"
+        assert match_amenity_feature(shared, in_unit).status == "unmet"
+        assert match_amenity_feature(shared, in_building).status == "met"
+        assert match_amenity_feature(generic, in_unit).status == "met"
+        assert match_amenity_feature(generic, in_building).status == "unmet"
+
+    def test_patio_deck_porch_are_not_balcony(self):
+        assert {f.id for f in extract_amenity_features("patio")} == {"patio"}
+        assert {f.id for f in extract_amenity_features("private deck")} == {"deck"}
+        assert {f.id for f in extract_amenity_features("covered porch")} == {"porch"}
+        assert {f.id for f in extract_amenity_features("balcony")} == {"balcony"}
+
+    def test_roof_deck_does_not_also_extract_generic_deck_or_patio(self):
+        assert {f.id for f in extract_amenity_features("roof deck")} == {"roof_deck"}
+        assert {f.id for f in extract_amenity_features("rooftop patio")} == {"roof_deck"}
+        deck = next(f for f in AMENITY_FEATURES if f.id == "deck")
+        patio = next(f for f in AMENITY_FEATURES if f.id == "patio")
+        roof = _listing(description="Huge roof deck with city views.", ammenities="")
+        assert match_amenity_feature(roof, deck).status == "met"
+        assert match_amenity_feature(roof, patio).status == "unmet"
+
+    def test_synonyms_and_false_positives(self):
+        assert {f.id for f in extract_amenity_features("jacuzzi and steam room")} >= {"hot_tub", "sauna"}
+        assert {f.id for f in extract_amenity_features("sunroom and verandah")} >= {"solarium", "porch"}
+        assert {f.id for f in extract_amenity_features("community garden")} == {"garden"}
+        assert "spa" not in {f.id for f in extract_amenity_features("lots of space")}
+        assert "fireplace" not in {f.id for f in extract_amenity_features("fire pit")}
+        assert "fire_pit" not in {f.id for f in extract_amenity_features("gas fireplace")}
+        luxury = next(f for f in AMENITY_FEATURES if f.id == "luxury")
+        vinyl = _listing(description="New luxury vinyl plank flooring throughout.", ammenities="")
+        upscale = _listing(description="Upscale finishes in a luxury building.", ammenities="")
+        assert match_amenity_feature(vinyl, luxury).status == "unmet"
+        assert match_amenity_feature(upscale, luxury).status == "met"
 
 
 class TestScoreListings:
