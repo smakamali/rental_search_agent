@@ -40,6 +40,22 @@ from rental_search_agent.preference_apply import (
     structural_prefs_for_rerank,
     with_display_rank,
 )
+from rental_search_agent.search_progress import (
+    PHASE_END,
+    PHASE_SKIP,
+    PHASE_START,
+    STAGE_PREPARE,
+    STAGE_SEARCH,
+    invoke_progress,
+)
+from rental_search_agent.streamlit_progress import (
+    SearchProgressPanel,
+    bind_search_progress_panel,
+    bound_progress_callback,
+    get_bound_search_progress_panel,
+    inject_search_progress_css,
+    search_workflow_pending,
+)
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     is_placeholder_qualitative,
@@ -169,6 +185,8 @@ def _reset_session_for_identity_change() -> None:
     ]
     st.session_state["pending_ask"] = None
     st.session_state["pending_chat_prompt"] = None
+    st.session_state["_pending_pref_search"] = None
+    st.session_state["_pending_agent_step"] = False
 
 
 def _handle_auth_transition(principal: Principal) -> None:
@@ -930,6 +948,10 @@ def _init_session_state() -> None:
         st.session_state["map_label_mode"] = normalize_map_label_mode(
             st.session_state.get("map_label_mode")
         )
+    if "_pending_pref_search" not in st.session_state:
+        st.session_state["_pending_pref_search"] = None
+    if "_pending_agent_step" not in st.session_state:
+        st.session_state["_pending_agent_step"] = False
 
 
 def _apply_proximity_filter_safeguard(listings: list[dict], proximity_text: str) -> list[dict]:
@@ -1079,11 +1101,17 @@ def _run_user_prompt(client, model, prompt: str) -> None:
     """Append a user message, run one agent step, and rerun."""
     _bind_runtime()
     st.session_state["messages"].append({"role": "user", "content": prompt})
-    payload, listing_state = _run_agent_step_with_ui(client, model)
-    _sync_searches_from_runtime()
-    _apply_listing_state(listing_state)
-    if payload is not None:
-        st.session_state["pending_ask"] = payload
+    try:
+        payload, listing_state = _run_agent_step_with_ui(client, model)
+        _sync_searches_from_runtime()
+        _apply_listing_state(listing_state)
+        if payload is not None:
+            st.session_state["pending_ask"] = payload
+    finally:
+        panel = get_bound_search_progress_panel()
+        if panel is not None:
+            panel.finish()
+        bind_search_progress_panel(None)
     st.rerun()
 
 
@@ -1117,7 +1145,13 @@ def _run_agent_step_with_ui(client, model) -> tuple[dict | None, dict | None]:
         text_placeholder = st.empty()
         acc_text = ""
         try:
-            for event in run_agent_step_events(client, model, st.session_state["messages"], stream=True):
+            for event in run_agent_step_events(
+                client,
+                model,
+                st.session_state["messages"],
+                stream=True,
+                progress=bound_progress_callback(),
+            ):
                 etype = event["type"]
                 if etype in ("round_start", "text_reset"):
                     # round_start: a new LLM round is starting; any text streamed so far belongs to
@@ -1216,7 +1250,10 @@ def _apply_pipeline_to_session(result, *, search_master: list[dict] | None = Non
 
 
 def _execute_preference_search(new_prefs: dict, previous_prefs: dict) -> None:
-    """Shared Search entry for the sidebar button and the landing hero action."""
+    """Shared Search entry for the sidebar button and the landing hero action.
+
+    Queues work so the main-column progress panel exists before the pipeline runs.
+    """
     request = prepare_sidebar_search(
         new_prefs,
         previous_prefs,
@@ -1228,8 +1265,11 @@ def _execute_preference_search(new_prefs: dict, previous_prefs: dict) -> None:
     if request.kind == "error":
         st.session_state["apply_warnings"] = request.warnings
         return
-    with st.spinner(request.spinner):
-        _run_sidebar_search(new_prefs, previous_prefs)
+    st.session_state["_pending_pref_search"] = {
+        "new_prefs": dict(new_prefs),
+        "previous_prefs": dict(previous_prefs),
+        "spinner": request.spinner,
+    }
 
 
 def _queue_chat_prompt(prompt: str) -> None:
@@ -1251,9 +1291,12 @@ def _landing_search_from_saved_prefs() -> None:
     st.rerun()
 
 
-def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
+def _run_sidebar_search(
+    new_prefs: dict, previous_prefs: dict, *, progress=None
+) -> None:
     """Save already done. Scrape when needed, otherwise re-rank the current master list."""
     principal = _bind_runtime()
+    invoke_progress(progress, STAGE_PREPARE, PHASE_START)
     policy = CapabilityPolicy(
         principal=principal,
         searches_used=int(st.session_state.get("anon_searches_used") or 0),
@@ -1270,9 +1313,11 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
     if request.kind == "error":
         st.session_state["apply_warnings"] = request.warnings
         logger.warning("Sidebar search rejected: %s", request.warnings)
+        invoke_progress(progress, STAGE_PREPARE, PHASE_END, False)
         return
     if request.kind == "scrape" and not policy.can_scrape():
         st.session_state["apply_warnings"] = [policy.scrape_denied_message()]
+        invoke_progress(progress, STAGE_PREPARE, PHASE_END, False)
         return
     set_run_id(new_run_id())
     try:
@@ -1283,10 +1328,14 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
             except Exception as e:
                 logger.warning("Sidebar search invalid filters: %s", e, exc_info=True)
                 st.session_state["apply_warnings"] = [f"Could not build search filters: {e}"]
+                invoke_progress(progress, STAGE_PREPARE, PHASE_END, False)
                 return
             if len(filters.location_list()) > 1 and not policy.can_multi_city():
                 st.session_state["apply_warnings"] = [policy.multi_city_denied_message()]
+                invoke_progress(progress, STAGE_PREPARE, PHASE_END, False)
                 return
+            invoke_progress(progress, STAGE_PREPARE, PHASE_END)
+            invoke_progress(progress, STAGE_SEARCH, PHASE_START)
             # Charge guest credit on scrape attempt (mirrors rental_search tool).
             used = policy.record_scrape()
             st.session_state["anon_searches_used"] = used
@@ -1302,10 +1351,12 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
             except SearchBackendError as e:
                 logger.warning("Sidebar search backend failure: %s", e)
                 st.session_state["apply_warnings"] = [str(e)]
+                invoke_progress(progress, STAGE_SEARCH, PHASE_END, False)
                 return
             except Exception as e:
                 logger.warning("Sidebar search failed: %s", e, exc_info=True)
                 st.session_state["apply_warnings"] = [f"Search failed: {e}"]
+                invoke_progress(progress, STAGE_SEARCH, PHASE_END, False)
                 return
             set_runtime(
                 principal,
@@ -1320,7 +1371,9 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
                 request.filters or {}, data
             )
             effective = stored_prefs_to_effective(new_prefs)
-            result = apply_search_preferences(listings, effective)
+            result = apply_search_preferences(
+                listings, effective, progress=progress, search_stage="close"
+            )
             if result.warnings or result.skipped:
                 logger.warning(
                     "Sidebar scrape apply soft failures warnings=%s skipped=%s",
@@ -1336,6 +1389,8 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
             return
 
         logger.info("Sidebar search start kind=rerank master=%d", len(search_master))
+        invoke_progress(progress, STAGE_PREPARE, PHASE_END)
+        invoke_progress(progress, STAGE_SEARCH, PHASE_SKIP)
         search_criteria = _get_active_search_criteria_from_messages(messages)
         structural_prefs = structural_prefs_for_rerank(new_prefs, search_criteria)
         score_prefs = stored_prefs_to_effective(new_prefs)
@@ -1344,6 +1399,8 @@ def _run_sidebar_search(new_prefs: dict, previous_prefs: dict) -> None:
                 search_master,
                 score_prefs,
                 structural_prefs=structural_prefs,
+                progress=progress,
+                search_stage="omit",
             )
         if result.warnings or result.skipped:
             logger.warning(
@@ -1401,6 +1458,13 @@ def _render_preferences_sidebar() -> None:
                 st.caption("Your Google account is not on the beta allowlist.")
         for warning in st.session_state.get("apply_warnings") or []:
             st.warning(warning)
+        pending_pref = st.session_state.get("_pending_pref_search")
+        if isinstance(pending_pref, dict) and pending_pref.get("spinner"):
+            st.caption(pending_pref["spinner"])
+        elif st.session_state.get("pending_chat_prompt") or st.session_state.get(
+            "_pending_agent_step"
+        ):
+            st.caption("Working...")
         with st.form("preferences_form"):
             with st.container(border=True):
                 st.markdown("**Location & Type**")
@@ -1573,20 +1637,7 @@ def _render_ask_form(pending: dict) -> None:
             st.session_state["messages"] = messages
             st.session_state["pending_ask"] = None
 
-            client, model = _get_client_and_model()
-            if client is None or model is None:
-                st.error("Set API_PROVIDER (openrouter or openai) and the corresponding API key (OPENROUTER_API_KEY or OPENAI_API_KEY) in .env.")
-                st.stop()
-            # Run step in a loop until no more pending ask (or we get final reply)
-            while True:
-                _bind_runtime()
-                payload, listing_state = _run_agent_step_with_ui(client, model)
-                _sync_searches_from_runtime()
-                _apply_listing_state(listing_state)
-                if payload is not None:
-                    st.session_state["pending_ask"] = payload
-                    st.rerun()
-                break
+            st.session_state["_pending_agent_step"] = True
             st.rerun()
 
 
@@ -1623,6 +1674,20 @@ def _render_chat_panel(client, model) -> None:
                 _render_chat_history()
             if pending_prompt:
                 _run_user_prompt(client, model, pending_prompt)
+            elif st.session_state.pop("_pending_agent_step", None):
+                _bind_runtime()
+                try:
+                    payload, listing_state = _run_agent_step_with_ui(client, model)
+                    _sync_searches_from_runtime()
+                    _apply_listing_state(listing_state)
+                    if payload is not None:
+                        st.session_state["pending_ask"] = payload
+                finally:
+                    panel = get_bound_search_progress_panel()
+                    if panel is not None:
+                        panel.finish()
+                    bind_search_progress_panel(None)
+                st.rerun()
         pending = st.session_state.get("pending_ask")
         if pending is not None:
             _render_ask_form(pending)
@@ -1669,6 +1734,7 @@ def _main_body() -> None:
     _inject_chat_blob_css()
     _inject_app_chrome_css()
     inject_landing_css()
+    inject_search_progress_css()
     render_app_header(principal)
     _render_preferences_sidebar()
 
@@ -1707,7 +1773,11 @@ def _main_body() -> None:
     analyze_listing_id = st.session_state.get("analyze_listing_id")
     analyze_listing = st.session_state.get("analyze_listing")
     analysis_result = st.session_state.get("analysis_result", {})
-    if analyze_listing_id and analyze_listing:
+    if (
+        analyze_listing_id
+        and analyze_listing
+        and not search_workflow_pending(st.session_state)
+    ):
         from rental_search_agent.session_runtime import get_capability_policy as _gcp
 
         def _close_analysis() -> None:
@@ -1806,6 +1876,46 @@ def _main_body() -> None:
                                 on_close=_close_analysis,
                             )
 
+    progress_slot = st.empty()
+    pending_pref = st.session_state.get("_pending_pref_search")
+    chat_work_pending = bool(
+        st.session_state.get("pending_chat_prompt")
+        or st.session_state.get("_pending_agent_step")
+    )
+    panel = None
+    if pending_pref or chat_work_pending:
+        panel = SearchProgressPanel(progress_slot)
+        bind_search_progress_panel(panel)
+    else:
+        bind_search_progress_panel(None)
+
+    if isinstance(pending_pref, dict):
+        st.session_state["_pending_pref_search"] = None
+        spinner = pending_pref.get("spinner") or "Searching..."
+        try:
+            with st.spinner(spinner):
+                _run_sidebar_search(
+                    pending_pref["new_prefs"],
+                    pending_pref["previous_prefs"],
+                    progress=panel.handle if panel is not None else None,
+                )
+        finally:
+            if panel is not None:
+                panel.finish()
+            bind_search_progress_panel(None)
+        listings = st.session_state.get("display_list") or []
+        display_source = st.session_state.get("display_source")
+        proximity_text = (
+            (st.session_state.get("user_preferences") or {}).get("proximity_preferences")
+            or ""
+        ).strip()
+        if proximity_text and display_source == "enrich" and listings:
+            listings = _apply_proximity_filter_safeguard(listings, proximity_text)
+        last_sort_by = st.session_state.get("last_sort_by")
+        if last_sort_by is None or last_sort_by in ("semantic_score", "match_score"):
+            listings = _apply_default_match_score_sort(listings)
+        chat_work_pending = False
+
     panel_kind = center_panel_kind(
         listings=listings,
         display_source=st.session_state.get("display_source"),
@@ -1813,8 +1923,11 @@ def _main_body() -> None:
         last_filters=get_last_rental_search_filters(
             st.session_state.get("messages") or []
         ),
+        in_progress=chat_work_pending,
     )
-    if panel_kind == "results":
+    if panel_kind == "progress":
+        pass
+    elif panel_kind == "results":
         render_search_results(listings)
     elif panel_kind == "zero_results":
         render_zero_results()

@@ -48,6 +48,14 @@ from rental_search_agent.preference_apply import (
     pipeline_needed,
     with_display_rank as _with_display_rank,
 )
+from rental_search_agent.search_progress import (
+    PHASE_SKIP,
+    STAGE_APPLY_PROX,
+    STAGE_CALC_PROX,
+    STAGE_SCORE,
+    SearchWorkflowEmitter,
+    invoke_progress,
+)
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     fill_empty_stored_from_chat,
@@ -1821,7 +1829,12 @@ def _call_llm(client: OpenAI, model: str, messages: list[dict], *, stream: bool)
 
 
 def run_agent_step_events(
-    client: OpenAI, model: str, messages: list[dict], *, stream: bool = True
+    client: OpenAI,
+    model: str,
+    messages: list[dict],
+    *,
+    stream: bool = True,
+    progress=None,
 ) -> Iterator[dict]:
     """Generator version of run_agent_step that reports live progress. Yields:
       {"type": "round_start"} - before each LLM call. A "round" is one LLM call plus any tool
@@ -1848,23 +1861,32 @@ def run_agent_step_events(
     set_run_id(new_run_id())
     logger.info("agent_step started run_id=%s", get_run_id())
     try:
-        yield from _run_agent_step_events_body(client, model, messages, stream=stream)
+        yield from _run_agent_step_events_body(
+            client, model, messages, stream=stream, progress=progress
+        )
     finally:
         clear_run_id()
 
 
 def _run_agent_step_events_body(
-    client: OpenAI, model: str, messages: list[dict], *, stream: bool = True
+    client: OpenAI,
+    model: str,
+    messages: list[dict],
+    *,
+    stream: bool = True,
+    progress=None,
 ) -> Iterator[dict]:
     """Inner agent-step generator; caller owns run_id lifecycle."""
     last_listing_state: dict | None = None
     seq = 0
+    workflow = SearchWorkflowEmitter(progress)
     while True:
         yield {"type": "round_start"}
         logger.debug("Calling LLM (model=%s)...", model)
         result = yield from _call_llm(client, model, messages, stream=stream)
         if result is None:
             logger.warning("LLM returned empty choices (possible API error or context too long); aborting step.")
+            workflow.finish(ok=False)
             yield {
                 "type": "done",
                 "messages": messages,
@@ -1912,6 +1934,7 @@ def _run_agent_step_events_body(
                 label = TOOL_STATUS_LABELS.get(name)
                 if label:
                     yield {"type": "tool_start", "name": name, "label": label, "seq": seq}
+                workflow.tool_start(name)
                 logger.debug("Executing tool: %s", name)
                 try:
                     args = json.loads(tc["arguments"] or "{}")
@@ -2050,10 +2073,14 @@ def _run_agent_step_events_body(
                                         "label": apply_label,
                                         "seq": seq,
                                     }
+                                    workflow.tool_start(APPLY_TOOL_NAME)
                                     apply_ok = True
                                     try:
                                         pending_apply_result = apply_search_preferences(
-                                            master_listings, effective
+                                            master_listings,
+                                            effective,
+                                            progress=workflow.apply_callback,
+                                            search_stage="close",
                                         )
                                     except Exception:
                                         logger.exception(
@@ -2061,6 +2088,7 @@ def _run_agent_step_events_body(
                                         )
                                         apply_ok = False
                                         pending_apply_result = None
+                                        workflow.close_search(ok=False)
                                     yield {
                                         "type": "tool_end",
                                         "name": APPLY_TOOL_NAME,
@@ -2109,8 +2137,23 @@ def _run_agent_step_events_body(
                                     logger.info(
                                         "auto-apply skipping (pipeline not needed)"
                                     )
+                                    workflow.close_search(
+                                        ok=True,
+                                        listing_count=len(master_listings),
+                                    )
+                                    invoke_progress(progress, STAGE_CALC_PROX, PHASE_SKIP)
+                                    invoke_progress(progress, STAGE_APPLY_PROX, PHASE_SKIP)
+                                    invoke_progress(progress, STAGE_SCORE, PHASE_SKIP)
                     except (json.JSONDecodeError, TypeError):
                         pass
+                    if not ok:
+                        remaining_failed = sum(
+                            1
+                            for t in tool_calls_raw[i + 1 :]
+                            if t.get("name") == "rental_search"
+                        )
+                        if remaining_failed == 0:
+                            workflow.close_search(ok=False)
                 if name == "enrich_listings_with_proximity":
                     try:
                         data = json.loads(result_str)
@@ -2199,6 +2242,7 @@ def _run_agent_step_events_body(
                             _splice_apply_before_ask_user(
                                 assistant_msg, tool_results, pending_apply_result
                             )
+                        workflow.finish()
                         yield {
                             "type": "done",
                             "messages": messages + [assistant_msg] + tool_results,
@@ -2233,6 +2277,7 @@ def _run_agent_step_events_body(
         # No tool calls: final assistant reply
         messages = messages + [{"role": "assistant", "content": content or ""}]
         listing_state = last_listing_state if last_listing_state is not None else _listing_state_from_messages(messages)
+        workflow.finish()
         yield {"type": "done", "messages": messages, "ask_user_payload": None, "listing_state": listing_state}
         return
 

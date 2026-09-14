@@ -451,15 +451,97 @@ class TestApplySearchPreferences:
     def test_structural_stage_emits_progress(self):
         listings = [_listing_dict(id="a", bedrooms=2, price=2000.0)]
         prefs = EffectiveSearchPreferences(min_bedrooms=2)
-        events: list[tuple[str, str, bool]] = []
+        events: list[tuple] = []
 
-        def _progress(name: str, phase: str, ok: bool = True) -> None:
-            events.append((name, phase, ok))
+        def _progress(name: str, phase: str, ok: bool = True, listing_count=None) -> None:
+            events.append((name, phase, ok, listing_count))
 
         apply_search_preferences(listings, prefs, progress=_progress)
-        assert ("filter_listings", "start", True) in events
-        assert ("filter_listings", "end", True) in events
-        assert ("score_listings_by_preferences", "start", True) in events
+        names = [e[0] for e in events]
+        assert "calculate_proximity" in names
+        assert "apply_proximity_criteria" in names
+        assert "score_and_rank" in names
+        assert ("score_and_rank", "start", True, 1) in events
+        assert ("calculate_proximity", "skip", True, None) in events
+        assert ("apply_proximity_criteria", "skip", True, None) in events
+
+    def test_proximity_emits_separate_calculate_and_filter_events(self):
+        listings = [
+            _listing_dict(id="near", bedrooms=2, latitude=49.28, longitude=-123.12),
+            _listing_dict(id="far", bedrooms=2, latitude=49.18, longitude=-122.85),
+        ]
+        rule = ProximityRule(location="Downtown Vancouver", mode="drive", max_minutes=20)
+        refs = [
+            GeocodedReference(location="Downtown Vancouver", lat=49.28, lon=-123.12)
+        ]
+        enriched = []
+        for lst in listings:
+            d = dict(lst)
+            duration = 10.0 if d["id"] == "near" else 45.0
+            d["proximity"] = {
+                "Downtown Vancouver|drive": {"distance_km": 1.0, "duration_min": duration}
+            }
+            enriched.append(d)
+        prefs = EffectiveSearchPreferences(
+            min_bedrooms=2,
+            proximity_preferences="max 20 min drive to Downtown Vancouver",
+        )
+        events: list[tuple] = []
+
+        def _progress(name: str, phase: str, ok: bool = True, listing_count=None) -> None:
+            events.append((name, phase, ok, listing_count))
+
+        with (
+            patch(
+                "rental_search_agent.preference_apply.parse_proximity_preferences",
+                return_value=[rule],
+            ),
+            patch(
+                "rental_search_agent.preference_apply.geocode_proximity_references",
+                return_value=refs,
+            ),
+            patch(
+                "rental_search_agent.preference_apply.enrich_listings_with_proximity",
+                return_value=enriched,
+            ),
+        ):
+            result = apply_search_preferences(
+                listings, prefs, progress=_progress, search_stage="close"
+            )
+        names_phases = [(e[0], e[1]) for e in events]
+        assert names_phases.index(("search_and_validate", "end")) < names_phases.index(
+            ("calculate_proximity", "start")
+        )
+        assert names_phases.index(("calculate_proximity", "end")) < names_phases.index(
+            ("apply_proximity_criteria", "start")
+        )
+        assert names_phases.index(("apply_proximity_criteria", "end")) < names_phases.index(
+            ("score_and_rank", "start")
+        )
+        search_end = next(e for e in events if e[0] == "search_and_validate" and e[1] == "end")
+        apply_end = next(
+            e for e in events if e[0] == "apply_proximity_criteria" and e[1] == "end"
+        )
+        assert search_end[3] == 2
+        assert apply_end[3] == 1
+        assert result.listings[0]["id"] == "near"
+
+    def test_close_search_stage_emits_count_after_structural(self):
+        listings = [
+            _listing_dict(id="cheap", price=2000.0, bedrooms=2),
+            _listing_dict(id="steep", price=4000.0, bedrooms=2),
+        ]
+        prefs = EffectiveSearchPreferences(min_bedrooms=2, budget_max=2800.0)
+        events: list[tuple] = []
+
+        def _progress(name: str, phase: str, ok: bool = True, listing_count=None) -> None:
+            events.append((name, phase, ok, listing_count))
+
+        apply_search_preferences(
+            listings, prefs, progress=_progress, search_stage="close"
+        )
+        search_end = next(e for e in events if e[0] == "search_and_validate" and e[1] == "end")
+        assert search_end[3] == 1
 
 
 class TestMakeApplyToolMessages:

@@ -302,8 +302,11 @@ def center_panel_kind(
     display_source: Any = None,
     search_master: Any = None,
     last_filters: Any = None,
+    in_progress: bool = False,
 ) -> str:
-    """``results`` | ``zero_results`` | ``landing`` for the main column."""
+    """``progress`` | ``results`` | ``zero_results`` | ``landing`` for the main column."""
+    if in_progress:
+        return "progress"
     if listings:
         return "results"
     if search_has_run(
