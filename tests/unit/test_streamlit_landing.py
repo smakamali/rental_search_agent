@@ -8,6 +8,7 @@ from rental_search_agent.streamlit_landing import (
     HOW_IT_WORKS_STEPS,
     HOW_IT_WORKS_SUBTITLE,
     LANDING_HERO_LEAD,
+    SAVED_PREFS_HEADING_READY,
     _SVG_ICONS,
     _feature_chip_html,
     _how_it_works_html,
@@ -115,8 +116,11 @@ class TestLandingPreferenceSummary:
         assert landing_preference_chips(None) == []
 
     def test_beds_max_only(self):
-        assert format_landing_beds_chip(None, 3) == "3 beds"
-        assert format_landing_beds_chip("", 4) == "4 beds"
+        assert format_landing_beds_chip(None, 3) == "≤ 3 beds"
+        assert format_landing_beds_chip("", 4) == "≤ 4 beds"
+        chips = landing_preference_chips({"max_bedrooms": 3})
+        assert ("beds", "≤ 3 beds") in chips
+        assert ("beds", "3 beds") not in chips
 
     def test_baths_and_sqft_helpers(self):
         assert format_landing_baths_chip(2) == "2 baths"
@@ -422,3 +426,18 @@ class TestSavedPrefsReady:
         assert landing_saved_prefs_heading(None) == (
             "Add a location and minimum bedrooms to get started"
         )
+
+    def test_heading_is_ready_iff_search_is_ready(self):
+        cases = (
+            {},
+            {"location": "Vancouver"},
+            {"min_bedrooms": "2"},
+            {"location": "Vancouver", "min_bedrooms": "2"},
+            {"location": "  ", "min_bedrooms": "2"},
+            {"location": "Vancouver", "min_bedrooms": ""},
+            {"location": "Yaletown", "min_bedrooms": 2, "max_bedrooms": 4},
+        )
+        for prefs in cases:
+            ready = saved_preferences_ready_for_search(prefs)
+            heading = landing_saved_prefs_heading(prefs)
+            assert ready == (heading == SAVED_PREFS_HEADING_READY), prefs

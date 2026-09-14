@@ -10,6 +10,7 @@ from rental_search_agent.capability_policy import CapabilityPolicy
 from rental_search_agent.streamlit_app import (
     _account_initials,
     _clear_analysis_selection,
+    _handle_auth_transition,
     _reset_session_for_identity_change,
 )
 from rental_search_agent.session_runtime import (
@@ -223,3 +224,64 @@ class TestHeaderAccountHelpers:
         assert ss["pending_chat_prompt"] is None
         assert ss["pending_ask"] is None
         assert ss["messages"][0]["role"] == "system"
+
+    def test_authenticated_account_switch_clears_pending_chat_prompt(
+        self, monkeypatch
+    ):
+        ss: dict = {
+            "_auth_user_id": "user-a",
+            "pending_chat_prompt": "2 bed condo in Vancouver",
+            "pending_ask": {"question": "Which city?"},
+            "user_preferences": {"location": "Vancouver"},
+            "messages": [{"role": "system", "content": "old"}],
+        }
+
+        class _FakeSt:
+            session_state = ss
+
+        monkeypatch.setattr("rental_search_agent.streamlit_app.st", _FakeSt)
+        monkeypatch.setattr(
+            "rental_search_agent.streamlit_app.merge_guest_prefs_on_login",
+            lambda _principal, _guest: {"location": "Burnaby"},
+        )
+        monkeypatch.setattr(
+            "rental_search_agent.streamlit_app._build_system_content",
+            lambda: "sys",
+        )
+        _handle_auth_transition(
+            Principal(kind="authenticated", user_id="user-b", name="Bea")
+        )
+        assert ss["pending_chat_prompt"] is None
+        assert ss["pending_ask"] is None
+        assert ss["_auth_user_id"] == "user-b"
+
+    def test_guest_login_keeps_pending_chat_prompt(self, monkeypatch):
+        ss: dict = {
+            "_auth_user_id": None,
+            "pending_chat_prompt": "2 bed condo in Vancouver",
+            "pending_ask": None,
+            "user_preferences": {"location": "Vancouver"},
+            "messages": [{"role": "system", "content": "old"}],
+        }
+
+        class _FakeSt:
+            session_state = ss
+
+        monkeypatch.setattr("rental_search_agent.streamlit_app.st", _FakeSt)
+        monkeypatch.setattr(
+            "rental_search_agent.streamlit_app.merge_guest_prefs_on_login",
+            lambda _principal, _guest: {"location": "Vancouver"},
+        )
+        monkeypatch.setattr(
+            "rental_search_agent.streamlit_app._ensure_prefs_dict",
+            lambda: {"location": "Vancouver"},
+        )
+        monkeypatch.setattr(
+            "rental_search_agent.streamlit_app._build_system_content",
+            lambda: "sys",
+        )
+        _handle_auth_transition(
+            Principal(kind="authenticated", user_id="user-a", name="Ada")
+        )
+        assert ss["pending_chat_prompt"] == "2 bed condo in Vancouver"
+        assert ss["_auth_user_id"] == "user-a"

@@ -179,6 +179,8 @@ def _handle_auth_transition(principal: Principal) -> None:
             # Switching accounts: do not carry previous user's prefs into merge.
             if prev and prev not in ("local", None) and prev != principal.user_id:
                 guest_prefs = {k: "" for k in PREF_KEYS}
+                st.session_state["pending_chat_prompt"] = None
+                st.session_state["pending_ask"] = None
             else:
                 guest_prefs = dict(_ensure_prefs_dict())
             merged = merge_guest_prefs_on_login(principal, guest_prefs)

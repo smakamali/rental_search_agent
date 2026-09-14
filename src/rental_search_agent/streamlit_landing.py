@@ -206,7 +206,7 @@ def format_landing_beds_chip(min_bedrooms: Any, max_bedrooms: Any = None) -> str
     if mn:
         return f"{mn} beds"
     if mx:
-        return f"{mx} beds"
+        return f"≤ {mx} beds"
     return None
 
 
@@ -270,14 +270,14 @@ def missing_required_search_fields(
 
 def landing_saved_prefs_heading(prefs: Mapping[str, Any] | None) -> str:
     """Section title for the saved-preferences summary, based on missing required fields."""
-    missing = missing_required_search_fields(prefs)
-    if missing == ("location", "min_bedrooms"):
-        return SAVED_PREFS_HEADING_MISSING_BOTH
-    if missing == ("location",):
+    missing = set(missing_required_search_fields(prefs))
+    if not missing:
+        return SAVED_PREFS_HEADING_READY
+    if missing == {"location"}:
         return SAVED_PREFS_HEADING_MISSING_LOCATION
-    if missing == ("min_bedrooms",):
+    if missing == {"min_bedrooms"}:
         return SAVED_PREFS_HEADING_MISSING_BEDS
-    return SAVED_PREFS_HEADING_READY
+    return SAVED_PREFS_HEADING_MISSING_BOTH
 
 
 def search_has_run(
