@@ -24,6 +24,7 @@ from rental_search_agent.export_results import (
     prepare_export,
     resolve_export_listings,
     sanitize_export_text,
+    successful_analysis_by_id,
 )
 from rental_search_agent.streamlit_results import (
     render_export_control,
@@ -298,6 +299,41 @@ class TestPrepareAndCache:
             filters_text="Location: Vancouver",
         )
 
+    def test_cache_key_ignores_failed_analysis_entries(self):
+        listings = [_sample_listing()]
+        ok = {"match_score_pct": 80, "key_matches": ["balcony"], "key_gaps": []}
+        mixed = {
+            "R1234567": ok,
+            "other": {"error": "boom"},
+        }
+        usable = successful_analysis_by_id(mixed)
+        assert set(usable) == {"R1234567"}
+        prepared = prepare_export(
+            listings,
+            scope="filtered",
+            format="csv",
+            analysis_by_id=mixed,
+        )
+        ui_key = export_cache_key(
+            listings=listings,
+            scope="filtered",
+            format="csv",
+            sort_by=None,
+            filters_text="",
+            analysis_ids=usable.keys(),
+        )
+        assert prepared.cache_key == ui_key
+        # Including the failed id in the UI key must not happen — that was the bug.
+        bad_ui_key = export_cache_key(
+            listings=listings,
+            scope="filtered",
+            format="csv",
+            sort_by=None,
+            filters_text="",
+            analysis_ids=mixed.keys(),
+        )
+        assert prepared.cache_key != bad_ui_key
+
     def test_format_active_filters(self):
         text = format_active_filters(
             {"location": "Vancouver", "min_bedrooms": "2", "budget_max": ""}
@@ -435,6 +471,38 @@ class TestUiWiring:
             render_export_control(listings, enabled=True)
         assert "export_prepared" not in fake_st.session_state
         fake_st.download_button.assert_not_called()
+
+    def test_failed_analysis_does_not_block_download_button(self):
+        listings = [_sample_listing()]
+        prepared = prepare_export(
+            listings,
+            scope="filtered",
+            format="csv",
+            analysis_by_id={"R1234567": {"error": "failed"}},
+        )
+        fake_st = MagicMock()
+        fake_st.session_state = {
+            "export_scope": "filtered",
+            "export_format": "csv",
+            "user_preferences": {},
+            "analysis_result": {"R1234567": {"error": "failed"}},
+            "export_prepared": {
+                "cache_key": prepared.cache_key,
+                "filename": prepared.filename,
+                "mime_type": prepared.mime_type,
+                "data": prepared.data,
+                "row_count": prepared.row_count,
+                "size_label": prepared.size_label,
+            },
+        }
+        fake_st.popover.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        fake_st.popover.return_value.__exit__ = MagicMock(return_value=False)
+        fake_st.radio.side_effect = ["filtered", "csv"]
+        fake_st.button.return_value = False
+
+        with patch("rental_search_agent.streamlit_results.st", fake_st):
+            render_export_control(listings, enabled=True)
+        fake_st.download_button.assert_called()
 
     def test_zero_results_uses_shared_toolbar(self):
         from rental_search_agent.streamlit_landing import render_zero_results

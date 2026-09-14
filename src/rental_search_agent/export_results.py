@@ -621,12 +621,28 @@ def listing_to_export_row(
     return row
 
 
+def successful_analysis_by_id(
+    analysis_by_id: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Mapping[str, Any]]:
+    """Keep only usable Analyze payloads (drop error stubs) for export + cache keys."""
+    out: dict[str, Mapping[str, Any]] = {}
+    for lid, payload in (analysis_by_id or {}).items():
+        if not isinstance(payload, Mapping):
+            continue
+        if "error" in payload:
+            continue
+        key = str(lid).strip()
+        if key:
+            out[key] = payload
+    return out
+
+
 def listings_to_export_rows(
     listings: Sequence[Mapping[str, Any]],
     *,
     analysis_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    analysis_by_id = analysis_by_id or {}
+    analysis_by_id = successful_analysis_by_id(analysis_by_id)
     rows: list[dict[str, str]] = []
     for listing in listings:
         lid = str(listing.get("id") or "")
@@ -875,19 +891,15 @@ def prepare_export(
     when: date | None = None,
 ) -> PreparedExport:
     """Build export bytes for the given listings and format."""
-    rows = listings_to_export_rows(listings, analysis_by_id=analysis_by_id)
-    analysis_ids = [
-        lid
-        for lid, payload in (analysis_by_id or {}).items()
-        if isinstance(payload, Mapping) and "error" not in payload
-    ]
+    usable_analysis = successful_analysis_by_id(analysis_by_id)
+    rows = listings_to_export_rows(listings, analysis_by_id=usable_analysis)
     cache_key = export_cache_key(
         listings=listings,
         scope=scope,
         format=format,
         sort_by=sort_by,
         filters_text=filters_text,
-        analysis_ids=analysis_ids,
+        analysis_ids=usable_analysis.keys(),
     )
     filename = build_export_filename(
         scope=scope, count=len(rows), format=format, when=when

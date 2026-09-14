@@ -1075,17 +1075,14 @@ def render_export_control(listings: list[dict], *, enabled: bool = True) -> None
         format_active_filters,
         prepare_export,
         resolve_export_listings,
+        successful_analysis_by_id,
     )
 
     prefs = st.session_state.get("user_preferences") or {}
     filters_text = format_active_filters(prefs)
     sort_by = st.session_state.get("last_sort_by")
     sort_label = format_sort_by_label(sort_by) or ordered_by_caption(sort_by)
-    analysis_by_id = {
-        str(k): v
-        for k, v in (st.session_state.get("analysis_result") or {}).items()
-        if isinstance(v, dict)
-    }
+    analysis_by_id = successful_analysis_by_id(st.session_state.get("analysis_result") or {})
 
     scopes = available_export_scopes(
         filtered_count=len(listings),
