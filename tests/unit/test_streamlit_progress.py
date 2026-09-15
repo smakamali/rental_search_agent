@@ -56,18 +56,26 @@ class TestSharedComponent:
 
     def test_panel_renders_in_page_markdown_not_iframe(self):
         from rental_search_agent import streamlit_progress as progress_mod
-        from rental_search_agent.streamlit_app import _inject_app_chrome_css, _main_body
+        from rental_search_agent.streamlit_app import (
+            _inject_app_chrome_css,
+            _inject_offscreen_chrome,
+            _main_body,
+        )
 
         render_src = inspect.getsource(progress_mod.SearchProgressPanel._render)
         chrome_src = inspect.getsource(_inject_app_chrome_css)
+        offscreen_src = inspect.getsource(_inject_offscreen_chrome)
         main_src = inspect.getsource(_main_body)
+        header_src = inspect.getsource(render_app_header)
         assert "markdown" in render_src
         assert "components.html" not in render_src
         assert "PROGRESS_CSS" in chrome_src
         assert "inject_search_progress_css" not in main_src
-        header_src = inspect.getsource(render_app_header)
-        assert "_inject_app_chrome_css" in header_src
-        assert "_inject_app_chrome_css" not in main_src
+        assert "_inject_app_chrome_css" in offscreen_src
+        assert "st.sidebar" in offscreen_src
+        assert "_inject_offscreen_chrome" in main_src
+        assert "_inject_app_chrome_css" not in header_src
+        assert "_inject_sidebar_restore_control" not in header_src
         assert "rsa_search_progress_slot" in main_src
         assert main_src.index("if pending_pref or chat_work_pending") < main_src.index(
             "st.empty()"

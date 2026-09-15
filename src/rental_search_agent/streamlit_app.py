@@ -287,9 +287,6 @@ def render_app_header(principal: Principal) -> None:
             st.login("google")
 
     with st.container(key="rsa_app_header"):
-        _inject_app_chrome_css()
-        _inject_chat_blob_css()
-        inject_landing_css()
         brand_col, account_col = st.columns([3.2, 1.35], vertical_alignment="center")
         with brand_col:
             st.markdown(
@@ -304,7 +301,6 @@ def render_app_header(principal: Principal) -> None:
             )
         with account_col:
             _account_controls()
-        _inject_sidebar_restore_control()
 
 
 def _inject_sidebar_restore_control() -> None:
@@ -491,7 +487,7 @@ def _inject_app_chrome_css() -> None:
             background: rgba(14, 17, 22, 0.97) !important;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
             backdrop-filter: blur(10px);
-            overflow: visible !important;
+            overflow: hidden !important;
             pointer-events: auto !important;
         }
         /* Keep Streamlit header shell for the native open-sidebar control, but
@@ -553,6 +549,7 @@ def _inject_app_chrome_css() -> None:
             > div[data-testid="stVerticalBlock"] {
             height: 3.5rem !important;
             justify-content: center !important;
+            gap: 0 !important;
         }
         [class*="st-key-rsa_app_header"] div[data-testid="stHorizontalBlock"] {
             display: flex !important;
@@ -1113,6 +1110,19 @@ def _inject_chat_blob_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _inject_offscreen_chrome() -> None:
+    """Park style tags and the restore iframe in the sidebar.
+
+    They must not occupy the main column (blank band under the header) or the
+    header row itself (that pushes the title and Sign out down).
+    """
+    with st.sidebar:
+        _inject_app_chrome_css()
+        _inject_chat_blob_css()
+        inject_landing_css()
+        _inject_sidebar_restore_control()
 
 
 def _apply_listing_state(listing_state: dict | None) -> None:
@@ -1769,6 +1779,7 @@ def _main_body() -> None:
         st.session_state["_dev_prefs_loaded"] = True
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
         principal = _bind_runtime()
+    _inject_offscreen_chrome()
     render_app_header(principal)
     _render_preferences_sidebar()
 
