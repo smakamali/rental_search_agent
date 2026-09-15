@@ -48,12 +48,12 @@ from rental_search_agent.search_progress import (
     STAGE_SEARCH,
     invoke_progress,
 )
+from rental_search_agent.search_progress import PROGRESS_CSS
 from rental_search_agent.streamlit_progress import (
     SearchProgressPanel,
     bind_search_progress_panel,
     bound_progress_callback,
     get_bound_search_progress_panel,
-    inject_search_progress_css,
     search_workflow_pending,
 )
 from rental_search_agent.preference_resolution import (
@@ -287,6 +287,9 @@ def render_app_header(principal: Principal) -> None:
             st.login("google")
 
     with st.container(key="rsa_app_header"):
+        _inject_app_chrome_css()
+        _inject_chat_blob_css()
+        inject_landing_css()
         brand_col, account_col = st.columns([3.2, 1.35], vertical_alignment="center")
         with brand_col:
             st.markdown(
@@ -301,7 +304,7 @@ def render_app_header(principal: Principal) -> None:
             )
         with account_col:
             _account_controls()
-    _inject_sidebar_restore_control()
+        _inject_sidebar_restore_control()
 
 
 def _inject_sidebar_restore_control() -> None:
@@ -757,8 +760,11 @@ def _inject_app_chrome_css() -> None:
             overflow: hidden !important;
             border: none !important;
         }
-        [class*="st-key-rsa_sidebar_restore"] {
+        [class*="st-key-rsa_sidebar_restore"],
+        [class*="st-key-rsa_sidebar_restore"] iframe,
+        [class*="st-key-rsa_sidebar_restore"] [data-testid="stIFrame"] {
             position: absolute !important;
+            display: none !important;
             width: 0 !important;
             height: 0 !important;
             min-height: 0 !important;
@@ -810,6 +816,38 @@ def _inject_app_chrome_css() -> None:
         .stApp[data-theme="light"] [class*="st-key-rsa_app_header"] {
             background: rgba(250, 250, 250, 0.97) !important;
         }
+        /* Immediate wrappers of style-only injects — not the whole main column. */
+        [data-testid="stElementContainer"]:has(> [class*="st-key-rsa_hidden_"]),
+        [data-testid="stElementContainer"]:has(> div > [class*="st-key-rsa_hidden_"]),
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> [class*="st-key-rsa_hidden_"]),
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [class*="st-key-rsa_hidden_"]) {
+            display: none !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            border: none !important;
+        }
+        [class*="st-key-rsa_search_progress_slot"] {
+            max-width: 52rem;
+            margin: 0 auto !important;
+        }
+        [class*="st-key-rsa_search_progress_slot"]:not(:has(.rsa-progress-panel)),
+        [data-testid="stElementContainer"]:has(
+            > [class*="st-key-rsa_search_progress_slot"]:not(:has(.rsa-progress-panel))
+        ) {
+            display: none !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            border: none !important;
+        }
+        """
+        + PROGRESS_CSS
+        + """
         </style>
         """,
         unsafe_allow_html=True,
@@ -1731,10 +1769,6 @@ def _main_body() -> None:
         st.session_state["_dev_prefs_loaded"] = True
         st.session_state["messages"][0] = {"role": "system", "content": _build_system_content()}
         principal = _bind_runtime()
-    _inject_chat_blob_css()
-    _inject_app_chrome_css()
-    inject_landing_css()
-    inject_search_progress_css()
     render_app_header(principal)
     _render_preferences_sidebar()
 
@@ -1876,7 +1910,6 @@ def _main_body() -> None:
                                 on_close=_close_analysis,
                             )
 
-    progress_slot = st.empty()
     pending_pref = st.session_state.get("_pending_pref_search")
     chat_work_pending = bool(
         st.session_state.get("pending_chat_prompt")
@@ -1884,6 +1917,8 @@ def _main_body() -> None:
     )
     panel = None
     if pending_pref or chat_work_pending:
+        with st.container(key="rsa_search_progress_slot"):
+            progress_slot = st.empty()
         panel = SearchProgressPanel(progress_slot)
         bind_search_progress_panel(panel)
     else:
@@ -1914,7 +1949,7 @@ def _main_body() -> None:
         last_sort_by = st.session_state.get("last_sort_by")
         if last_sort_by is None or last_sort_by in ("semantic_score", "match_score"):
             listings = _apply_default_match_score_sort(listings)
-        chat_work_pending = False
+        st.rerun()
 
     panel_kind = center_panel_kind(
         listings=listings,
