@@ -4,36 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-import streamlit as st
-
 from rental_search_agent.search_progress import (
-    PROGRESS_CSS,
     SearchProgressState,
     invoke_progress,
     render_progress_html,
 )
 
 _BOUND_PANEL: SearchProgressPanel | None = None
-
-
-def inject_search_progress_css() -> None:
-    """Panel styles in the main document so type inherits the app font."""
-    with st.container(key="rsa_hidden_css_progress"):
-        st.markdown(
-            f"""
-            <style>
-            [class*="st-key-rsa_search_progress"] {{
-                max-width: 52rem;
-                margin: 0.2rem auto 0.6rem !important;
-            }}
-            [class*="st-key-rsa_search_progress"] [data-testid="stMarkdownContainer"] p {{
-                margin: 0;
-            }}
-            {PROGRESS_CSS}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
 
 
 def search_workflow_pending(session_state: Mapping[str, Any] | None) -> bool:

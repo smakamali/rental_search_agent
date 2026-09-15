@@ -50,6 +50,11 @@ _WEIGHTED_SCORE_HELP = (
 
 def inject_analysis_css() -> None:
     """Scoped styles for the listing-analysis panel (theme-variable friendly)."""
+    with st.container(key="rsa_hidden_css_analysis"):
+        _inject_analysis_css_markup()
+
+
+def _inject_analysis_css_markup() -> None:
     st.markdown(
         """
         <style>

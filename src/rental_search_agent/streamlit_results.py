@@ -563,6 +563,11 @@ def _format_map_price_label(listing: dict) -> str:
 
 def inject_results_css() -> None:
     """Scoped styles for search-result Grid and compact Match (theme-variable friendly)."""
+    with st.container(key="rsa_hidden_css_results"):
+        _inject_results_css_markup()
+
+
+def _inject_results_css_markup() -> None:
     st.markdown(
         """
         <style>
