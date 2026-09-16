@@ -1112,6 +1112,9 @@ def _inject_chat_blob_css() -> None:
             max-height: none !important;
             width: min(420px, calc(100vw - 1.5rem)) !important;
             z-index: 10000 !important;
+            isolation: isolate !important;
+            background: #0e1117 !important;
+            opacity: 1 !important;
             border: 1px solid rgba(128, 128, 128, 0.28) !important;
             border-radius: 12px !important;
             box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12) !important;
@@ -1119,6 +1122,9 @@ def _inject_chat_blob_css() -> None:
             overflow: hidden !important;
             display: flex !important;
             flex-direction: column !important;
+        }}
+        .stApp[data-theme="light"] [class*="st-key-chat_blob"] {{
+            background: #ffffff !important;
         }}
         [class*="st-key-chat_blob"] > div[data-testid="stVerticalBlock"],
         [class*="st-key-chat_blob"] [data-testid="stVerticalBlockBorderWrapper"]
@@ -1767,6 +1773,9 @@ def _render_chat_panel(client, model) -> None:
                 st.rerun()
         return
 
+    pending_prompt = st.session_state.get("pending_chat_prompt")
+    pending = st.session_state.get("pending_ask")
+    live_slot = None
     with st.container(key="chat_blob"):
         head_col, collapse_col = st.columns([4, 1])
         with head_col:
@@ -1778,8 +1787,6 @@ def _render_chat_panel(client, model) -> None:
         # Height is driven by CSS on st-key-chat_history so short viewports do not fight
         # a fixed 720px Python height against the full-height dock.
         with st.container(key="chat_history"):
-            pending_prompt = st.session_state.pop("pending_chat_prompt", None)
-            pending = st.session_state.get("pending_ask")
             if should_render_chat_empty_state(
                 st.session_state.get("messages"),
                 pending_ask=pending,
@@ -1788,36 +1795,42 @@ def _render_chat_panel(client, model) -> None:
                 render_chat_empty_state(on_prompt=_queue_chat_prompt)
             else:
                 _render_chat_history()
-            if pending_prompt:
-                _run_user_prompt(client, model, pending_prompt)
-            elif st.session_state.pop("_pending_agent_step", None):
-                _bind_runtime()
-                try:
-                    payload, listing_state = _run_agent_step_with_ui(client, model)
-                    _sync_searches_from_runtime()
-                    _apply_listing_state(listing_state)
-                    if payload is not None:
-                        st.session_state["pending_ask"] = payload
-                finally:
-                    panel = get_bound_search_progress_panel()
-                    if panel is not None:
-                        panel.finish()
-                    bind_search_progress_panel(None)
-                st.rerun()
-        pending = st.session_state.get("pending_ask")
+            # Reserve the in-flight assistant slot so the send form is still
+            # declared before a long search blocks this run.
+            live_slot = st.empty()
         if pending is not None:
             _render_ask_form(pending)
-            return
-        with st.form("chat_send_form", clear_on_submit=True):
-            prompt = st.text_input(
-                "Message",
-                label_visibility="collapsed",
-                placeholder="e.g. 2 bed condo in Vancouver under 3000",
-            )
-            submitted = st.form_submit_button("Send")
-            if submitted and (prompt or "").strip():
-                st.session_state["pending_chat_prompt"] = prompt.strip()
-                st.rerun()
+        else:
+            with st.form("chat_send_form", clear_on_submit=True):
+                prompt = st.text_input(
+                    "Message",
+                    label_visibility="collapsed",
+                    placeholder="e.g. 2 bed condo in Vancouver under 3000",
+                )
+                submitted = st.form_submit_button("Send")
+                if submitted and (prompt or "").strip():
+                    st.session_state["pending_chat_prompt"] = prompt.strip()
+                    st.rerun()
+
+    prompt_to_run = st.session_state.pop("pending_chat_prompt", None)
+    if prompt_to_run:
+        with live_slot.container():
+            _run_user_prompt(client, model, prompt_to_run)
+    elif st.session_state.pop("_pending_agent_step", None):
+        with live_slot.container():
+            _bind_runtime()
+            try:
+                payload, listing_state = _run_agent_step_with_ui(client, model)
+                _sync_searches_from_runtime()
+                _apply_listing_state(listing_state)
+                if payload is not None:
+                    st.session_state["pending_ask"] = payload
+            finally:
+                panel = get_bound_search_progress_panel()
+                if panel is not None:
+                    panel.finish()
+                bind_search_progress_panel(None)
+            st.rerun()
 
 
 def main() -> None:
@@ -2032,6 +2045,9 @@ def _main_body() -> None:
             listings = _apply_default_match_score_sort(listings)
         st.rerun()
 
+    # Keep the center column mounted during search. Unmounting it changes the
+    # widget path to the fixed chat panel, and Streamlit leaves the previous
+    # (transparent) copy on screen so old and new messages overlap.
     panel_kind = center_panel_kind(
         listings=listings,
         display_source=st.session_state.get("display_source"),
@@ -2039,11 +2055,8 @@ def _main_body() -> None:
         last_filters=get_last_rental_search_filters(
             st.session_state.get("messages") or []
         ),
-        in_progress=bool(chat_work_pending or pending_pref),
     )
-    if panel_kind == "progress":
-        pass
-    elif panel_kind == "results":
+    if panel_kind == "results":
         render_search_results(listings)
     elif panel_kind == "zero_results":
         render_zero_results()
