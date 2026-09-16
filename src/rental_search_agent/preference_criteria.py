@@ -18,7 +18,7 @@ from rental_search_agent.filtering import _house_category_matches
 from rental_search_agent.preference_resolution import EffectiveSearchPreferences
 
 CriterionStatus = Literal["met", "partial", "unmet", "unknown"]
-CriterionGroup = Literal["structural", "proximity", "amenity"]
+CriterionGroup = Literal["structural", "proximity", "amenity", "direction"]
 
 
 @dataclass
@@ -840,6 +840,10 @@ def evaluate_coverage(
         if feat.id == "den" and prefs.require_den:
             continue
         items.append(match_amenity_feature(listing, feat))
+    if prefs.preferred_directions:
+        from rental_search_agent.preferred_directions import evaluate_direction_criterion
+
+        items.append(evaluate_direction_criterion(listing, prefs.preferred_directions))
 
     known = [c for c in items if c.score is not None]
     if not known:
@@ -1017,12 +1021,17 @@ def score_amenity(
 
 def qualitative_for_semantic(prefs: EffectiveSearchPreferences) -> str:
     """Qualitative-only text for the semantic component (avoid re-embedding beds/price)."""
+    from rental_search_agent.preferred_directions import facing_phrase_for_semantic
+
     parts: list[str] = []
     q = (prefs.qualitative_preferences or "").strip()
     if q:
         parts.append(q)
     if prefs.require_den and "den" not in q.lower():
         parts.append("den")
+    facing = facing_phrase_for_semantic(prefs.preferred_directions)
+    if facing:
+        parts.append(facing)
     return " ".join(parts).strip()
 
 

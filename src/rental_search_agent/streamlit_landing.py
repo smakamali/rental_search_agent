@@ -61,7 +61,7 @@ HOW_IT_WORKS_STEPS: tuple[HowItWorksStep, ...] = (
             "Define the requirements that matter to you or use your saved "
             "preferences."
         ),
-        chips=("Location", "Budget", "Bedrooms", "Amenities", "Proximity"),
+        chips=("Location", "Budget", "Bedrooms", "Facing", "Amenities", "Proximity"),
     ),
     HowItWorksStep(
         number="2",

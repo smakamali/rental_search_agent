@@ -22,12 +22,13 @@ from rental_search_agent.display_format import (
 from rental_search_agent.preference_criteria import AMENITY_FEATURES, match_amenity_feature
 from rental_search_agent.scoring_config import DEFAULT_WEIGHTS, get_score_weights
 
-COMPONENT_ORDER = ("structural", "proximity", "amenity", "semantic")
+COMPONENT_ORDER = ("structural", "proximity", "amenity", "direction", "semantic")
 
 COMPONENT_HELP = {
     "structural": "Property basics such as price, size, bedrooms, bathrooms, and type.",
     "proximity": "Location-based criteria such as transit access and commute.",
     "amenity": "Building and unit features such as parking, balcony, and storage.",
+    "direction": "Preferred unit facing or exposure (north, south, east, west, and diagonals).",
     "semantic": (
         "Semantic similarity compares the listing text with broader qualitative "
         "preferences. It is experimental and can be lower when listing text is "
@@ -39,14 +40,21 @@ COMPONENT_CAPTION = {
     "structural": "Price, size, beds, baths",
     "proximity": "Location & commute",
     "amenity": "Building & unit features",
+    "direction": "Facing & exposure",
     "semantic": "Listing details",
 }
 
-GROUP_ORDER = ("structural", "proximity", "amenity")
+GROUP_ORDER = ("structural", "proximity", "amenity", "direction")
 GROUP_TITLES = {
     "structural": "Structural",
     "proximity": "Proximity",
     "amenity": "Amenities",
+    "direction": "Facing",
+}
+
+COMPONENT_TITLES = {
+    **GROUP_TITLES,
+    "semantic": "Semantic",
 }
 
 STATUS_MARKER = {
@@ -319,7 +327,7 @@ def _semantic_note(components: dict[str, Optional[float]], included: Sequence[st
         return False
     others = [
         components.get(k)
-        for k in ("structural", "proximity", "amenity")
+        for k in ("structural", "proximity", "amenity", "direction")
         if k in included and components.get(k) is not None
     ]
     if not others:
@@ -562,7 +570,86 @@ def resolve_ai_listing_summary(
     return fallback, False
 
 
-def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
+def _direction_criterion_to_item(item: Any) -> dict:
+    return {
+        "id": item.id,
+        "label": item.label,
+        "status": item.status,
+        "score": item.score,
+        "weight": item.weight,
+        "group": item.group,
+        "name": item.name or item.label,
+        "observed": item.observed,
+        "required": item.required,
+        "comparator": item.comparator,
+        "source": item.source,
+        "detail": item.detail,
+    }
+
+
+def refresh_direction_breakdown(
+    listing: dict,
+    breakdown: dict,
+    preferred_directions: Sequence[str] | None = None,
+) -> tuple[dict, Optional[float]]:
+    """Re-evaluate facing from the listing so Analyze matches the results table.
+
+    Returns (updated breakdown, new overall match score or None when facing was not refreshed).
+    """
+    from rental_search_agent.match_scoring import combine_component_scores
+    from rental_search_agent.preferred_directions import evaluate_direction_criterion
+
+    dirs = [
+        str(code)
+        for code in (preferred_directions or breakdown.get("preferred_directions") or [])
+        if str(code).strip()
+    ]
+    if not dirs:
+        return dict(breakdown or {}), None
+
+    item = evaluate_direction_criterion(listing or {}, dirs)
+    item_dict = _direction_criterion_to_item(item)
+    checklist: list[Any] = []
+    replaced = False
+    for row in breakdown.get("checklist") or []:
+        if isinstance(row, dict) and (
+            row.get("id") == "direction" or row.get("group") == "direction"
+        ):
+            checklist.append(item_dict)
+            replaced = True
+        else:
+            checklist.append(row)
+    if not replaced:
+        checklist.append(item_dict)
+
+    components = dict(breakdown.get("components") or {})
+    components["direction"] = None if item.score is None else float(item.score)
+    included = [k for k in COMPONENT_ORDER if components.get(k) is not None]
+    try:
+        weights = dict(get_score_weights())
+    except Exception:
+        weights = dict(DEFAULT_WEIGHTS)
+    overall = combine_component_scores(components, weights)
+    total_w = sum(float(weights.get(k, 0.0)) for k in included if float(weights.get(k, 0.0)) > 0)
+    used_weights = {
+        k: round(float(weights.get(k, 0.0)) / total_w, 4) if total_w > 0 else 0.0
+        for k in included
+    }
+    out = dict(breakdown or {})
+    out["checklist"] = checklist
+    out["components"] = components
+    out["included"] = included
+    out["weights_used"] = used_weights
+    out["preferred_directions"] = dirs
+    return out, overall
+
+
+def build_analysis_view(
+    listing: dict,
+    result: dict,
+    *,
+    preferred_directions: Sequence[str] | None = None,
+) -> AnalysisView:
     """Assemble the Analyze UI view-model from a listing + analysis result."""
     listing = listing or {}
     result = result or {}
@@ -573,8 +660,15 @@ def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
     if not headline:
         headline = str(listing.get("id") or "Listing")
 
+    breakdown = dict(result.get("score_breakdown") or listing.get("score_breakdown") or {})
+    breakdown, live_overall = refresh_direction_breakdown(
+        listing, breakdown, preferred_directions
+    )
+
     match_pct: Any = result.get("match_score_pct")
-    if match_pct is not None:
+    if live_overall is not None:
+        match_pct = score_to_pct(live_overall)
+    elif match_pct is not None:
         try:
             match_pct = int(match_pct)
         except (TypeError, ValueError):
@@ -584,7 +678,6 @@ def build_analysis_view(listing: dict, result: dict) -> AnalysisView:
 
     strength_label, strength_blurb = match_strength(match_pct)
 
-    breakdown = result.get("score_breakdown") or listing.get("score_breakdown") or {}
     components = dict(breakdown.get("components") or {})
     included = list(
         breakdown.get("included")
@@ -666,6 +759,7 @@ def weighted_score_line(weights_used: dict[str, float] | None) -> Optional[str]:
         "structural": "Structural",
         "proximity": "Proximity",
         "amenity": "Amenities",
+        "direction": "Facing",
         "semantic": "Semantic",
     }
     for key in COMPONENT_ORDER:

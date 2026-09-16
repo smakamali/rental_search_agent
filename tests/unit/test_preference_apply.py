@@ -78,6 +78,7 @@ class TestStructuralPrefsChanged:
         after["proximity_preferences"] = "15 min"
         after["require_den"] = "true"
         after["qualitative_preferences"] = "balcony"
+        after["preferred_directions"] = "S"
         assert scrape_prefs_changed(before, after) is False
 
 

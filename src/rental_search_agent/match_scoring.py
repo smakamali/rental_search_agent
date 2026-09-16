@@ -1,4 +1,4 @@
-"""Multi-metric listing match scoring: coverage, structural, proximity, amenity, semantic."""
+"""Multi-metric listing match scoring: coverage, structural, proximity, amenity, direction, semantic."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence
 
 from rental_search_agent.logging_config import log_stage
+from rental_search_agent.preferred_directions import score_direction
 from rental_search_agent.preference_criteria import (
     CriterionResult,
     evaluate_coverage,
@@ -33,7 +34,7 @@ from rental_search_agent.semantic_scoring import _cosine_similarity, embed_texts
 
 logger = logging.getLogger(__name__)
 
-COMPONENT_KEYS = ("structural", "proximity", "amenity", "semantic")
+COMPONENT_KEYS = ("structural", "proximity", "amenity", "direction", "semantic")
 # Coverage is still computed for checklist / Analyze UI but not folded into match_score.
 BREAKDOWN_EXTRA_KEYS = ("coverage",)
 
@@ -98,11 +99,13 @@ def _score_one_listing(
     structural = score_structural(prefs, d)
     proximity = score_proximity(d, proximity_rules)
     amenity = score_amenity(d, amenity_features, skip_ids={"den"} if prefs.require_den else None)
+    direction = score_direction(d, prefs.preferred_directions)
     components: Dict[str, Optional[float]] = {
         "coverage": round(coverage, 4) if coverage is not None else None,
         "structural": round(structural, 4) if structural is not None else None,
         "proximity": round(proximity, 4) if proximity is not None else None,
         "amenity": round(amenity, 4) if amenity is not None else None,
+        "direction": round(direction, 4) if direction is not None else None,
         "semantic": round(semantic_score, 4) if semantic_score is not None else None,
     }
     overall = combine_component_scores(components, weights)
@@ -121,6 +124,7 @@ def _score_one_listing(
         "weights_used": used_weights,
         "coverage": components.get("coverage"),
         "checklist": [_criterion_to_dict(c) for c in checklist],
+        "preferred_directions": list(prefs.preferred_directions or []),
     }
     return d
 

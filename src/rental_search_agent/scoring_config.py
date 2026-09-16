@@ -6,11 +6,12 @@ average at score time (weights are renormalized over present components only).
 
 Coverage is computed for the Analyze checklist / breakdown but is NOT part of
 the overall weighted match_score (avoids double-counting with structural /
-proximity / amenity).
+proximity / amenity / direction).
 
   SCORE_WEIGHT_STRUCTURAL=0.35
   SCORE_WEIGHT_PROXIMITY=0.25
   SCORE_WEIGHT_AMENITY=0.20
+  SCORE_WEIGHT_DIRECTION=0.12
   SCORE_WEIGHT_SEMANTIC=0.20
   SCORE_PARALLEL_WORKERS=4
   SCORE_PARALLEL_MIN_LISTINGS=8
@@ -26,6 +27,7 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "structural": 0.35,
     "proximity": 0.25,
     "amenity": 0.20,
+    "direction": 0.12,
     "semantic": 0.20,
 }
 
@@ -33,6 +35,7 @@ _ENV_KEYS = {
     "structural": "SCORE_WEIGHT_STRUCTURAL",
     "proximity": "SCORE_WEIGHT_PROXIMITY",
     "amenity": "SCORE_WEIGHT_AMENITY",
+    "direction": "SCORE_WEIGHT_DIRECTION",
     "semantic": "SCORE_WEIGHT_SEMANTIC",
 }
 

@@ -56,6 +56,13 @@ from rental_search_agent.streamlit_progress import (
     get_bound_search_progress_panel,
     search_workflow_pending,
 )
+from rental_search_agent.preferred_directions import (
+    CANONICAL_DIRECTIONS,
+    DIRECTION_LABELS,
+    format_facing_suffix,
+    parse_preferred_directions,
+    serialize_preferred_directions,
+)
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     is_placeholder_qualitative,
@@ -1666,6 +1673,23 @@ def _render_preferences_sidebar() -> None:
                 )
 
             with st.container(border=True):
+                st.markdown("**Preferred direction(s)**")
+                saved_dirs = parse_preferred_directions(prefs.get("preferred_directions"))
+                preferred_dirs = st.multiselect(
+                    "Preferred direction(s)",
+                    options=list(CANONICAL_DIRECTIONS),
+                    default=saved_dirs,
+                    format_func=lambda code: DIRECTION_LABELS.get(code, code),
+                    key="pref_preferred_directions",
+                    label_visibility="collapsed",
+                    help="Rank listings whose remarks mention facing or exposure. Not a hard filter; listings that do not mention facing are left unpenalized.",
+                )
+                _render_pref_chips(
+                    [DIRECTION_LABELS.get(c, c) for c in preferred_dirs],
+                    section="Facing",
+                )
+
+            with st.container(border=True):
                 st.markdown("**Amenities**")
                 qualitative = st.text_area(
                     "Amenities",
@@ -1704,6 +1728,7 @@ def _render_preferences_sidebar() -> None:
                         "require_den": "true" if require_den else "",
                         "min_sqft": (min_sqft or "").strip(),
                         "proximity_preferences": (proximity or "").strip(),
+                        "preferred_directions": serialize_preferred_directions(preferred_dirs),
                         "qualitative_preferences": (qualitative or "").strip(),
                     }
                 )
@@ -1919,12 +1944,21 @@ def _main_body() -> None:
             prefs = _sync_preferences_from_file()
             qualitative = (prefs.get("qualitative_preferences") or "").strip()
             proximity = (prefs.get("proximity_preferences") or "").strip()
+            facing = format_facing_suffix(
+                parse_preferred_directions(prefs.get("preferred_directions"))
+            )
             preferences_text = qualitative
             if proximity:
                 preferences_text = (
                     f"{preferences_text}\n\nProximity: {proximity}".strip()
                     if preferences_text
                     else f"Proximity: {proximity}"
+                )
+            if facing:
+                preferences_text = (
+                    f"{preferences_text}\n\n{facing}".strip()
+                    if preferences_text
+                    else facing
                 )
             if not preferences_text:
                 # Allow analyze when any score-relevant stored preference exists
@@ -1950,18 +1984,18 @@ def _main_body() -> None:
                         st.session_state["analysis_result"] = {}
                     st.rerun()
                 conversation_context = st.session_state.get("chat_summary") or ""
+                chat_messages = st.session_state.get("messages") or []
+                search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                chat = dict(search_criteria or {})
+                if qualitative and not is_placeholder_qualitative(qualitative):
+                    chat["qualitative_preferences"] = qualitative
+                effective = merge_chat_over_stored(prefs, chat)
+                if is_placeholder_qualitative(effective.qualitative_preferences):
+                    effective = effective.model_copy(update={"qualitative_preferences": ""})
                 if analyze_listing_id not in analysis_result:
                     with st.spinner("Analyzing listing..."):
                         try:
-                            chat_messages = st.session_state.get("messages") or []
-                            search_criteria = _get_active_search_criteria_from_messages(chat_messages)
-                            proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                            chat = dict(search_criteria or {})
-                            if qualitative and not is_placeholder_qualitative(qualitative):
-                                chat["qualitative_preferences"] = qualitative
-                            effective = merge_chat_over_stored(prefs, chat)
-                            if is_placeholder_qualitative(effective.qualitative_preferences):
-                                effective = effective.model_copy(update={"qualitative_preferences": ""})
                             result = analyze_listing_against_preferences(
                                 analyze_listing,
                                 preferences_text,
@@ -2000,6 +2034,7 @@ def _main_body() -> None:
                                 analyze_listing,
                                 result,
                                 on_close=_close_analysis,
+                                preferred_directions=effective.preferred_directions,
                             )
 
     pending_pref = st.session_state.get("_pending_pref_search")

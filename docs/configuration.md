@@ -61,6 +61,7 @@ Weights are non-negative and renormalized over present components. Coverage is c
 | `SCORE_WEIGHT_STRUCTURAL` | `0.35` |
 | `SCORE_WEIGHT_PROXIMITY` | `0.25` |
 | `SCORE_WEIGHT_AMENITY` | `0.20` |
+| `SCORE_WEIGHT_DIRECTION` | `0.12` |
 | `SCORE_WEIGHT_SEMANTIC` | `0.20` |
 | `SCORE_PARALLEL_WORKERS` | `4` |
 | `SCORE_PARALLEL_MIN_LISTINGS` | `8` |

@@ -132,7 +132,7 @@ STAGE_COPY: dict[str, StageCopy] = {
         title="Scoring and ranking matches",
         operation="Calculating final match scores",
         description=(
-            "Combining structural, proximity, amenity, and semantic evidence "
+            "Combining structural, proximity, amenity, facing, and semantic evidence "
             "for {remaining_count} matches"
         ),
         stepper_label="Score & rank",

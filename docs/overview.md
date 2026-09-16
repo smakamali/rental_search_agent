@@ -10,7 +10,7 @@ Package name: `rental-search-agent` (Python ≥ 3.10).
 |------------|-------------|
 | **Natural-language search** | LLM agent parses beds, baths, size, budget, location, listing type (`for_rent` / `for_sale`). |
 | **Metro / multi-city search** | Named metros expand to municipalities; user multi-selects cities; one scrape fans out in parallel and merges by listing id. |
-| **Sidebar Search Preferences** | Location, listing type, structural prefs, proximity text, qualitative prefs; **Search** scrapes or re-ranks without chat. |
+| **Sidebar Search Preferences** | Location, listing type, structural prefs, proximity text, preferred facing, qualitative prefs; **Search** scrapes or re-ranks without chat. |
 | **Preference pipeline** | After each successful scrape: structural filter → proximity enrich (if set) → multi-metric `match_score` ranking. Deterministic code, not an LLM tool chain. |
 | **Refine in chat** | Narrow/sort/relax within the last scrape; out-of-scrape bounds trigger a new scrape. |
 | **Proximity** | Free-text rules (e.g. “max 30 min drive to downtown”) via Google Geocoding, Distance Matrix / Directions, and Places. |
