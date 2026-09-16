@@ -333,6 +333,7 @@ class TestTableHelpers:
             "price",
             "dom",
             "match",
+            "facing",
             "proximity",
             "analyze",
         ]
@@ -392,6 +393,40 @@ class TestTableHelpers:
         assert "23 min to 800 Burrard St" in prox
         assert "2 min walk to transit" in prox
         assert "(some unknown)" not in prox
+
+    def test_facing_column_is_always_present(self):
+        listings = [{"id": "a", "rank": 1, "address": "A St"}]
+        keys = [col.key for col in table_column_schema(listings)]
+        assert keys.index("facing") == keys.index("match") + 1
+        facing_col = next(col for col in table_column_schema(listings) if col.key == "facing")
+        assert facing_col.header == "Facing"
+
+    def test_facing_row_uses_inferred_listing_direction(self):
+        rows = _listings_to_table_rows(
+            [
+                {
+                    "id": "a",
+                    "rank": 1,
+                    "address": "A St",
+                    "description": "Bright south-facing balcony with city views.",
+                },
+                {
+                    "id": "b",
+                    "rank": 2,
+                    "address": "B St",
+                    "description": "South and west facing windows throughout.",
+                },
+                {
+                    "id": "c",
+                    "rank": 3,
+                    "address": "C St",
+                    "description": "Two bedroom condo with balcony and parking.",
+                },
+            ]
+        )
+        assert rows[0]["Facing"] == "South"
+        assert rows[1]["Facing"] == "South-West"
+        assert rows[2]["Facing"] == "—"
 
 
 class TestMapHelpers:

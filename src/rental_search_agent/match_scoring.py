@@ -124,6 +124,7 @@ def _score_one_listing(
         "weights_used": used_weights,
         "coverage": components.get("coverage"),
         "checklist": [_criterion_to_dict(c) for c in checklist],
+        "preferred_directions": list(prefs.preferred_directions or []),
     }
     return d
 

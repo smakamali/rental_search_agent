@@ -1984,18 +1984,18 @@ def _main_body() -> None:
                         st.session_state["analysis_result"] = {}
                     st.rerun()
                 conversation_context = st.session_state.get("chat_summary") or ""
+                chat_messages = st.session_state.get("messages") or []
+                search_criteria = _get_active_search_criteria_from_messages(chat_messages)
+                proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
+                chat = dict(search_criteria or {})
+                if qualitative and not is_placeholder_qualitative(qualitative):
+                    chat["qualitative_preferences"] = qualitative
+                effective = merge_chat_over_stored(prefs, chat)
+                if is_placeholder_qualitative(effective.qualitative_preferences):
+                    effective = effective.model_copy(update={"qualitative_preferences": ""})
                 if analyze_listing_id not in analysis_result:
                     with st.spinner("Analyzing listing..."):
                         try:
-                            chat_messages = st.session_state.get("messages") or []
-                            search_criteria = _get_active_search_criteria_from_messages(chat_messages)
-                            proximity_rules = _get_parsed_proximity_rules_from_messages(chat_messages)
-                            chat = dict(search_criteria or {})
-                            if qualitative and not is_placeholder_qualitative(qualitative):
-                                chat["qualitative_preferences"] = qualitative
-                            effective = merge_chat_over_stored(prefs, chat)
-                            if is_placeholder_qualitative(effective.qualitative_preferences):
-                                effective = effective.model_copy(update={"qualitative_preferences": ""})
                             result = analyze_listing_against_preferences(
                                 analyze_listing,
                                 preferences_text,
@@ -2034,6 +2034,7 @@ def _main_body() -> None:
                                 analyze_listing,
                                 result,
                                 on_close=_close_analysis,
+                                preferred_directions=effective.preferred_directions,
                             )
 
     pending_pref = st.session_state.get("_pending_pref_search")

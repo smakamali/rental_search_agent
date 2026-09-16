@@ -20,6 +20,7 @@ from rental_search_agent.preferred_directions import (
     chat_direction_override,
     evaluate_direction_criterion,
     extract_listing_facings,
+    format_listing_facing,
     pairwise_score,
     parse_preferred_directions,
     preferred_directions_from_preferences_text,
@@ -70,20 +71,39 @@ class TestCircularAdjacency:
         assert pairwise_score("SW", "SW") == 1.0
         assert pairwise_score("NE", "SW") == 0.0
 
+    def test_true_diagonal_does_not_count_as_both_cardinals(self):
+        listing = _listing(description="Southeast-facing balcony with city views.")
+        assert extract_listing_facings(listing) == ["SE"]
+        assert score_direction(listing, ["S"]) == STEP_SCORES[1]
+        assert score_direction(listing, ["SE"]) == 1.0
+
 
 class TestOrAggregation:
     def test_selected_s_and_w_listing_sw_uses_best_adjacent(self):
         score = best_direction_score(["SW"], ["S", "W"])
         assert score == STEP_SCORES[1]
 
-    def test_corner_unit_uses_max(self):
-        # South+west observed vs SW pref: SW is exact on the pair's closer point... 
-        # observed S and W vs preferred SW → max(S-SW, W-SW) = 0.70
-        assert best_direction_score(["S", "W"], ["SW"]) == STEP_SCORES[1]
-        # observed SW vs preferred S,W → same
+    def test_corner_unit_composes_intercardinal(self):
+        # Adjacent cardinals on a listing compose the diagonal between them.
+        assert best_direction_score(["S", "W"], ["SW"]) == 1.0
+        assert best_direction_score(["E", "S"], ["SE"]) == 1.0
+        # Preference-side S+W stays OR: a true SW listing is adjacent, not exact.
         assert best_direction_score(["SW"], ["S", "W"]) == STEP_SCORES[1]
-        # exact among two observed
         assert best_direction_score(["S", "W"], ["S"]) == 1.0
+
+    def test_composed_diagonal_scores_zero_against_opposite(self):
+        # East+south is SE; leftover E/S must not leak the 3-step (10%) consolation vs NW.
+        assert pairwise_score("SE", "NW") == 0.0
+        assert best_direction_score(["SE"], ["NW"]) == 0.0
+        assert best_direction_score(["E", "S"], ["NW"]) == 0.0
+        listing = _listing(description="The unit is a corner unit facing east and south.")
+        assert score_direction(listing, ["NW"]) == 0.0
+        assert score_direction(listing, ["SE"]) == 1.0
+        assert score_direction(listing, ["S"]) == 1.0
+
+    def test_opposite_cardinals_do_not_compose(self):
+        assert best_direction_score(["N", "S"], ["E"]) == STEP_SCORES[2]
+        assert best_matching_observed(["N", "S"], ["SE"]) == ["S"]
 
 
 class TestChecklistShowsMatchedFacingOnly:
@@ -121,6 +141,14 @@ class TestChecklistShowsMatchedFacingOnly:
         assert row.status == "partial"
         assert row.observed == "South"
 
+    def test_east_and_south_corner_is_south_east(self):
+        listing = _listing(description="The unit is a corner unit facing east and south.")
+        row = evaluate_direction_criterion(listing, ["SE"])
+        assert row.status == "met"
+        assert row.observed == "South-East"
+        assert score_direction(listing, ["SE"]) == 1.0
+        assert score_direction(listing, ["S"]) == 1.0
+
 
 class TestListingExtract:
     def test_south_facing_balcony(self):
@@ -133,7 +161,12 @@ class TestListingExtract:
 
     def test_south_and_west_facing(self):
         listing = _listing(description="South and west facing windows throughout.")
-        assert extract_listing_facings(listing) == ["S", "W"]
+        assert extract_listing_facings(listing) == ["S", "SW", "W"]
+
+    def test_east_and_south_facing_composes_south_east(self):
+        listing = _listing(description="The unit is a corner unit facing east and south.")
+        assert extract_listing_facings(listing) == ["E", "SE", "S"]
+        assert format_listing_facing(listing) == "South-East"
 
     def test_north_vancouver_is_not_facing(self):
         listing = _listing(description="Beautiful condo in North Vancouver near Lonsdale.")
@@ -146,6 +179,14 @@ class TestListingExtract:
     def test_east_side_is_not_facing(self):
         listing = _listing(description="Located on the east side close to Commercial Drive.")
         assert extract_listing_facings(listing) == []
+
+    def test_format_listing_facing_joins_labels_and_dashes_unknown(self):
+        south = _listing(description="Bright south-facing balcony with city views.")
+        corner = _listing(description="South and west facing windows throughout.")
+        unknown = _listing(description="Two bedroom condo with balcony and parking.")
+        assert format_listing_facing(south) == "South"
+        assert format_listing_facing(corner) == "South-West"
+        assert format_listing_facing(unknown) == "—"
 
 
 class TestScoreOmitUnknown:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import math
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import streamlit as st
 
@@ -784,10 +784,13 @@ def render_listing_analysis(
     result: dict,
     *,
     on_close: Callable[[], None] | None = None,
+    preferred_directions: Sequence[str] | None = None,
 ) -> None:
     """Full Analyze panel for one listing."""
     inject_analysis_css()
-    view = build_analysis_view(listing, result)
+    view = build_analysis_view(
+        listing, result, preferred_directions=preferred_directions
+    )
     with st.container():
         render_listing_header(view, listing, on_close=on_close)
         render_listing_metadata(listing)

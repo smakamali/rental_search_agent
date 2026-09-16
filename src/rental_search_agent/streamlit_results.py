@@ -36,6 +36,7 @@ from rental_search_agent.display_format import (
     split_listing_address,
 )
 from rental_search_agent.geocoding import NEAREST_TRANSIT_LOCATION
+from rental_search_agent.preferred_directions import format_listing_facing
 
 RESULTS_VIEW_ALIASES = {"cards": "grid"}
 VALID_RESULTS_VIEWS = ("grid", "table", "map")
@@ -311,8 +312,12 @@ def listing_result_identity(listing: dict, fallback_index: int) -> dict[str, Any
 
 def request_listing_analysis(listing: dict) -> None:
     """Shared Analyze action: same session keys as Grid/Table Analyze buttons."""
-    st.session_state["analyze_listing_id"] = listing.get("id")
+    listing_id = listing.get("id")
+    st.session_state["analyze_listing_id"] = listing_id
     st.session_state["analyze_listing"] = listing
+    cached = st.session_state.get("analysis_result")
+    if isinstance(cached, dict) and listing_id in cached:
+        cached.pop(listing_id, None)
     st.rerun()
 
 
@@ -771,7 +776,7 @@ def table_has_visible_tags(listings: list[dict]) -> bool:
 
 
 def table_column_schema(listings: list[dict]) -> list[TableColumn]:
-    """Column headers/widths for the comparison table. Tags only when a result has one."""
+    """Column headers/widths for the comparison table. Facing is always shown; tags only when a result has one."""
     columns = [
         TableColumn("rank", "Rank", 0.42),
         TableColumn("photo", "Photo", 0.7),
@@ -788,6 +793,12 @@ def table_column_schema(listings: list[dict]) -> list[TableColumn]:
             "Approximate days since listing publication",
         ),
         TableColumn("match", "Match", 0.8),
+        TableColumn(
+            "facing",
+            "Facing",
+            0.85,
+            "Inferred from listing description",
+        ),
     ]
     if table_has_visible_tags(listings):
         columns.append(TableColumn("tags", "Tags", 0.85))
@@ -802,7 +813,7 @@ def table_column_schema(listings: list[dict]) -> list[TableColumn]:
 
 def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     """Build table-friendly rows: rank, photo, address, type, bed, bath, size, price,
-    days on market, match score, tags, Proximity, URL.
+    days on market, match score, inferred facing, tags, Proximity, URL.
 
     Uses each listing's 'rank' field (assigned by the LLM tool layer in client.py) rather
     than its position in this list, so numbering stays correct even when this list has been
@@ -823,6 +834,7 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
             "price": _format_listing_price(listing),
             "days_on_market": _format_days_on_market(listing),
             "match_score": _format_match_score(listing),
+            "Facing": format_listing_facing(listing),
             "tags": _format_tags(listing),
             "Proximity": format_proximity_caption(
                 parse_proximity_display(listing.get("proximity"))
@@ -927,6 +939,9 @@ def _render_table_cell(column_key: str, listing: dict, index: int) -> None:
         return
     if column_key == "match":
         render_compact_match_score(listing, size=28, show_label=False)
+        return
+    if column_key == "facing":
+        st.write(format_listing_facing(listing))
         return
     if column_key == "tags":
         labels = listing_tag_labels(listing)

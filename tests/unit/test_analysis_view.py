@@ -567,3 +567,33 @@ class TestListingSummaryAndDescription:
         assert view.components["semantic"] == 0.46
         assert view.criteria_by_group["structural"][0].name == "Price"
         assert view.strength_label == "Good match"
+
+    def test_stale_facing_checklist_is_refreshed_from_listing(self):
+        listing = _listing(
+            description="The unit is a corner unit facing east and south."
+        )
+        result = {
+            "match_score_pct": 70,
+            "score_breakdown": {
+                "components": {"direction": 0.7},
+                "included": ["direction"],
+                "weights_used": {"direction": 1.0},
+                "checklist": [
+                    {
+                        "id": "direction",
+                        "group": "direction",
+                        "name": "Facing",
+                        "status": "partial",
+                        "score": 0.7,
+                        "observed": "South",
+                        "source": "Inferred",
+                    }
+                ],
+            },
+        }
+        view = build_analysis_view(listing, result, preferred_directions=["SE"])
+        facing = view.criteria_by_group["direction"][0]
+        assert facing.observed == "South-East"
+        assert facing.status == "met"
+        assert view.components["direction"] == 1.0
+        assert view.match_pct == 100

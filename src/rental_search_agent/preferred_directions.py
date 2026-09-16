@@ -24,6 +24,15 @@ DIRECTION_LABELS: dict[str, str] = {
 
 DIRECTION_INDEX: dict[str, int] = {code: i for i, code in enumerate(CANONICAL_DIRECTIONS)}
 
+# Adjacent cardinals (N/E/S/W) compose the intercardinal between them. A corner
+# unit "facing east and south" is South-East, not two unrelated exposures.
+_INTERCARDINAL_FROM_CARDINALS: dict[frozenset[str], str] = {
+    frozenset({"N", "E"}): "NE",
+    frozenset({"E", "S"}): "SE",
+    frozenset({"S", "W"}): "SW",
+    frozenset({"W", "N"}): "NW",
+}
+
 # Circular step distance → score. SW pref: S/W are 1 step; N/E are 3; NE is opposite.
 STEP_SCORES: dict[int, float] = {
     0: 1.00,
@@ -178,6 +187,66 @@ def order_canonical(codes: Sequence[str]) -> list[str]:
     return out
 
 
+def expand_adjacent_cardinal_pairs(codes: Sequence[str]) -> list[str]:
+    """Add intercardinals implied by adjacent cardinal pairs (listing-side only)."""
+    ordered = order_canonical(codes)
+    present = set(ordered)
+    extra = [
+        inter
+        for pair, inter in _INTERCARDINAL_FROM_CARDINALS.items()
+        if pair <= present and inter not in present
+    ]
+    if not extra:
+        return ordered
+    return order_canonical(list(present) + extra)
+
+
+def collapse_adjacent_cardinal_pairs(codes: Sequence[str]) -> list[str]:
+    """Replace adjacent cardinal pairs with the composed intercardinal (display)."""
+    present = set(order_canonical(codes))
+    consumed: set[str] = set()
+    for pair, inter in _INTERCARDINAL_FROM_CARDINALS.items():
+        if pair <= present:
+            present.add(inter)
+            consumed |= pair
+    present -= consumed
+    return order_canonical(present)
+
+
+def _direction_score_candidates(
+    observed: Sequence[str],
+    preferred: Sequence[str],
+) -> list[tuple[str, float]]:
+    """Per-observed scores for OR aggregation.
+
+    Adjacent cardinals compose an intercardinal (east+south → SE). That composed
+    facing uses full circular distance. The consumed walls still count as an
+    exact match (east+south vs South = 100%) but must not leak a 3-step
+    consolation vs the opposite diagonal (east+south vs NW would otherwise be 10%).
+    """
+    pref = order_canonical(preferred)
+    expanded = expand_adjacent_cardinal_pairs(observed)
+    if not expanded or not pref:
+        return []
+    composed = collapse_adjacent_cardinal_pairs(expanded)
+    consumed = set(expanded) - set(composed)
+    scored: list[tuple[str, float]] = []
+    for o in composed:
+        best_for_o: Optional[float] = None
+        for p in pref:
+            pair = pairwise_score(o, p)
+            if pair is None:
+                continue
+            if best_for_o is None or pair > best_for_o:
+                best_for_o = pair
+        if best_for_o is not None:
+            scored.append((o, best_for_o))
+    for o in order_canonical(consumed):
+        if o in pref:
+            scored.append((o, 1.0))
+    return scored
+
+
 def canonicalize_token(token: str | None) -> Optional[str]:
     """Map a single token/phrase to a canonical code, or None if not a direction."""
     s = re.sub(r"[\s_]+", " ", (token or "").strip().lower())
@@ -228,6 +297,14 @@ def serialize_preferred_directions(dirs: Sequence[str] | None) -> str:
 
 def display_labels(dirs: Sequence[str] | None) -> list[str]:
     return [DIRECTION_LABELS[c] for c in order_canonical(dirs or []) if c in DIRECTION_LABELS]
+
+
+def format_listing_facing(listing: Union[dict, Any], unknown: str = "—") -> str:
+    """Compact inferred facing for table/export cells. Unknown listings use ``unknown``."""
+    labels = display_labels(collapse_adjacent_cardinal_pairs(extract_listing_facings(listing)))
+    if not labels:
+        return unknown
+    return ", ".join(labels)
 
 
 def format_facing_suffix(dirs: Sequence[str] | None) -> str:
@@ -286,7 +363,9 @@ def extract_facings_from_text(text: str) -> list[str]:
 
 
 def extract_listing_facings(listing: Union[dict, Any]) -> list[str]:
-    return extract_facings_from_text(listing_text_blob_for_facing(listing))
+    return expand_adjacent_cardinal_pairs(
+        extract_facings_from_text(listing_text_blob_for_facing(listing))
+    )
 
 
 def parse_directions_from_free_text(text: str) -> list[str]:
@@ -384,19 +463,10 @@ def best_direction_score(
     preferred: Sequence[str],
 ) -> Optional[float]:
     """OR: max circular similarity over observed × preferred. None if either side empty."""
-    obs = order_canonical(observed)
-    pref = order_canonical(preferred)
-    if not obs or not pref:
+    scored = _direction_score_candidates(observed, preferred)
+    if not scored:
         return None
-    best: Optional[float] = None
-    for o in obs:
-        for p in pref:
-            score = pairwise_score(o, p)
-            if score is None:
-                continue
-            if best is None or score > best:
-                best = score
-    return best
+    return max(score for _, score in scored)
 
 
 def best_matching_observed(
@@ -404,21 +474,7 @@ def best_matching_observed(
     preferred: Sequence[str],
 ) -> list[str]:
     """Observed facings that achieve the best pairwise score vs preferred."""
-    obs = order_canonical(observed)
-    pref = order_canonical(preferred)
-    if not obs or not pref:
-        return []
-    scored: list[tuple[str, float]] = []
-    for o in obs:
-        best_for_o: Optional[float] = None
-        for p in pref:
-            pair = pairwise_score(o, p)
-            if pair is None:
-                continue
-            if best_for_o is None or pair > best_for_o:
-                best_for_o = pair
-        if best_for_o is not None:
-            scored.append((o, best_for_o))
+    scored = _direction_score_candidates(observed, preferred)
     if not scored:
         return []
     top = max(score for _, score in scored)
@@ -471,8 +527,8 @@ def evaluate_direction_criterion(
             detail="Not mentioned in listing description",
         )
     score = best_direction_score(observed_codes, pref)
-    matched = best_matching_observed(observed_codes, pref)
-    observed = ", ".join(display_labels(matched or observed_codes))
+    # Same composed label as the results table (e.g. east+south → South-East).
+    observed = format_listing_facing(listing)
     if score is None:
         status = "unknown"
     elif score >= 0.99:
