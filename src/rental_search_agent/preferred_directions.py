@@ -399,6 +399,32 @@ def best_direction_score(
     return best
 
 
+def best_matching_observed(
+    observed: Sequence[str],
+    preferred: Sequence[str],
+) -> list[str]:
+    """Observed facings that achieve the best pairwise score vs preferred."""
+    obs = order_canonical(observed)
+    pref = order_canonical(preferred)
+    if not obs or not pref:
+        return []
+    scored: list[tuple[str, float]] = []
+    for o in obs:
+        best_for_o: Optional[float] = None
+        for p in pref:
+            pair = pairwise_score(o, p)
+            if pair is None:
+                continue
+            if best_for_o is None or pair > best_for_o:
+                best_for_o = pair
+        if best_for_o is not None:
+            scored.append((o, best_for_o))
+    if not scored:
+        return []
+    top = max(score for _, score in scored)
+    return [code for code, score in scored if score == top]
+
+
 def score_direction(
     listing: Union[dict, Any],
     preferred: Sequence[str] | None,
@@ -445,7 +471,8 @@ def evaluate_direction_criterion(
             detail="Not mentioned in listing description",
         )
     score = best_direction_score(observed_codes, pref)
-    observed = ", ".join(display_labels(observed_codes))
+    matched = best_matching_observed(observed_codes, pref)
+    observed = ", ".join(display_labels(matched or observed_codes))
     if score is None:
         status = "unknown"
     elif score >= 0.99:
@@ -461,7 +488,7 @@ def evaluate_direction_criterion(
         None if score is None else float(score),
         group="direction",
         observed=observed,
-        required=required,
-        comparator="OR",
+        required=None,
+        comparator=None,
         source="Inferred",
     )

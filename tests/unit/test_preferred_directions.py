@@ -16,7 +16,9 @@ from rental_search_agent.preference_resolution import (
 from rental_search_agent.preferred_directions import (
     STEP_SCORES,
     best_direction_score,
+    best_matching_observed,
     chat_direction_override,
+    evaluate_direction_criterion,
     extract_listing_facings,
     pairwise_score,
     parse_preferred_directions,
@@ -82,6 +84,42 @@ class TestOrAggregation:
         assert best_direction_score(["SW"], ["S", "W"]) == STEP_SCORES[1]
         # exact among two observed
         assert best_direction_score(["S", "W"], ["S"]) == 1.0
+
+
+class TestChecklistShowsMatchedFacingOnly:
+    def test_met_row_shows_listing_match_not_all_prefs(self):
+        listing = _listing(description="Bright south-facing balcony with city views.")
+        row = evaluate_direction_criterion(listing, ["E", "SE", "S", "SW"])
+        assert row.status == "met"
+        assert row.observed == "South"
+        assert row.required is None
+        assert row.comparator is None
+        from rental_search_agent.analysis_view import checklist_item_to_row
+
+        view_row = checklist_item_to_row(
+            {
+                "id": row.id,
+                "name": row.name,
+                "status": row.status,
+                "group": row.group,
+                "observed": row.observed,
+                "required": row.required,
+                "comparator": row.comparator,
+                "source": row.source,
+            }
+        )
+        assert view_row.comparison_text == "South"
+        assert "East" not in view_row.comparison_text
+        assert "OR" not in view_row.comparison_text
+
+    def test_best_matching_observed_picks_exact_over_adjacent(self):
+        assert best_matching_observed(["S", "E"], ["S", "SW"]) == ["S"]
+
+    def test_partial_row_shows_listing_facing(self):
+        listing = _listing(description="South-facing living room.")
+        row = evaluate_direction_criterion(listing, ["SW"])
+        assert row.status == "partial"
+        assert row.observed == "South"
 
 
 class TestListingExtract:
