@@ -156,7 +156,7 @@ BUGS (PROXIMITY / RANKING)
         - Patio
         - Deck
         - Porch
-
+    [] Add support for directional preferences (e.g. "west-facing", "north-facing", "south-facing", "east-facing").
 ================================================================================
 SESSION AND AUTH
 ================================================================================
