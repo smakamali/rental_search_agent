@@ -94,11 +94,11 @@ UX
 
 [x] Chat in a floating panel on the bottom-right that scrolls independently of the results panel.
 
-[] In the analyze section, add highlights generated from the listing description that are relevant to the user's preferences.
+[x] In the analyze section, add highlights generated from the listing description that are relevant to the user's preferences.
 
-[] Add export to CSV/Excel button to the results panel.
+[x] Add export to CSV/Excel button to the results panel.
 
-[] Add progress status to the results panel when work is in progress in any of the steps.
+[x] Add progress status to the results panel when work is in progress in any of the steps.
 
 ================================================================================
 BUGS (PROXIMITY / RANKING)
