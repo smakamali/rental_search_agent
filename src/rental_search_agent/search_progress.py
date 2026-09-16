@@ -529,6 +529,7 @@ def render_progress_html(view: ProgressView) -> str:
     )
     steps = "".join(_stepper_item_html(stage) for stage in view.stages)
     return (
+        f'<div class="rsa-progress-overlay">'
         f'<section class="rsa-progress-panel" role="status" aria-live="polite" '
         f'aria-busy="{busy}">'
         f'<div class="rsa-progress-layout">'
@@ -538,6 +539,7 @@ def render_progress_html(view: ProgressView) -> str:
         f"</ol>"
         f"</div>"
         f"</section>"
+        f"</div>"
     )
 
 
@@ -580,6 +582,22 @@ def _step_icon(status: str) -> str:
 
 
 PROGRESS_CSS = """
+.rsa-progress-overlay {
+    box-sizing: border-box;
+    position: fixed;
+    top: 3.5rem;
+    bottom: 0;
+    left: var(--sidebar-width, 21.75rem);
+    right: calc(0.75rem + min(420px, calc(100vw - 1.5rem)));
+    z-index: 9990;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 3.25rem 1.5rem 2rem;
+    background: #0e1116;
+    opacity: 1;
+    overflow: auto;
+}
 .rsa-progress-panel,
 .rsa-progress-panel h2,
 .rsa-progress-panel p,
@@ -590,15 +608,16 @@ PROGRESS_CSS = """
 }
 .rsa-progress-panel {
     box-sizing: border-box;
-    width: 100%;
-    max-width: 52rem;
-    margin: 0.35rem auto 1.1rem;
+    width: min(52rem, 100%);
+    max-width: 100%;
+    margin: 0 auto;
     padding: 1.2rem 1.35rem 1.1rem;
     color: #e7eef6;
     background: #151c28;
+    opacity: 1;
     border: 1px solid #3d4a5c;
     border-radius: 14px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
 }
 .rsa-progress-layout {
     display: grid;

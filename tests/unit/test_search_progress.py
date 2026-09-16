@@ -149,6 +149,8 @@ class TestCountsAfterCompletion:
         html = render_progress_html(view)
         assert "Conditional" not in html
         assert "Not needed" in html
+        assert "rsa-progress-overlay" in html
+        assert "rsa-progress-panel" in html
 
 
 class TestScoringAfterProximitySkip:
@@ -208,6 +210,8 @@ class TestSafeRendering:
         from rental_search_agent.search_progress import PROGRESS_CSS
 
         assert "var(--font, inherit)" in PROGRESS_CSS
+        assert ".rsa-progress-overlay" in PROGRESS_CSS
+        assert "background: #0e1116" in PROGRESS_CSS
 
 
 class TestWorkflowEmitter:

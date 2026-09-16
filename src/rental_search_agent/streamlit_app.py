@@ -725,6 +725,7 @@ def _inject_app_chrome_css() -> None:
         .stMainBlockContainer,
         .block-container {
             padding-top: 3.85rem !important;
+            position: relative !important;
         }
         [data-testid="stMain"],
         .stAppViewContainer .stMain,
@@ -815,25 +816,59 @@ def _inject_app_chrome_css() -> None:
             overflow: hidden !important;
             border: none !important;
         }
-        [class*="st-key-rsa_search_progress_slot"] {
-            max-width: 52rem;
-            margin: 0 auto !important;
-        }
-        [class*="st-key-rsa_search_progress_slot"]:not(:has(.rsa-progress-panel)),
-        [data-testid="stElementContainer"]:has(
-            > [class*="st-key-rsa_search_progress_slot"]:not(:has(.rsa-progress-panel))
-        ) {
-            display: none !important;
+        /* Slot takes no layout space. Visual overlay is .rsa-progress-overlay. */
+        [data-testid="stElementContainer"]:has(> [class*="st-key-rsa_search_progress_slot"]),
+        [data-testid="stElementContainer"]:has(> div > [class*="st-key-rsa_search_progress_slot"]) {
             height: 0 !important;
             min-height: 0 !important;
             margin: 0 !important;
             padding: 0 !important;
-            overflow: hidden !important;
+            overflow: visible !important;
             border: none !important;
+        }
+        [class*="st-key-rsa_search_progress_slot"]:not(:has(.rsa-progress-overlay)) {
+            display: none !important;
+        }
+        [class*="st-key-rsa_search_progress_slot"],
+        [class*="st-key-rsa_search_progress_slot"] [data-testid="stMarkdownContainer"],
+        [class*="st-key-rsa_search_progress_slot"] [data-testid="stVerticalBlock"],
+        [class*="st-key-rsa_search_progress_slot"] .stMarkdown {
+            overflow: visible !important;
+            transform: none !important;
+            filter: none !important;
         }
         """
         + PROGRESS_CSS
         + """
+        .rsa-progress-overlay {
+            position: fixed !important;
+            top: 3.5rem !important;
+            bottom: 0 !important;
+            left: var(--sidebar-width, 21.75rem) !important;
+            right: calc(0.75rem + min(420px, calc(100vw - 1.5rem))) !important;
+            z-index: 9990 !important;
+            display: flex !important;
+            justify-content: center !important;
+            align-items: flex-start !important;
+            padding: 3.25rem 1.5rem 2rem !important;
+            background: #0e1116 !important;
+            opacity: 1 !important;
+            overflow: auto !important;
+        }
+        .stApp:has(section[data-testid="stSidebar"][aria-expanded="false"])
+            .rsa-progress-overlay {
+            left: 0 !important;
+        }
+        .stApp:not(:has([class*="st-key-chat_blob"])) .rsa-progress-overlay {
+            right: 0 !important;
+        }
+        .rsa-progress-panel {
+            background: #151c28 !important;
+            opacity: 1 !important;
+            width: min(52rem, 100%) !important;
+            max-width: 100% !important;
+            margin: 0 auto !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1051,6 +1086,21 @@ def _inject_chat_blob_css() -> None:
         st.markdown(
         f"""
         <style>
+        /* Chat is viewport-fixed. Collapse its in-flow box so progress/results
+           cannot reflow the panel and stack message bubbles. */
+        [data-testid="stMain"] [data-testid="stElementContainer"]:has(
+            > [class*="st-key-chat_blob"]
+        ),
+        [data-testid="stMain"] [data-testid="stElementContainer"]:has(
+            > div > [class*="st-key-chat_blob"]
+        ) {{
+            height: 0 !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            border: none !important;
+        }}
         [class*="st-key-chat_blob"] {{
             position: fixed !important;
             /* Sit under the full-width app header (3.5rem). */
@@ -1069,6 +1119,15 @@ def _inject_chat_blob_css() -> None:
             overflow: hidden !important;
             display: flex !important;
             flex-direction: column !important;
+        }}
+        [class*="st-key-chat_blob"] > div[data-testid="stVerticalBlock"],
+        [class*="st-key-chat_blob"] [data-testid="stVerticalBlockBorderWrapper"]
+            > div[data-testid="stVerticalBlock"] {{
+            display: flex !important;
+            flex-direction: column !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            gap: 0.35rem !important;
         }}
         [class*="st-key-chat_history"] {{
             flex: 1 1 auto !important;
@@ -1935,10 +1994,12 @@ def _main_body() -> None:
         st.session_state.get("pending_chat_prompt")
         or st.session_state.get("_pending_agent_step")
     )
+    # Always mount the keyed slot so the main-column widget tree stays stable
+    # when a chat-triggered search starts. CSS keeps the empty slot out of flow.
+    with st.container(key="rsa_search_progress_slot"):
+        progress_slot = st.empty()
     panel = None
     if pending_pref or chat_work_pending:
-        with st.container(key="rsa_search_progress_slot"):
-            progress_slot = st.empty()
         panel = SearchProgressPanel(progress_slot)
         bind_search_progress_panel(panel)
     else:
@@ -1978,7 +2039,7 @@ def _main_body() -> None:
         last_filters=get_last_rental_search_filters(
             st.session_state.get("messages") or []
         ),
-        in_progress=chat_work_pending,
+        in_progress=bool(chat_work_pending or pending_pref),
     )
     if panel_kind == "progress":
         pass
