@@ -771,18 +771,8 @@ def _inject_app_chrome_css() -> None:
             border: none !important;
             pointer-events: none !important;
         }
-        [data-testid="stMain"] [data-testid="stElementContainer"]:has(
-            [data-testid="stMarkdownContainer"] > style:only-child
-        ) {
-            position: absolute !important;
-            width: 0 !important;
-            height: 0 !important;
-            min-height: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-            border: none !important;
-        }
+        /* Do not use descendant :has(style) on stElementContainer — that also
+           matches chat_blob / chat messages and stacks bubbles on top of each other. */
         .rsa-pref-help { font-size: 0.85rem; opacity: 0.82; margin-bottom: 0.35rem; }
         .rsa-chip-row {
             display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.25rem 0 0.15rem;
@@ -813,11 +803,10 @@ def _inject_app_chrome_css() -> None:
         .stApp[data-theme="light"] [class*="st-key-rsa_app_header"] {
             background: rgba(250, 250, 250, 0.97) !important;
         }
-        /* Immediate wrappers of style-only injects — not the whole main column. */
+        /* Immediate element wrappers of keyed style injects only — never a
+           VerticalBlockBorderWrapper, which can be the whole sidebar or main column. */
         [data-testid="stElementContainer"]:has(> [class*="st-key-rsa_hidden_"]),
-        [data-testid="stElementContainer"]:has(> div > [class*="st-key-rsa_hidden_"]),
-        [data-testid="stVerticalBlockBorderWrapper"]:has(> [class*="st-key-rsa_hidden_"]),
-        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [class*="st-key-rsa_hidden_"]) {
+        [data-testid="stElementContainer"]:has(> div > [class*="st-key-rsa_hidden_"]) {
             display: none !important;
             height: 0 !important;
             min-height: 0 !important;
@@ -1077,12 +1066,32 @@ def _inject_chat_blob_css() -> None:
             border-radius: 12px !important;
             box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12) !important;
             padding: 0.6rem 0.75rem 0.75rem !important;
-            overflow: visible !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
         }}
         [class*="st-key-chat_history"] {{
+            flex: 1 1 auto !important;
             height: calc(100vh - 16.25rem) !important;
             max-height: calc(100vh - 16.25rem) !important;
+            min-height: 0 !important;
             overflow: auto !important;
+        }}
+        [class*="st-key-chat_history"] [data-testid="stVerticalBlock"] {{
+            height: auto !important;
+            min-height: min-content !important;
+            justify-content: flex-start !important;
+        }}
+        [class*="st-key-chat_history"] [data-testid="stElementContainer"],
+        [class*="st-key-chat_history"] [data-testid="stChatMessage"] {{
+            position: relative !important;
+            top: auto !important;
+            left: auto !important;
+            inset: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            flex: 0 0 auto !important;
+            overflow: visible !important;
         }}
         [data-baseweb="popover"],
         [data-baseweb="menu"],

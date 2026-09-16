@@ -58,6 +58,7 @@ class TestSharedComponent:
         from rental_search_agent import streamlit_progress as progress_mod
         from rental_search_agent.streamlit_app import (
             _inject_app_chrome_css,
+            _inject_chat_blob_css,
             _inject_offscreen_chrome,
             _main_body,
         )
@@ -81,6 +82,14 @@ class TestSharedComponent:
             "st.empty()"
         )
         assert "st.rerun()" in main_src
+        assert "style:only-child" not in chrome_src
+        assert (
+            'stVerticalBlockBorderWrapper"]:has(> [class*="st-key-rsa_hidden_"]'
+            not in chrome_src
+        )
+        chat_src = inspect.getsource(_inject_chat_blob_css)
+        assert "stChatMessage" in chat_src
+        assert "flex: 0 0 auto" in chat_src
 
 
 class TestPanelHandle:
