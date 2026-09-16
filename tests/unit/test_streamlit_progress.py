@@ -58,6 +58,7 @@ class TestSharedComponent:
         from rental_search_agent import streamlit_progress as progress_mod
         from rental_search_agent.streamlit_app import (
             _inject_app_chrome_css,
+            _inject_chat_blob_css,
             _inject_offscreen_chrome,
             _main_body,
         )
@@ -77,10 +78,26 @@ class TestSharedComponent:
         assert "_inject_app_chrome_css" not in header_src
         assert "_inject_sidebar_restore_control" not in header_src
         assert "rsa_search_progress_slot" in main_src
-        assert main_src.index("if pending_pref or chat_work_pending") < main_src.index(
-            "st.empty()"
+        assert "st.empty()" in main_src
+        assert main_src.index("rsa_search_progress_slot") < main_src.index(
+            "if pending_pref or chat_work_pending"
         )
         assert "st.rerun()" in main_src
+        assert "style:only-child" not in chrome_src
+        assert (
+            'stVerticalBlockBorderWrapper"]:has(> [class*="st-key-rsa_hidden_"]'
+            not in chrome_src
+        )
+        assert "position: fixed" in chrome_src
+        assert "rsa-progress-overlay" in chrome_src
+        assert "background: #0e1116" in chrome_src
+        assert "min(21rem, 28vw)" in chrome_src
+        assert "--sidebar-width" not in chrome_src
+        chat_src = inspect.getsource(_inject_chat_blob_css)
+        assert "stChatMessage" in chat_src
+        assert "flex: 0 0 auto" in chat_src
+        assert "st-key-chat_blob" in chat_src
+        assert "height: 0" in chat_src
 
 
 class TestPanelHandle:
