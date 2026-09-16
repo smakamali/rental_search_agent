@@ -212,6 +212,8 @@ class TestSafeRendering:
         assert "var(--font, inherit)" in PROGRESS_CSS
         assert ".rsa-progress-overlay" in PROGRESS_CSS
         assert "background: #0e1116" in PROGRESS_CSS
+        assert "min(21rem, 28vw)" in PROGRESS_CSS
+        assert "--sidebar-width" not in PROGRESS_CSS
 
 
 class TestWorkflowEmitter:

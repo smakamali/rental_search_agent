@@ -587,8 +587,9 @@ PROGRESS_CSS = """
     position: fixed;
     top: 3.5rem;
     bottom: 0;
-    left: var(--sidebar-width, 21.75rem);
-    right: calc(0.75rem + min(420px, calc(100vw - 1.5rem)));
+    /* Cap insets so sidebar + chat gutters cannot collapse the overlay. */
+    left: min(21rem, 28vw);
+    right: min(calc(0.75rem + 420px), 32vw);
     z-index: 9990;
     display: flex;
     justify-content: center;

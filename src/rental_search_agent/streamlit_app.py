@@ -844,8 +844,8 @@ def _inject_app_chrome_css() -> None:
             position: fixed !important;
             top: 3.5rem !important;
             bottom: 0 !important;
-            left: var(--sidebar-width, 21.75rem) !important;
-            right: calc(0.75rem + min(420px, calc(100vw - 1.5rem))) !important;
+            left: min(21rem, 28vw) !important;
+            right: min(calc(0.75rem + 420px), 32vw) !important;
             z-index: 9990 !important;
             display: flex !important;
             justify-content: center !important;

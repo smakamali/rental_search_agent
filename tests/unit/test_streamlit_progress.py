@@ -91,6 +91,8 @@ class TestSharedComponent:
         assert "position: fixed" in chrome_src
         assert "rsa-progress-overlay" in chrome_src
         assert "background: #0e1116" in chrome_src
+        assert "min(21rem, 28vw)" in chrome_src
+        assert "--sidebar-width" not in chrome_src
         chat_src = inspect.getsource(_inject_chat_blob_css)
         assert "stChatMessage" in chat_src
         assert "flex: 0 0 auto" in chat_src
