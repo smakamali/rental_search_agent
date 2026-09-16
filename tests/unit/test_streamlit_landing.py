@@ -194,6 +194,7 @@ class TestHowItWorks:
             "Location",
             "Budget",
             "Bedrooms",
+            "Facing",
             "Amenities",
             "Proximity",
         )

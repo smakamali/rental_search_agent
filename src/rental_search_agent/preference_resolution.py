@@ -8,6 +8,11 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from rental_search_agent.preferred_directions import (
+    parse_preferred_directions,
+    serialize_preferred_directions,
+)
+
 logger = logging.getLogger(__name__)
 
 # Contact/booking keys stay persisted but are never shown in Search Preferences UI.
@@ -23,6 +28,7 @@ SEARCH_PREF_KEYS = (
     "require_den",
     "min_sqft",
     "proximity_preferences",
+    "preferred_directions",
     "qualitative_preferences",
 )
 
@@ -40,6 +46,7 @@ class EffectiveSearchPreferences(BaseModel):
     min_sqft: Optional[float] = Field(None, ge=0)
     house_categories: Optional[list[str]] = None
     proximity_preferences: str = ""
+    preferred_directions: list[str] = Field(default_factory=list)
     qualitative_preferences: str = ""
     location: Optional[str] = None
     listing_type: Optional[str] = None
@@ -58,6 +65,8 @@ class EffectiveSearchPreferences(BaseModel):
         if self.house_categories:
             return True
         if (self.proximity_preferences or "").strip():
+            return True
+        if self.preferred_directions:
             return True
         if (self.qualitative_preferences or "").strip():
             return True
@@ -132,6 +141,7 @@ def stored_prefs_to_effective(stored: Mapping[str, Any] | None) -> EffectiveSear
         require_den=_parse_optional_bool(stored.get("require_den"), field="require_den"),
         min_sqft=_parse_optional_float(stored.get("min_sqft"), field="min_sqft"),
         proximity_preferences=str(stored.get("proximity_preferences") or "").strip(),
+        preferred_directions=parse_preferred_directions(stored.get("preferred_directions")),
         qualitative_preferences=str(stored.get("qualitative_preferences") or "").strip(),
         location=location,
         listing_type=_parse_listing_type(stored.get("listing_type"), field="listing_type"),
@@ -159,12 +169,16 @@ def qualitative_from_preferences_text(text: str | None) -> str:
     """Return qualitative prefs only: strip a trailing Proximity: block and placeholders.
 
     Analyze/score tools often receive combined strings like
-    'balcony, parking\\n\\nProximity: 5 min walk to transit'. Proximity is scored from
-    parsed rules, so that section must not become qualitative_preferences (semantic/amenity).
+    'balcony, parking\\n\\nProximity: 5 min walk to transit'. Proximity and facing are
+    scored from dedicated fields, so those labeled blocks must not become
+    qualitative_preferences (semantic/amenity).
     """
+    from rental_search_agent.preferred_directions import strip_facing_block
+
     s = (text or "").strip()
     if not s:
         return ""
+    s = strip_facing_block(s)
     for sep in ("\n\nProximity:", "\nProximity:"):
         if sep in s:
             s = s.split(sep, 1)[0].strip()
@@ -247,6 +261,11 @@ def chat_criteria_to_partial(chat: Mapping[str, Any] | None) -> dict[str, Any]:
         if s and not is_placeholder_qualitative(s):
             out["qualitative_preferences"] = s
 
+    if "preferred_directions" in chat and chat.get("preferred_directions") is not None:
+        parsed_dirs = parse_preferred_directions(chat.get("preferred_directions"))
+        if parsed_dirs:
+            out["preferred_directions"] = parsed_dirs
+
     return out
 
 
@@ -321,6 +340,10 @@ def fill_empty_stored_from_chat(
             out[key] = "true" if value else "false"
         else:
             out[key] = str(value)
+    if partial.get("preferred_directions") and not (out.get("preferred_directions") or "").strip():
+        out["preferred_directions"] = serialize_preferred_directions(
+            partial["preferred_directions"]
+        )
     return out
 
 
@@ -359,7 +382,7 @@ def preferences_block(prefs: Mapping[str, Any] | None) -> str:
             parts.append(f"{key} = {val!r}")
     if not parts:
         return (
-            "No stored search preferences (location, listing type, budget, beds, baths, den, size, proximity, or qualitative)."
+            "No stored search preferences (location, listing type, budget, beds, baths, den, size, proximity, facing, or qualitative)."
         )
     block = "Stored search preferences: " + "; ".join(parts)
     block += (

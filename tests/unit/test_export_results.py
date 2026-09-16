@@ -342,6 +342,10 @@ class TestPrepareAndCache:
         assert "Min bedrooms: 2" in text
         assert "Budget" not in text
 
+    def test_format_active_filters_facing_labels(self):
+        text = format_active_filters({"preferred_directions": "S,W"})
+        assert "Facing: South, West" in text
+
 
 class TestUiWiring:
     def test_toolbar_used_by_all_result_views(self):

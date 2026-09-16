@@ -212,7 +212,7 @@ class Listing(BaseModel):
         ge=0,
         le=1,
         description="Overall multi-metric match score (0-1): weighted average of available "
-        "components (structural, proximity, amenity, semantic). Missing components "
+        "components (structural, proximity, amenity, direction, semantic). Missing components "
         "are excluded rather than treated as zero. Primary UI Match score.",
     )
     score_breakdown: Optional[dict[str, Any]] = Field(

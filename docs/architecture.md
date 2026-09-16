@@ -84,6 +84,7 @@ Conversation tool-result messages are the durable source for reconstructing list
 | `search_regions.py` | Canadian metro catalogs → city labels / `search_location` |
 | `preference_apply.py` | Deterministic post-search pipeline; sidebar scrape vs re-rank |
 | `preference_resolution.py` / `preference_store.py` / `preference_criteria.py` | Merge chat over stored prefs; JSON/SQLite persistence; scoring primitives |
+| `preferred_directions.py` | Compass facing parse/extract and fifth `match_score` component |
 | `filtering.py` | In-memory structural + proximity filter/sort |
 | `proximity_parser.py` / `geocoding.py` / `proximity.py` | Rules, geocode, Distance Matrix / Directions / Places enrich |
 | `match_scoring.py` / `semantic_scoring.py` / `scoring_config.py` | Weighted match score + embeddings |
@@ -103,7 +104,7 @@ Conversation tool-result messages are the durable source for reconstructing list
 4. **Pluggable search backend** — `SearchBackend` + `SEARCH_MARKET`; only Canada Apify today.
 5. **Chat scope narrowed** — Booking/calendar tools remain implemented for MCP and future UI, but are stripped from `AGENT_TOOLS` and forbidden in `flow_instructions`.
 6. **Guest vs signed-in policy** — Caps on scrapes, multi-city, and proximity rule count; scrape attempts consume guest credits.
-7. **Multi-metric ranking** — Weighted structural + proximity + amenity + semantic; missing components are renormalized out (not scored as zero). Coverage is checklist-only (not part of overall `match_score`).
+7. **Multi-metric ranking** — Weighted structural + proximity + amenity + direction (facing) + semantic; missing components are renormalized out (not scored as zero). Direction is omitted when listing remarks do not mention facing. Coverage is checklist-only (not part of overall `match_score`).
 8. **Den ≠ bedroom** — Source strings like `"2 + 1"` parse so den does not inflate bedroom filters; qualitative/scoring handle dens.
 9. **URL hygiene** — Listing/photo URL host allowlists for Realtor.ca when mapping scraped data.
 

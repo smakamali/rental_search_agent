@@ -665,6 +665,7 @@ def format_active_filters(prefs: Mapping[str, Any] | None) -> str:
         ("min_sqft", "Min size (sq ft)"),
         ("house_categories", "Property types"),
         ("proximity_preferences", "Proximity"),
+        ("preferred_directions", "Facing"),
         ("qualitative_preferences", "Qualitative"),
     )
     for key, label in mapping:
@@ -674,6 +675,13 @@ def format_active_filters(prefs: Mapping[str, Any] | None) -> str:
         text = str(raw).strip()
         if not text:
             continue
+        if key == "preferred_directions":
+            from rental_search_agent.preferred_directions import display_labels, parse_preferred_directions
+
+            labels = display_labels(parse_preferred_directions(raw))
+            if not labels:
+                continue
+            text = ", ".join(labels)
         parts.append(f"{label}: {sanitize_export_text(text)}")
     return "; ".join(parts)
 

@@ -37,6 +37,7 @@ from rental_search_agent.preference_resolution import (
     merge_chat_over_stored,
     qualitative_from_preferences_text,
 )
+from rental_search_agent.preferred_directions import chat_direction_override
 from rental_search_agent.proximity_parser import parse_proximity_preferences as do_parse_proximity_preferences
 from rental_search_agent.search_regions import expand_search_region as do_expand_search_region
 from rental_search_agent.viewing_plan import (
@@ -223,13 +224,17 @@ def score_listings_by_preferences(
     preferences_text: str = "",
     query_text: Optional[str] = None,
     proximity_rules: Optional[list[dict[str, Any]]] = None,
+    preferred_directions: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Score and rank listings by multi-metric match to user preferences. Returns { listings, total_count } with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Uses stored Search Preferences when set; preferences_text is qualitative only (a trailing Proximity: block is ignored — pass proximity_rules for commute scoring)."""
+    """Score and rank listings by multi-metric match to user preferences. Returns { listings, total_count } with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Uses stored Search Preferences when set; preferences_text is qualitative only (a trailing Proximity: or Facing: block is ignored — pass proximity_rules for commute scoring and preferred_directions for facing)."""
     if not listings or not isinstance(listings, list):
         raise ValueError("listings is required and must be a non-empty list.")
     stored = load_stored_preferences()
     qual = qualitative_from_preferences_text(preferences_text)
     chat = {"qualitative_preferences": qual} if qual else {}
+    facing_override = chat_direction_override(preferences_text, preferred_directions)
+    if facing_override:
+        chat["preferred_directions"] = facing_override
     effective = merge_chat_over_stored(stored, chat)
     rules = [r for r in (proximity_rules or []) if isinstance(r, dict)]
     if not effective.has_score_relevant_prefs() and not rules:
@@ -252,14 +257,18 @@ def analyze_listing_preferences(
     listing: dict[str, Any],
     preferences_text: str = "",
     proximity_rules: Optional[list[dict[str, Any]]] = None,
+    preferred_directions: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Uses stored Search Preferences merged with preferences_text (qualitative). Pass proximity_rules when commute constraints should be scored."""
+    """Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Uses stored Search Preferences merged with preferences_text (qualitative). Pass proximity_rules when commute constraints should be scored and preferred_directions (or a Facing: block) to override stored facing."""
     if not listing or not isinstance(listing, dict):
         raise ValueError("listing is required and must be a non-empty object.")
     stored = load_stored_preferences()
     text = (preferences_text or "").strip()
     qual = qualitative_from_preferences_text(text)
     chat = {"qualitative_preferences": qual} if qual else {}
+    facing_override = chat_direction_override(text, preferred_directions)
+    if facing_override:
+        chat["preferred_directions"] = facing_override
     effective = merge_chat_over_stored(stored, chat)
     rules = [r for r in (proximity_rules or []) if isinstance(r, dict)]
     if not text and not effective.has_score_relevant_prefs() and not rules:

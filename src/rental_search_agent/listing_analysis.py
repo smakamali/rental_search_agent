@@ -13,6 +13,7 @@ from rental_search_agent.analysis_view import normalize_ai_listing_summary
 from rental_search_agent.api_config import get_llm_client_and_model
 from rental_search_agent.match_scoring import score_listings_by_preferences
 from rental_search_agent.models import Listing
+from rental_search_agent.preferred_directions import chat_direction_override, format_facing_suffix
 from rental_search_agent.preference_resolution import (
     EffectiveSearchPreferences,
     is_placeholder_qualitative,
@@ -85,12 +86,20 @@ def analyze_listing_against_preferences(
     qual_from_text = qualitative_from_preferences_text(preferences_text)
     if qual_from_text and not chat.get("qualitative_preferences"):
         chat.setdefault("qualitative_preferences", qual_from_text)
+    if not chat.get("preferred_directions"):
+        facing_override = chat_direction_override(preferences_text)
+        if facing_override:
+            chat["preferred_directions"] = facing_override
 
     prefs = effective_prefs or merge_chat_over_stored(stored_prefs, chat)
     if is_placeholder_qualitative(prefs.qualitative_preferences):
         prefs = prefs.model_copy(update={"qualitative_preferences": ""})
     if qual_from_text and not prefs.qualitative_preferences:
         prefs = prefs.model_copy(update={"qualitative_preferences": qual_from_text})
+    chat_dirs = chat.get("preferred_directions") or []
+    if chat_dirs and prefs.preferred_directions != chat_dirs:
+        # Chat/tool facing replaces stored when parsed after the caller built effective_prefs.
+        prefs = prefs.model_copy(update={"preferred_directions": list(chat_dirs)})
 
     try:
         scored_list = score_listings_by_preferences(
@@ -114,6 +123,9 @@ def analyze_listing_against_preferences(
         raise ValueError(f"Failed to compute match score: {e}") from e
 
     narrative_prefs = narrative_source or prefs.qualitative_preferences or ""
+    facing_line = format_facing_suffix(prefs.preferred_directions)
+    if facing_line and facing_line.lower() not in narrative_prefs.lower():
+        narrative_prefs = f"{narrative_prefs}\n\n{facing_line}".strip()
     if not narrative_prefs.strip():
         narrative_prefs = "User search preferences (structured)."
 

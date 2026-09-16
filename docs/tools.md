@@ -70,6 +70,7 @@ Weighted components (env-tunable; renormalized over components that are present)
 - Structural
 - Proximity
 - Amenity
+- Direction (preferred facing; omitted when the listing does not mention exposure)
 - Semantic (embeddings)
 
 Coverage is a checklist only — it is **not** part of overall `match_score`. See [configuration.md](configuration.md) for weight env vars.

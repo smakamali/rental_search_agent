@@ -56,6 +56,7 @@ from rental_search_agent.search_progress import (
     SearchWorkflowEmitter,
     invoke_progress,
 )
+from rental_search_agent.preferred_directions import chat_direction_override
 from rental_search_agent.preference_resolution import (
     PREF_KEYS,
     fill_empty_stored_from_chat,
@@ -422,13 +423,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "score_listings_by_preferences",
-            "description": "Score and rank listings by multi-metric match to the user's search preferences (budget, beds/baths/size/den, proximity, amenities, and qualitative text). Pass current listings and preferences_text (qualitative portion from stored preferences or user message; structural prefs are merged from stored Search Preferences and active search criteria). Returns listings with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Call when any score-relevant preference is set (or the user asks to rank by preferences).",
+            "description": "Score and rank listings by multi-metric match to the user's search preferences (budget, beds/baths/size/den, proximity, facing/preferred_directions, amenities, and qualitative text). Pass current listings and preferences_text (qualitative portion from stored preferences or user message; structural prefs are merged from stored Search Preferences and active search criteria). When the user states a new facing/exposure, pass preferred_directions or a Facing: line — that replaces stored facing for this turn. Returns listings with match_score, score_breakdown, and semantic_score, sorted by match_score descending. Call when any score-relevant preference is set (or the user asks to rank by preferences).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "listings": {"type": "array", "items": {"type": "object"}, "description": "Current listing objects (from rental_search, filter_listings, or enrich_listings_with_proximity)."},
-                    "preferences_text": {"type": "string", "description": "User's qualitative/listing preferences (e.g. balcony, parking, gym, pet-friendly). From stored qualitative_preferences or user message. Structural targets (budget, beds, etc.) are taken from stored Search Preferences and active search criteria."},
+                    "preferences_text": {"type": "string", "description": "User's qualitative/listing preferences (e.g. balcony, parking, gym, pet-friendly). From stored qualitative_preferences or user message. Structural targets (budget, beds, etc.) are taken from stored Search Preferences and active search criteria. Optional Facing: South, West suffix overrides stored preferred_directions."},
                     "query_text": {"type": "string", "description": "Optional. Additional query context. Prefer omitting; structural criteria are merged automatically."},
+                    "preferred_directions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional. Canonical facing codes (N, NE, E, SE, S, SW, W, NW). Multiple values are OR. Replaces stored preferred_directions for this scoring turn.",
+                    },
                 },
                 "required": ["listings", "preferences_text"],
             },
@@ -438,12 +444,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "analyze_listing_preferences",
-            "description": "Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Pass the full listing object and a single preferences_text string. When the user has set both listing preferences and proximity preferences, combine them in one string (e.g. list qualitative preferences first, then 'Proximity: ...' with their proximity preferences).",
+            "description": "Analyze a single listing against the user's preferences. Returns match score (%), key matches (bullets), and key gaps (bullets). Pass the full listing object and a single preferences_text string. When the user has set listing preferences, proximity, and/or facing, combine them in one string (qualitative first, then 'Proximity: ...', then 'Facing: South, West').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "listing": {"type": "object", "description": "Full listing object from current search results (id, title, address, description, etc.)."},
-                    "preferences_text": {"type": "string", "description": "User's preferences as one string: listing/qualitative preferences (e.g. balcony, parking, gym) and optionally proximity (e.g. 'Proximity: max 30 min drive to downtown'). Combine both from stored qualitative_preferences and proximity_preferences when set."},
+                    "preferences_text": {"type": "string", "description": "User's preferences as one string: listing/qualitative preferences (e.g. balcony, parking, gym), optionally proximity (e.g. 'Proximity: max 30 min drive to downtown'), and optionally facing (e.g. 'Facing: South, West'). Combine from stored qualitative_preferences, proximity_preferences, and preferred_directions when set."},
+                    "preferred_directions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional. Canonical facing codes (N, NE, E, SE, S, SW, W, NW). Replaces stored preferred_directions for this analysis.",
+                    },
                 },
                 "required": ["listing", "preferences_text"],
             },
@@ -1383,6 +1394,12 @@ def run_tool(
                 "qualitative_preferences",
                 (stored.get("qualitative_preferences") or "").strip(),
             )
+        facing_override = chat_direction_override(
+            arguments.get("preferences_text") or "",
+            arguments.get("preferred_directions"),
+        )
+        if facing_override:
+            chat["preferred_directions"] = facing_override
         # Persist empty-field fill-in from chat/search criteria (never overwrite non-empty).
         _persist_fill_in_from_chat({**(search_criteria or {}), **chat})
         stored = _load_preferences_from_file()
@@ -1429,6 +1446,12 @@ def run_tool(
         qual_head = qualitative_from_preferences_text(preferences_text)
         if qual_head:
             chat["qualitative_preferences"] = qual_head
+        facing_override = chat_direction_override(
+            preferences_text,
+            arguments.get("preferred_directions"),
+        )
+        if facing_override:
+            chat["preferred_directions"] = facing_override
         effective = merge_chat_over_stored(stored, chat)
         if is_placeholder_qualitative(effective.qualitative_preferences):
             effective = effective.model_copy(update={"qualitative_preferences": ""})

@@ -117,6 +117,7 @@ class TestPreferencesBlock:
 
     def test_has_score_relevant(self):
         assert EffectiveSearchPreferences(budget_max=2000).has_score_relevant_prefs()
+        assert EffectiveSearchPreferences(preferred_directions=["S"]).has_score_relevant_prefs()
         assert not EffectiveSearchPreferences().has_score_relevant_prefs()
 
 
@@ -126,6 +127,12 @@ class TestQualitativeFromPreferencesText:
 
         text = "must have balcony, parking\n\nProximity: 5 min walk to a transit station"
         assert qualitative_from_preferences_text(text) == "must have balcony, parking"
+
+    def test_strips_facing_block(self):
+        from rental_search_agent.preference_resolution import qualitative_from_preferences_text
+
+        text = "must have balcony\n\nFacing: South, West"
+        assert qualitative_from_preferences_text(text) == "must have balcony"
 
     def test_placeholder_becomes_empty(self):
         from rental_search_agent.preference_resolution import qualitative_from_preferences_text

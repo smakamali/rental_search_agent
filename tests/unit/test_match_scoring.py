@@ -421,7 +421,8 @@ class TestScoringConfig:
     def test_default_weights(self):
         weights = get_score_weights()
         assert weights == DEFAULT_WEIGHTS
-        assert abs(sum(weights.values()) - 1.0) < 1e-6
+        assert weights["direction"] == 0.12
+        assert abs(sum(weights.values()) - 1.12) < 1e-6
 
 
 class TestHouseCategoryCanonicalMatch:

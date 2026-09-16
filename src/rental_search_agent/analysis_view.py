@@ -22,12 +22,13 @@ from rental_search_agent.display_format import (
 from rental_search_agent.preference_criteria import AMENITY_FEATURES, match_amenity_feature
 from rental_search_agent.scoring_config import DEFAULT_WEIGHTS, get_score_weights
 
-COMPONENT_ORDER = ("structural", "proximity", "amenity", "semantic")
+COMPONENT_ORDER = ("structural", "proximity", "amenity", "direction", "semantic")
 
 COMPONENT_HELP = {
     "structural": "Property basics such as price, size, bedrooms, bathrooms, and type.",
     "proximity": "Location-based criteria such as transit access and commute.",
     "amenity": "Building and unit features such as parking, balcony, and storage.",
+    "direction": "Preferred unit facing or exposure (north, south, east, west, and diagonals).",
     "semantic": (
         "Semantic similarity compares the listing text with broader qualitative "
         "preferences. It is experimental and can be lower when listing text is "
@@ -39,14 +40,21 @@ COMPONENT_CAPTION = {
     "structural": "Price, size, beds, baths",
     "proximity": "Location & commute",
     "amenity": "Building & unit features",
+    "direction": "Facing & exposure",
     "semantic": "Listing details",
 }
 
-GROUP_ORDER = ("structural", "proximity", "amenity")
+GROUP_ORDER = ("structural", "proximity", "amenity", "direction")
 GROUP_TITLES = {
     "structural": "Structural",
     "proximity": "Proximity",
     "amenity": "Amenities",
+    "direction": "Facing",
+}
+
+COMPONENT_TITLES = {
+    **GROUP_TITLES,
+    "semantic": "Semantic",
 }
 
 STATUS_MARKER = {
@@ -319,7 +327,7 @@ def _semantic_note(components: dict[str, Optional[float]], included: Sequence[st
         return False
     others = [
         components.get(k)
-        for k in ("structural", "proximity", "amenity")
+        for k in ("structural", "proximity", "amenity", "direction")
         if k in included and components.get(k) is not None
     ]
     if not others:
@@ -666,6 +674,7 @@ def weighted_score_line(weights_used: dict[str, float] | None) -> Optional[str]:
         "structural": "Structural",
         "proximity": "Proximity",
         "amenity": "Amenities",
+        "direction": "Facing",
         "semantic": "Semantic",
     }
     for key in COMPONENT_ORDER:

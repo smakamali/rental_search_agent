@@ -12,6 +12,7 @@ from rental_search_agent.analysis_view import (
     COMPONENT_CAPTION,
     COMPONENT_HELP,
     COMPONENT_ORDER,
+    COMPONENT_TITLES,
     GROUP_ORDER,
     GROUP_TITLES,
     AnalysisView,
@@ -625,7 +626,7 @@ def render_match_summary(view: AnalysisView) -> None:
             gauges.append(
                 _gauge_svg_html(
                     pct,
-                    key.capitalize(),
+                    COMPONENT_TITLES.get(key, key.capitalize()),
                     size=_GAUGE_SIZES["small"],
                     caption=COMPONENT_CAPTION.get(key),
                     help_text=COMPONENT_HELP.get(key),
@@ -754,14 +755,14 @@ def render_score_explanation(view: AnalysisView) -> None:
         configured = view.configured_weights
         if configured:
             bits = [
-                f"{k.capitalize()} ({format_weight_pct(w)})"
+                f"{COMPONENT_TITLES.get(k, k.capitalize())} ({format_weight_pct(w)})"
                 for k, w in configured.items()
                 if k in COMPONENT_ORDER
             ]
             st.markdown("Configured weights: " + ", ".join(bits) + ".")
         if view.weights_used:
             used = [
-                f"{k.capitalize()} ({format_weight_pct(w)})"
+                f"{COMPONENT_TITLES.get(k, k.capitalize())} ({format_weight_pct(w)})"
                 for k, w in view.weights_used.items()
             ]
             st.caption(
@@ -771,7 +772,7 @@ def render_score_explanation(view: AnalysisView) -> None:
             )
         st.markdown("**What each component measures**")
         for key in COMPONENT_ORDER:
-            st.markdown(f"- **{key.capitalize()}:** {COMPONENT_HELP[key]}")
+            st.markdown(f"- **{COMPONENT_TITLES.get(key, key.capitalize())}:** {COMPONENT_HELP[key]}")
         st.caption(
             "Criteria evaluated is a separate checklist summary and is not included "
             "in the overall match."
