@@ -5,6 +5,7 @@ import inspect
 from rental_search_agent.search_progress import STAGE_PREPARE
 from rental_search_agent.streamlit_app import (
     _execute_preference_search,
+    _render_chat_panel,
     _run_agent_step_with_ui,
     _run_sidebar_search,
     render_app_header,
@@ -98,6 +99,12 @@ class TestSharedComponent:
         assert "flex: 0 0 auto" in chat_src
         assert "st-key-chat_blob" in chat_src
         assert "height: 0" in chat_src
+        assert "background: #0e1117" in chat_src
+        assert "isolation: isolate" in chat_src
+        panel_src = inspect.getsource(_render_chat_panel)
+        assert panel_src.index("chat_send_form") < panel_src.index("_run_user_prompt")
+        assert "in_progress=bool(chat_work_pending" not in main_src
+        assert 'panel_kind == "progress"' not in main_src
 
 
 class TestPanelHandle:
