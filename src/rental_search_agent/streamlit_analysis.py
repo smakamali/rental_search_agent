@@ -367,19 +367,9 @@ def render_score_gauge(
 
 
 def _render_photo(listing: dict, width: int = 280) -> None:
-    photo_url = listing.get("photo_url") or ""
-    listing_url = safe_http_url(listing.get("url")) or ""
-    if photo_url and listing_url:
-        st.markdown(
-            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener">'
-            f'<img src="{html.escape(str(photo_url))}" width="{width}" '
-            f'style="border-radius:8px;max-width:100%;height:auto;" alt="Listing photo"></a>',
-            unsafe_allow_html=True,
-        )
-    elif photo_url:
+    photo_url = safe_http_url(listing.get("photo_url")) or ""
+    if photo_url:
         st.image(photo_url, width=width)
-    elif listing_url:
-        st.link_button("View listing", listing_url)
     else:
         st.caption("No photo available")
 
