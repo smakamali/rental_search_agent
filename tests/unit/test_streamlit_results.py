@@ -3,6 +3,12 @@
 from rental_search_agent.display_format import get_score_color
 from rental_search_agent.streamlit_results import (
     _build_map_data,
+    _folium_analyze_anchor,
+    _folium_analyze_js,
+    _folium_analyze_script,
+    _folium_map_document_html,
+    _folium_popup_html,
+    _make_folium_map,
     _format_bedrooms,
     _format_days_on_market,
     _format_listing_price,
@@ -15,6 +21,8 @@ from rental_search_agent.streamlit_results import (
     format_proximity_caption,
     format_sort_by_label,
     listing_address_parts,
+    listing_for_analyze_id,
+    map_analyze_hit_key,
     listing_result_identity,
     listing_tag_labels,
     ordered_by_caption,
@@ -335,7 +343,6 @@ class TestTableHelpers:
             "match",
             "facing",
             "proximity",
-            "analyze",
         ]
 
     def test_includes_tags_column_when_any_result_has_a_tag(self):
@@ -344,7 +351,9 @@ class TestTableHelpers:
             {"id": "b", "rank": 2, "listing_age_hours": 12},
         ]
         assert table_has_visible_tags(listings) is True
-        assert "tags" in [col.key for col in table_column_schema(listings)]
+        keys = [col.key for col in table_column_schema(listings)]
+        assert "tags" in keys
+        assert "analyze" not in keys
 
     def test_size_uses_shared_sqft_formatting(self):
         rows = _listings_to_table_rows(
@@ -591,3 +600,100 @@ class TestMissingDataDisplay:
         assert _format_bedrooms(listing) == "—"
         assert _format_days_on_market(listing) == "—"
         assert _format_match_score(listing) == "—"
+
+
+class TestAnalyzeClickTargets:
+    def test_map_hit_key_avoids_numeric_prefix_clash(self):
+        assert map_analyze_hit_key(1) == "maphit_1x"
+        assert map_analyze_hit_key(1) not in map_analyze_hit_key(11)
+        assert map_analyze_hit_key(1) not in map_analyze_hit_key(10)
+
+    def test_listing_lookup_by_id_and_row_index(self):
+        listings = [{"id": "a"}, {"id": "b"}]
+        assert listing_for_analyze_id(listings, "b")["id"] == "b"
+        assert listing_for_analyze_id(listings, "row:0")["id"] == "a"
+        assert listing_for_analyze_id(listings, "missing") is None
+        assert listing_for_analyze_id(listings, "") is None
+
+    def test_popup_opens_analyze_not_realtor(self):
+        popup = _folium_popup_html(
+            {
+                "index": 2,
+                "id": "R1",
+                "street": "123 Main",
+                "price": "$2,800",
+                "match_pct": 80,
+                "facts": "2 bd",
+                "url": "https://www.realtor.ca/listing/R1",
+            }
+        )
+        assert "realtor.ca" not in popup
+        assert "rsaOpenAnalyze(2)" in popup
+        assert "Analyze listing" in popup
+        assert "View listing" not in popup
+        assert "<a " not in popup
+        assert 'target="_blank"' not in popup
+        assert popup.startswith('<button type="button"')
+
+    def test_popup_without_index_has_no_analyze_control(self):
+        popup = _folium_popup_html({"street": "X", "price": "—"})
+        assert "rsaOpenAnalyze" not in popup
+        assert "Analyze listing" not in popup
+        assert "<button" not in popup
+
+    def test_analyze_anchor_is_a_button_not_a_link(self):
+        html = _folium_analyze_anchor(3, "label")
+        assert html.startswith('<button type="button"')
+        assert "<a " not in html
+        assert "rsaOpenAnalyze(3)" in html
+        assert "href=" not in html
+
+    def test_map_points_keep_listing_list_index(self):
+        listings = [
+            {"id": "a", "latitude": 49.28, "longitude": -123.12},
+            {"id": "b"},
+            {"id": "c", "latitude": 49.29, "longitude": -123.13},
+        ]
+        points, _, _ = _build_map_data(listings)
+        assert [pt["index"] for pt in points] == [0, 2]
+        assert points[0]["id"] == "a"
+        assert points[1]["id"] == "c"
+
+    def test_map_analyze_script_reaches_parent_app(self):
+        script = _folium_analyze_js()
+        assert "querySelectorAll" in script
+        assert "w.parent" in script
+        assert "postMessage" in script
+        assert "location.assign" not in script
+        assert "location.href" not in script
+        assert "window.open" not in script
+        assert 'target="_blank"' not in script
+        wrapped = _folium_analyze_script()
+        assert wrapped.startswith("<script>")
+        assert "rsaOpenAnalyze" in wrapped
+
+    def test_map_document_html_has_no_nested_srcdoc_and_wires_clicks(self):
+        import pytest
+        from rental_search_agent import streamlit_results as sr
+
+        if sr.folium is None:
+            pytest.skip("folium is not installed")
+        points = [
+            {
+                "index": 0,
+                "lat": 49.28,
+                "lon": -123.12,
+                "label": "1",
+                "street": "123 Main",
+                "price": "$2,800",
+            }
+        ]
+        m = _make_folium_map(points, 49.28, -123.12, "rank")
+        html = _folium_map_document_html(m)
+        assert 'srcdoc="' not in html
+        assert "<iframe srcdoc" not in html.lower()
+        assert "rsaOpenAnalyze" in html
+        assert "rsaOpenAnalyze(0)" in html
+        assert ".on(" in html
+        assert "click" in html
+        assert "st-key-maphit_" in html

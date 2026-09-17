@@ -105,6 +105,7 @@ from rental_search_agent.streamlit_results import (
     _format_map_price_label,
     _format_match_score,
     _listings_to_table_rows,
+    consume_analyze_query_param,
     listing_match_score,
     normalize_map_label_mode,
     normalize_results_view,
@@ -1919,7 +1920,12 @@ def _main_body() -> None:
     if last_sort_by is None or last_sort_by in ("semantic_score", "match_score"):
         listings = _apply_default_match_score_sort(listings)
 
-    # Analysis card at top: when user clicked Analyze, run analysis and show result
+    consume_analyze_query_param(
+        listings,
+        fallback_listings=st.session_state.get("search_master") or [],
+    )
+
+    # Analysis card at top: when the user opened Analyze, run analysis and show result
     # before the search results so the detail view is immediately visible.
     analyze_listing_id = st.session_state.get("analyze_listing_id")
     analyze_listing = st.session_state.get("analyze_listing")

@@ -359,6 +359,10 @@ class TestAnalyzeButtonKey:
         assert _analyze_button_key({"id": None}, 4) == "analyze_row_4"
         assert _analyze_button_key({"id": ""}, 5) == "analyze_row_5"
 
+    def test_optional_prefix(self):
+        assert _analyze_button_key({"id": "abc"}, 0, "table_photo") == "table_photo_abc"
+        assert _analyze_button_key({}, 2, "grid_addr") == "grid_addr_row_2"
+
 
 class TestFormatMapPriceLabel:
     def test_formats_typical_rent(self):

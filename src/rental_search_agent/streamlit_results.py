@@ -310,15 +310,123 @@ def listing_result_identity(listing: dict, fallback_index: int) -> dict[str, Any
     }
 
 
-def request_listing_analysis(listing: dict) -> None:
-    """Shared Analyze action: same session keys as Grid/Table Analyze buttons."""
+ANALYZE_QUERY_PARAM = "analyze"
+ANALYZE_MESSAGE_TYPE = "rsa-analyze-listing"
+
+
+def select_listing_for_analysis(listing: dict) -> None:
+    """Bind Analyze session keys to this listing and drop a stale cached result."""
     listing_id = listing.get("id")
     st.session_state["analyze_listing_id"] = listing_id
     st.session_state["analyze_listing"] = listing
     cached = st.session_state.get("analysis_result")
     if isinstance(cached, dict) and listing_id in cached:
         cached.pop(listing_id, None)
+
+
+def request_listing_analysis(listing: dict) -> None:
+    """Open Analyze for a listing (photo/address/map clicks)."""
+    select_listing_for_analysis(listing)
     st.rerun()
+
+
+def listing_analyze_id(listing: dict, index: int) -> str:
+    """Stable id for Analyze map-hit keys / lookup."""
+    listing_id = listing.get("id") if isinstance(listing, dict) else None
+    if listing_id is None or listing_id == "":
+        return f"row:{index}"
+    return str(listing_id)
+
+
+def map_analyze_hit_key(index: int) -> str:
+    """Widget key for a hidden map Analyze trigger. Trailing x avoids prefix clashes."""
+    return f"maphit_{int(index)}x"
+
+
+def listing_for_analyze_id(listings: list[dict], analyze_id: str) -> dict | None:
+    """Find a listing by id, or by ``row:N`` index fallback."""
+    wanted = str(analyze_id or "").strip()
+    if not wanted:
+        return None
+    if wanted.startswith("row:"):
+        try:
+            idx = int(wanted.split(":", 1)[1])
+        except ValueError:
+            return None
+        if 0 <= idx < len(listings) and isinstance(listings[idx], dict):
+            return listings[idx]
+        return None
+    for item in listings:
+        if isinstance(item, dict) and str(item.get("id") or "") == wanted:
+            return item
+    return None
+
+
+def consume_analyze_query_param(
+    listings: list[dict],
+    *,
+    fallback_listings: list[dict] | None = None,
+) -> None:
+    """If ``?analyze=`` is present, open that listing and clear the param."""
+    try:
+        raw = st.query_params.get(ANALYZE_QUERY_PARAM)
+    except Exception:
+        return
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    raw = str(raw or "").strip()
+    if not raw:
+        return
+    listing = listing_for_analyze_id(listings, raw)
+    if listing is None and fallback_listings:
+        listing = listing_for_analyze_id(fallback_listings, raw)
+    try:
+        del st.query_params[ANALYZE_QUERY_PARAM]
+    except Exception:
+        pass
+    if listing is not None:
+        select_listing_for_analysis(listing)
+
+
+def _click_analyze_hit_js(index_expr: str = "index") -> str:
+    """JS that finds and clicks the in-page Streamlit Analyze hit button."""
+    return f"""
+    var needle = "st-key-maphit_" + String({index_expr}) + "x";
+    var nodes = document.querySelectorAll("[class*='" + needle + "']");
+    for (var i = 0; i < nodes.length; i++) {{
+      var btn = nodes[i].tagName === "BUTTON" ? nodes[i] : nodes[i].querySelector("button");
+      if (btn) {{ btn.click(); return true; }}
+    }}
+    return false;
+"""
+
+
+def inject_analyze_bridge_js() -> None:
+    """Receive map-iframe Analyze clicks and click the matching in-page Streamlit button."""
+    click_js = _click_analyze_hit_js("index")
+    markup = (
+        '<div hidden aria-hidden="true"></div>\n'
+        "<script>\n"
+        "(function() {\n"
+        "  if (window.__rsaAnalyzeBridge) return;\n"
+        "  window.__rsaAnalyzeBridge = true;\n"
+        "  function clickAnalyzeHit(index) {\n"
+        f"{click_js}\n"
+        "  }\n"
+        "  window.addEventListener('message', function(event) {\n"
+        "    var data = event.data;\n"
+        f"    if (!data || data.type !== '{ANALYZE_MESSAGE_TYPE}') return;\n"
+        "    var index = data.index;\n"
+        "    if (index === undefined || index === null || index === '') return;\n"
+        "    clickAnalyzeHit(index);\n"
+        "  });\n"
+        "})();\n"
+        "</script>\n"
+    )
+    try:
+        st.html(markup, unsafe_allow_javascript=True)
+    except TypeError:
+        st.html(markup)
 
 
 @dataclass(frozen=True)
@@ -540,12 +648,12 @@ def _format_listing_price(listing: dict) -> str:
     return _plain_display_text(listing.get("price_display"))
 
 
-def _analyze_button_key(listing: dict, index: int) -> str:
-    """Stable unique widget key for Analyze. Empty/None ids must not collide."""
+def _analyze_button_key(listing: dict, index: int, prefix: str = "analyze") -> str:
+    """Stable unique widget key for Analyze triggers. Empty/None ids must not collide."""
     listing_id = listing.get("id")
     if listing_id is None or listing_id == "":
-        return f"analyze_row_{index}"
-    return f"analyze_{listing_id}"
+        return f"{prefix}_row_{index}"
+    return f"{prefix}_{listing_id}"
 
 
 def _format_map_price_label(listing: dict) -> str:
@@ -570,6 +678,7 @@ def inject_results_css() -> None:
     """Scoped styles for search-result Grid and compact Match (theme-variable friendly)."""
     with st.container(key="rsa_hidden_css_results"):
         _inject_results_css_markup()
+    inject_analyze_bridge_js()
 
 
 def _inject_results_css_markup() -> None:
@@ -641,6 +750,11 @@ def _inject_results_css_markup() -> None:
             opacity: 0.7;
             font-size: 0.85rem;
         }
+        .rsa-card-photo-link {
+            display: block;
+            width: 100%;
+            line-height: 0;
+        }
         .rsa-card-rank {
             position: absolute;
             top: 0.45rem;
@@ -653,6 +767,7 @@ def _inject_results_css_markup() -> None:
             border-radius: 999px;
             background: rgba(0,0,0,0.55);
             color: #fff;
+            pointer-events: none;
         }
         .rsa-card-price {
             font-size: 1.2rem;
@@ -663,8 +778,6 @@ def _inject_results_css_markup() -> None:
         .rsa-card-match { display: flex; justify-content: flex-end; align-items: center; }
         .rsa-card-address { min-height: 2.55rem; margin-top: 0.15rem; }
         .rsa-card-street { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
-        .rsa-card-street a { color: inherit; text-decoration: none; }
-        .rsa-card-street a:hover { text-decoration: underline; }
         .rsa-card-locality { opacity: 0.7; font-size: 0.85rem; line-height: 1.35; margin-top: 0.1rem; overflow-wrap: anywhere; }
         .rsa-card-facts { min-height: 1.25rem; opacity: 0.82; font-size: 0.9rem; margin: 0.25rem 0 0.15rem; overflow-wrap: anywhere; }
         .rsa-card-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.2rem 0 0.15rem; }
@@ -706,8 +819,6 @@ def _inject_results_css_markup() -> None:
             opacity: 0.7;
         }
         .rsa-table-street { font-weight: 600; font-size: 0.82rem; line-height: 1.25; overflow-wrap: anywhere; word-break: break-word; }
-        .rsa-table-street a { color: inherit; text-decoration: none; }
-        .rsa-table-street a:hover { text-decoration: underline; }
         .rsa-table-locality { opacity: 0.68; font-size: 0.72rem; line-height: 1.25; margin-top: 0.05rem; overflow-wrap: anywhere; }
         .rsa-table-prox { font-size: 0.75rem; line-height: 1.3; overflow-wrap: anywhere; }
         .rsa-table-prox-ok { opacity: 0.9; }
@@ -720,21 +831,22 @@ def _inject_results_css_markup() -> None:
         .rsa-map-summary-street { font-size: 0.82rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
         .rsa-map-summary-facts { font-size: 0.75rem; opacity: 0.75; overflow-wrap: anywhere; }
         .rsa-map-summary-price { overflow-wrap: anywhere; }
-        /* Clickable map-summary thumbs (Streamlit button styled as photo). */
-        [class*="st-key-map_summary_photo_"] {
-            width: 240px !important;
+        /* Clickable photo thumbs (Streamlit button styled as photo) open Analyze. */
+        [class*="st-key-map_summary_photo_"],
+        [class*="st-key-table_photo_"] {
             max-width: 100% !important;
         }
-        [class*="st-key-map_summary_photo_"] button {
+        [class*="st-key-map_summary_photo_"] { width: 240px !important; }
+        [class*="st-key-table_photo_"] { width: 64px !important; }
+        [class*="st-key-map_summary_photo_"] button,
+        [class*="st-key-table_photo_"] button {
             display: block !important;
-            width: 240px !important;
             max-width: 100% !important;
             aspect-ratio: 16 / 10 !important;
             min-height: 0 !important;
             height: auto !important;
             padding: 0 !important;
             margin: 0 !important;
-            border-radius: 0.35rem !important;
             border: none !important;
             background-color: rgba(128, 128, 128, 0.12) !important;
             background-size: cover !important;
@@ -747,14 +859,98 @@ def _inject_results_css_markup() -> None:
             box-shadow: none !important;
             cursor: pointer !important;
         }
-        [class*="st-key-map_summary_photo_"] button:hover {
+        [class*="st-key-map_summary_photo_"] button {
+            width: 240px !important;
+            border-radius: 0.35rem !important;
+        }
+        [class*="st-key-table_photo_"] button {
+            width: 64px !important;
+            border-radius: 0.3rem !important;
+        }
+        [class*="st-key-map_summary_photo_"] button:hover,
+        [class*="st-key-table_photo_"] button:hover {
             opacity: 0.92;
             border: none !important;
         }
-        [class*="st-key-map_summary_photo_"] button p {
+        [class*="st-key-map_summary_photo_"] button p,
+        [class*="st-key-table_photo_"] button p,
+        [class*="st-key-gphoto_btn_"] button p {
             color: transparent !important;
             font-size: 0 !important;
             margin: 0 !important;
+        }
+        [class*="st-key-gphoto_box_"] {
+            position: relative !important;
+            width: 100% !important;
+        }
+        [class*="st-key-gphoto_btn_"] {
+            width: 100% !important;
+        }
+        [class*="st-key-gphoto_btn_"] button {
+            display: block !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            aspect-ratio: 16 / 10 !important;
+            min-height: 0 !important;
+            height: auto !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            border: none !important;
+            border-radius: 0.55rem !important;
+            background-color: rgba(128, 128, 128, 0.12) !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
+            color: transparent !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+            overflow: hidden !important;
+            box-shadow: none !important;
+            cursor: pointer !important;
+        }
+        [class*="st-key-gphoto_btn_"] button:hover {
+            opacity: 0.92;
+            border: none !important;
+        }
+        [class*="st-key-gphoto_box_"] .rsa-card-rank {
+            position: absolute;
+            top: 0.45rem;
+            left: 0.45rem;
+            z-index: 1;
+            pointer-events: none;
+        }
+        [class*="st-key-rsa_analyze_hit_host"] {
+            position: absolute !important;
+            left: -10000px !important;
+            width: 1px !important;
+            height: 1px !important;
+            overflow: hidden !important;
+            opacity: 0 !important;
+        }
+        [class*="st-key-table_addr_"] button,
+        [class*="st-key-grid_addr_"] button {
+            background: none !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            min-height: 0 !important;
+            height: auto !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            white-space: normal !important;
+            font-weight: 600 !important;
+            color: inherit !important;
+            line-height: 1.3 !important;
+        }
+        [class*="st-key-table_addr_"] button {
+            font-size: 0.82rem !important;
+        }
+        [class*="st-key-table_addr_"] button:hover,
+        [class*="st-key-grid_addr_"] button:hover {
+            text-decoration: underline !important;
+            background: none !important;
+            border: none !important;
         }
         </style>
         """,
@@ -802,12 +998,7 @@ def table_column_schema(listings: list[dict]) -> list[TableColumn]:
     ]
     if table_has_visible_tags(listings):
         columns.append(TableColumn("tags", "Tags", 0.85))
-    columns.extend(
-        [
-            TableColumn("proximity", "Proximity", 1.35),
-            TableColumn("analyze", "Analyze", 0.7),
-        ]
-    )
+    columns.append(TableColumn("proximity", "Proximity", 1.35))
     return columns
 
 
@@ -844,44 +1035,68 @@ def _listings_to_table_rows(listings: list[dict]) -> list[dict]:
     return rows
 
 
-def _render_table_photo(photo_url: str, listing_url: str) -> None:
-    """Compact 64px 16:10 thumbnail. Safe HTTP(S) only."""
-    safe_listing = safe_http_url(listing_url) or ""
-    safe_photo = safe_http_url(photo_url) or ""
+def _render_analyze_photo_button(
+    listing: dict,
+    index: int,
+    *,
+    key_prefix: str,
+) -> None:
+    """Streamlit button styled as a photo; click opens Analyze."""
+    key = f"{key_prefix}_{index}"
+    safe_photo = safe_http_url(listing.get("photo_url") or "") or ""
     if safe_photo:
-        img = f'<img src="{html.escape(safe_photo)}" alt="" class="rsa-table-photo-img">'
-        body = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{img}</a>'
-            if safe_listing
-            else img
+        css_url = escape_css_style_url(safe_photo)
+        st.markdown(
+            f"<style>"
+            f'[class*="st-key-{key}"] button {{'
+            f'background-image: url("{css_url}") !important;'
+            f"}}"
+            f"</style>",
+            unsafe_allow_html=True,
         )
-    elif safe_listing:
-        body = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener" '
-            f'class="rsa-table-photo-fallback">View</a>'
-        )
-    else:
-        body = '<div class="rsa-table-photo-fallback" aria-hidden="true"></div>'
-    st.markdown(f'<div class="rsa-table-photo">{body}</div>', unsafe_allow_html=True)
+    if st.button("Open analysis", key=key, help="Open analysis"):
+        request_listing_analysis(listing)
 
 
-def _render_table_address(listing: dict) -> None:
+def _render_analyze_address_button(
+    listing: dict,
+    index: int,
+    *,
+    key_prefix: str,
+    headline: str,
+    locality: str,
+    locality_class: str,
+) -> None:
+    """Street as a tertiary button that opens Analyze; locality stays muted text."""
+    key = f"{key_prefix}_{index}"
+    if st.button(
+        headline or "—",
+        key=key,
+        type="tertiary",
+        help="Open analysis",
+    ):
+        request_listing_analysis(listing)
+    if locality:
+        st.markdown(
+            f'<div class="{locality_class}">{html.escape(locality)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _render_table_photo(listing: dict, index: int) -> None:
+    """Compact 64px 16:10 thumbnail; click opens Analyze."""
+    _render_analyze_photo_button(listing, index, key_prefix="table_photo")
+
+
+def _render_table_address(listing: dict, index: int) -> None:
     headline, locality = listing_address_parts(listing)
-    safe_listing = safe_http_url(listing.get("url") or "") or ""
-    street = html.escape(headline or "—")
-    if safe_listing:
-        street_html = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{street}</a>'
-        )
-    else:
-        street_html = street
-    loc_html = (
-        f'<div class="rsa-table-locality">{html.escape(locality)}</div>' if locality else ""
-    )
-    st.markdown(
-        f'<div class="rsa-table-address"><div class="rsa-table-street">{street_html}</div>'
-        f"{loc_html}</div>",
-        unsafe_allow_html=True,
+    _render_analyze_address_button(
+        listing,
+        index,
+        key_prefix="table_addr",
+        headline=headline,
+        locality=locality,
+        locality_class="rsa-table-locality",
     )
 
 
@@ -908,10 +1123,10 @@ def _render_table_cell(column_key: str, listing: dict, index: int) -> None:
         )
         return
     if column_key == "photo":
-        _render_table_photo(listing.get("photo_url") or "", listing.get("url") or "")
+        _render_table_photo(listing, index)
         return
     if column_key == "address":
-        _render_table_address(listing)
+        _render_table_address(listing, index)
         return
     if column_key == "type":
         st.write(_plain_display_text(listing.get("house_category")))
@@ -950,9 +1165,6 @@ def _render_table_cell(column_key: str, listing: dict, index: int) -> None:
     if column_key == "proximity":
         _render_table_proximity(listing)
         return
-    if column_key == "analyze":
-        if st.button("Analyze", key=_analyze_button_key(listing, index)):
-            request_listing_analysis(listing)
 
 
 def _render_results_table(listings: list[dict]) -> None:
@@ -978,54 +1190,43 @@ def _render_results_table(listings: list[dict]) -> None:
             st.markdown('<div class="rsa-table-rule"></div>', unsafe_allow_html=True)
 
 
-def _render_grid_photo(photo_url: str, listing_url: str, rank: Any) -> None:
-    """Uniform 16:10 card image with a secondary rank badge. Safe HTTP(S) only."""
-    safe_listing = safe_http_url(listing_url) or ""
-    safe_photo = safe_http_url(photo_url) or ""
-    rank_html = f'<span class="rsa-card-rank">#{html.escape(str(rank))}</span>'
-    if safe_photo:
-        img = f'<img src="{html.escape(safe_photo)}" alt="" class="rsa-card-photo-img">'
-        body = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{img}</a>'
-            if safe_listing
-            else img
+def _render_grid_photo(listing: dict, index: int, rank: Any) -> None:
+    """Full-width 16:10 card image as an in-page Analyze button (no new tab / reload)."""
+    box_key = f"gphoto_box_{index}x"
+    btn_key = f"gphoto_btn_{index}x"
+    safe_photo = safe_http_url(listing.get("photo_url") or "") or ""
+    with st.container(key=box_key):
+        if safe_photo:
+            css_url = escape_css_style_url(safe_photo)
+            st.markdown(
+                f"<style>"
+                f'[class*="st-key-{btn_key}"] button {{'
+                f'background-image: url("{css_url}") !important;'
+                f"}}"
+                f"</style>",
+                unsafe_allow_html=True,
+            )
+        if st.button("Open analysis", key=btn_key, help="Open analysis"):
+            request_listing_analysis(listing)
+        st.markdown(
+            f'<span class="rsa-card-rank">#{html.escape(str(rank))}</span>',
+            unsafe_allow_html=True,
         )
-    elif safe_listing:
-        body = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener" '
-            f'class="rsa-card-photo-fallback-link">View listing</a>'
-        )
-    else:
-        body = '<div class="rsa-card-photo-fallback" aria-hidden="true"></div>'
-    st.markdown(
-        f'<div class="rsa-card-photo">{body}{rank_html}</div>',
-        unsafe_allow_html=True,
-    )
 
 
-def _render_grid_address(headline: str, locality: str, listing_url: str) -> None:
-    """Street as primary (linked when safe); locality muted."""
-    safe_listing = safe_http_url(listing_url) or ""
-    street = html.escape(headline or "—")
-    if safe_listing:
-        street_html = (
-            f'<a href="{html.escape(safe_listing)}" target="_blank" rel="noopener">{street}</a>'
-        )
-    else:
-        street_html = street
-    loc_html = (
-        f'<div class="rsa-card-locality">{html.escape(locality)}</div>' if locality else ""
-    )
-    st.markdown(
-        f'<div class="rsa-card-address"><div class="rsa-card-street">{street_html}</div>'
-        f"{loc_html}</div>",
-        unsafe_allow_html=True,
+def _render_grid_address(listing: dict, index: int, headline: str, locality: str) -> None:
+    """Street as primary (opens Analyze); locality muted."""
+    _render_analyze_address_button(
+        listing,
+        index,
+        key_prefix="grid_addr",
+        headline=headline,
+        locality=locality,
+        locality_class="rsa-card-locality",
     )
 
 
 def _render_grid_card(listing: dict, index: int) -> None:
-    url = listing.get("url") or ""
-    photo_url = listing.get("photo_url") or ""
     rank = listing_rank(listing, index)
     headline, locality = listing_address_parts(listing)
     facts = format_property_basics(listing)
@@ -1033,13 +1234,13 @@ def _render_grid_card(listing: dict, index: int) -> None:
     prox_lines = proximity_card_lines(parse_proximity_display(listing.get("proximity")))
     price = html.escape(_format_listing_price(listing))
     with st.container(border=True):
-        _render_grid_photo(photo_url, url, rank)
+        _render_grid_photo(listing, index, rank)
         price_col, match_col = st.columns([1.35, 1])
         with price_col:
             st.markdown(f'<div class="rsa-card-price">{price}</div>', unsafe_allow_html=True)
         with match_col:
             render_compact_match_score(listing, size=32, show_label=True)
-        _render_grid_address(headline, locality, url)
+        _render_grid_address(listing, index, headline, locality)
         if facts:
             st.markdown(
                 f'<div class="rsa-card-facts">{html.escape(facts)}</div>',
@@ -1062,12 +1263,10 @@ def _render_grid_card(listing: dict, index: int) -> None:
             )
         else:
             st.markdown('<div class="rsa-card-prox"></div>', unsafe_allow_html=True)
-        if st.button("Analyze", type="primary", key=_analyze_button_key(listing, index)):
-            request_listing_analysis(listing)
 
 
 def _render_results_grid(listings: list[dict]) -> None:
-    """Render search results as a 3-column Grid. Photo and street open the listing."""
+    """Render search results as a 3-column Grid. Photo and street open Analyze."""
     if not listings:
         return
     for row_start in range(0, len(listings), _CARDS_PER_ROW):
@@ -1255,63 +1454,153 @@ def _map_point_label(listing: dict, index: int, label_mode: str) -> str:
     return str(listing_rank(listing, index))
 
 
+def _point_analyze_index(point: dict) -> int | None:
+    raw = point.get("index") if isinstance(point, dict) else None
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0:
+        return None
+    return idx
+
+
+def _folium_analyze_anchor(index: int | None, inner_html: str, extra_style: str = "") -> str:
+    """Wrap inner HTML in an in-page Analyze control. inner_html must already be escaped."""
+    if index is None:
+        return inner_html
+    base = (
+        "background:transparent;border:none;padding:0;margin:0;cursor:pointer;"
+        "font:inherit;text-align:left;display:block;width:100%;"
+    )
+    style_attr = f' style="{base}{extra_style}"'
+    return (
+        f'<button type="button"{style_attr} '
+        f'onclick="return window.rsaOpenAnalyze({index});">'
+        f"{inner_html}</button>"
+    )
+
+
+def _folium_analyze_js() -> str:
+    """Open Analyze by clicking the parent Streamlit button; postMessage as fallback.
+
+    Folium is shown inside Streamlit's components iframe (and historically a nested
+    srcdoc iframe). postMessage to ``window.parent`` alone never reaches the app.
+    """
+    return f"""
+window.rsaOpenAnalyze = function(index) {{
+  var payload = {{type: "{ANALYZE_MESSAGE_TYPE}", index: index}};
+  var needle = "st-key-maphit_" + String(index) + "x";
+  var w = window;
+  while (w.parent && w.parent !== w) {{
+    w = w.parent;
+    try {{
+      var nodes = w.document.querySelectorAll("[class*='" + needle + "']");
+      for (var i = 0; i < nodes.length; i++) {{
+        var btn = nodes[i].tagName === "BUTTON" ? nodes[i] : nodes[i].querySelector("button");
+        if (btn) {{ btn.click(); return false; }}
+      }}
+    }} catch (err) {{}}
+    try {{ w.postMessage(payload, "*"); }} catch (err) {{}}
+  }}
+  return false;
+}};
+"""
+
+
+def _folium_analyze_script() -> str:
+    return f"<script>\n{_folium_analyze_js()}\n</script>"
+
+
 def _folium_popup_html(point: dict) -> str:
     street = html.escape(str(point.get("street") or "Listing"))
     price = html.escape(str(point.get("price") or "—"))
     match_pct = point.get("match_pct")
     match_txt = "—" if match_pct is None else f"{int(match_pct)}%"
     facts = html.escape(str(point.get("facts") or ""))
-    url = point.get("url") or ""
+    analyze_index = _point_analyze_index(point)
     parts = [f"<strong>{street}</strong>", price, f"Match {html.escape(match_txt)}"]
     if facts:
         parts.append(facts)
-    if url:
-        parts.append(
-            f'<a href="{html.escape(url)}" target="_blank" rel="noopener">View listing</a>'
-        )
-    return "<br>".join(parts)
+    if analyze_index is not None:
+        parts.append("Analyze listing")
+    body = "<br>".join(parts)
+    if analyze_index is None:
+        return body
+    return _folium_analyze_anchor(
+        analyze_index,
+        body,
+        extra_style="text-decoration:none;color:inherit;",
+    )
 
 
 def _folium_marker_icon(point: dict, label_mode: str):
     """DivIcon: price rectangle, match pill (shared score color), or rank circle."""
-    url_escaped = html.escape(point.get("url") or "#")
-    label_escaped = html.escape(str(point.get("label") or ""))
+    label_html = html.escape(str(point.get("label") or ""))
+    cursor = "cursor:pointer;" if _point_analyze_index(point) is not None else ""
     if label_mode == "price":
         marker_html = (
-            '<div style="font-size:12px;font-weight:normal;color:white;text-align:center;'
-            "line-height:20px;padding:1px 6px;min-width:54px;height:22px;border-radius:4px;"
-            f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;white-space:nowrap;">'
-            f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-            f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+            f'<div style="font-size:12px;font-weight:normal;color:white;text-align:center;'
+            f"line-height:20px;padding:1px 6px;min-width:54px;height:22px;border-radius:4px;"
+            f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;white-space:nowrap;{cursor}">'
+            f"{label_html}</div>"
         )
         return folium.DivIcon(icon_size=(72, 26), icon_anchor=(36, 13), html=marker_html)
     if label_mode == "match":
         bg = html.escape(str(point.get("match_color") or "#888888"))
         marker_html = (
-            '<div style="font-size:12px;font-weight:650;color:white;text-align:center;'
-            "line-height:20px;padding:1px 7px;min-width:40px;height:22px;border-radius:999px;"
-            f'background-color:{bg};border:2px solid white;white-space:nowrap;">'
-            f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-            f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+            f'<div style="font-size:12px;font-weight:650;color:white;text-align:center;'
+            f"line-height:20px;padding:1px 7px;min-width:40px;height:22px;border-radius:999px;"
+            f'background-color:{bg};border:2px solid white;white-space:nowrap;{cursor}">'
+            f"{label_html}</div>"
         )
         return folium.DivIcon(icon_size=(56, 26), icon_anchor=(28, 13), html=marker_html)
     marker_html = (
-        '<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
-        "line-height:30px;width:30px;height:30px;border-radius:50%;"
-        f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;">'
-        f'<a href="{url_escaped}" target="_blank" rel="noopener" '
-        f'style="color:white;text-decoration:none;">{label_escaped}</a></div>'
+        f'<div style="font-size:14pt;font-weight:bold;color:white;text-align:center;'
+        f"line-height:30px;width:30px;height:30px;border-radius:50%;"
+        f'background-color:{_MAP_MARKER_BLUE};border:2px solid white;{cursor}">'
+        f"{label_html}</div>"
     )
     return folium.DivIcon(icon_size=(32, 32), icon_anchor=(16, 16), html=marker_html)
 
 
 def _add_folium_markers(m, map_points: list[dict], label_mode: str) -> None:
+    from folium.elements import EventHandler
+    from folium.utilities import JsCode
+
     for pt in map_points:
-        folium.Marker(
+        marker = folium.Marker(
             location=[pt["lat"], pt["lon"]],
             icon=_folium_marker_icon(pt, label_mode),
             popup=folium.Popup(_folium_popup_html(pt), max_width=240),
-        ).add_to(m)
+        )
+        analyze_index = _point_analyze_index(pt)
+        if analyze_index is not None:
+            marker.add_child(
+                EventHandler(
+                    "click",
+                    JsCode(f"function(){{window.rsaOpenAnalyze({analyze_index});}}"),
+                )
+            )
+        marker.add_to(m)
+
+
+def _inject_folium_analyze_script(m) -> None:
+    try:
+        from branca.element import Element
+
+        m.get_root().script.add_child(
+            Element(_folium_analyze_js()),
+            name="rsa_analyze",
+            index=-1,
+        )
+    except Exception:
+        logger.debug("Could not inject Folium analyze script", exc_info=True)
+
+
+def _folium_map_document_html(m) -> str:
+    """Full map document for Streamlit's iframe — not Folium's nested srcdoc wrapper."""
+    return m.get_root().render()
 
 
 def _make_folium_map(
@@ -1326,6 +1615,7 @@ def _make_folium_map(
     else:
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
         m.fit_bounds([[pt["lat"], pt["lon"]] for pt in map_points], padding=(28, 28))
+    _inject_folium_analyze_script(m)
     _add_folium_markers(m, map_points, label_mode)
     return m
 
@@ -1333,6 +1623,7 @@ def _make_folium_map(
 @st.cache_data(show_spinner=False)
 def _get_map_html_cached(listings_json: str, label_mode: str = "rank") -> str | None:
     """Build Folium map HTML from listings. Cached by listings content and label_mode."""
+    _ = "analyze-parent-walk-v2"
     if folium is None:
         return None
     listings = json.loads(listings_json) if listings_json else []
@@ -1340,7 +1631,7 @@ def _get_map_html_cached(listings_json: str, label_mode: str = "rank") -> str | 
     if not map_points or center_lat is None or center_lon is None:
         return None
     m = _make_folium_map(map_points, center_lat, center_lon, label_mode)
-    return m._repr_html_()
+    return _folium_map_document_html(m)
 
 
 def _build_map_data(
@@ -1369,6 +1660,7 @@ def _build_map_data(
         pct, color = match_score_display(listing)
         points.append(
             {
+                "index": i,
                 "id": listing.get("id"),
                 "rank": listing_rank(listing, i),
                 "lat": lat,
@@ -1402,7 +1694,7 @@ def _render_results_map(
     """Render Folium (fitted bounds) or PyDeck fallback. Match labels must not crash."""
     if folium is not None:
         m = _make_folium_map(map_points, center_lat, center_lon, label_mode)
-        st.components.v1.html(m._repr_html_(), height=400, scrolling=False)
+        st.components.v1.html(_folium_map_document_html(m), height=400, scrolling=False)
         return
     if pdk is not None:
         scatter = pdk.Layer(
@@ -1497,8 +1789,17 @@ def _render_map_summaries(listings: list[dict]) -> None:
                     )
 
 
+def _render_hidden_analyze_hits(listings: list[dict]) -> None:
+    """In-page Analyze buttons for map iframe clicks (clipped host, still clickable)."""
+    with st.container(key="rsa_analyze_hit_host"):
+        for i, listing in enumerate(listings):
+            if st.button("Open analysis", key=map_analyze_hit_key(i)):
+                request_listing_analysis(listing)
+
+
 def _render_map_panel(listings: list[dict]) -> None:
     """Map as the active results view: labels, coverage, Folium/PyDeck, summaries."""
+    _render_hidden_analyze_hits(listings)
     prepare_map_label_widget_state(st.session_state)
     _spacer, label_col = st.columns([5, 1.35])
     with label_col:
